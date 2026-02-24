@@ -1,10 +1,10 @@
 {
   "bots": {
     "SPEEDU Bot": {
-      "total_starts": 4,
+      "total_starts": 6,
       "total_crashes": 0,
-      "current_status": "running",
-      "uptime_start": "2026-02-23 10:18:22",
+      "current_status": "stopped",
+      "uptime_start": null,
       "events": [
         {
           "type": "start",
@@ -31,14 +31,34 @@
         {
           "type": "start",
           "timestamp": "2026-02-23 10:18:22"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-24 13:35:03"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-24 14:15:57",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:40:54"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-24 21:10:14"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-24 21:10:32",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:00:18"
         }
       ]
     },
     "Grok Bot": {
-      "total_starts": 4,
+      "total_starts": 6,
       "total_crashes": 0,
-      "current_status": "running",
-      "uptime_start": "2026-02-23 10:18:23",
+      "current_status": "stopped",
+      "uptime_start": null,
       "events": [
         {
           "type": "start",
@@ -65,14 +85,34 @@
         {
           "type": "start",
           "timestamp": "2026-02-23 10:18:23"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-24 13:35:04"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-24 14:15:57",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:40:53"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-24 21:10:15"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-24 21:10:32",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:00:17"
         }
       ]
     },
     "TikTok Bot": {
-      "total_starts": 4,
+      "total_starts": 6,
       "total_crashes": 0,
-      "current_status": "running",
-      "uptime_start": "2026-02-23 10:18:24",
+      "current_status": "stopped",
+      "uptime_start": null,
       "events": [
         {
           "type": "start",
@@ -105,6 +145,26 @@
         {
           "type": "start",
           "timestamp": "2026-02-23 10:18:24"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-24 13:35:05"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-24 14:15:57",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:40:52"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-24 21:10:16"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-24 21:10:32",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:00:16"
         }
       ]
     }
