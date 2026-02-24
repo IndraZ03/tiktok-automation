@@ -1,0 +1,1074 @@
+"""
+TikTok Multi-Upload Scheduler - Modern Tkinter GUI
+Automates scheduled uploading of multiple videos to TikTok.
+References upload.py for core Selenium automation logic.
+"""
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+import threading
+import json
+import os
+import sys
+import time
+import subprocess
+import random
+import winsound
+from datetime import datetime, timedelta
+
+# ── Selenium imports ──
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+
+# ═══════════════════════════════════════════════════════════════
+# CONSTANTS & COLORS
+# ═══════════════════════════════════════════════════════════════
+BG           = "#0f0f1a"
+BG_CARD      = "#1a1a2e"
+BG_INPUT     = "#16213e"
+FG           = "#e0e0ff"
+FG_DIM       = "#8888aa"
+ACCENT       = "#00d2ff"
+ACCENT2      = "#7b2ff7"
+SUCCESS      = "#00e676"
+ERROR        = "#ff5252"
+WARN         = "#ffc107"
+BORDER       = "#2a2a4a"
+BTN_BG       = "#7b2ff7"
+BTN_FG       = "#ffffff"
+BTN_HOVER    = "#9d5cff"
+BTN_DANGER   = "#ff5252"
+
+DB_FILE = "upload_history.json"
+
+
+# ═══════════════════════════════════════════════════════════════
+# DATABASE  (JSON)
+# ═══════════════════════════════════════════════════════════════
+def load_db():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_db(db):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=2, ensure_ascii=False)
+
+def get_uploaded_videos(folder_name, db):
+    return db.get(folder_name, [])
+
+def mark_uploaded(folder_name, video_name, db):
+    if folder_name not in db:
+        db[folder_name] = []
+    if video_name not in db[folder_name]:
+        db[folder_name].append(video_name)
+    save_db(db)
+
+
+# ═══════════════════════════════════════════════════════════════
+# CORE AUTOMATION (adapted from upload.py)
+# ═══════════════════════════════════════════════════════════════
+def open_chrome_debug(user_data_dir, port):
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    cmd = [chrome_path, f"--remote-debugging-port={port}", f"--user-data-dir={user_data_dir}"]
+    proc = subprocess.Popen(cmd)
+    time.sleep(5)
+    return proc
+
+def connect_selenium(port):
+    opts = Options()
+    opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
+    svc = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=svc, options=opts)
+    return driver
+
+def navigate_upload_page(driver, force=False):
+    """Always force a fresh upload page to avoid leftover state from previous uploads."""
+    if force or "tiktok.com/tiktokstudio/upload" not in driver.current_url:
+        # Navigate away first to ensure a clean state
+        driver.get("https://www.tiktok.com/tiktokstudio/content")
+        time.sleep(3)
+        # Now navigate to upload page (guaranteed fresh)
+        driver.get("https://www.tiktok.com/tiktokstudio/upload")
+        time.sleep(5)
+    # Verify we see the upload input (page fully loaded)
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+    except:
+        # Retry once
+        driver.refresh()
+        time.sleep(5)
+
+def do_upload_file(driver, file_path, log):
+    wait = WebDriverWait(driver, 30)
+    log("Mencari elemen upload...")
+    upload_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+    upload_input.send_keys(file_path)
+    log(f"✓ File disuntikkan: {os.path.basename(file_path)}")
+    time.sleep(5)
+
+def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
+                  schedule_dt, stop_event, add_sound=False):
+    """
+    Full posting flow: description, product, switches, sounds, schedule.
+    schedule_dt: datetime object for when to schedule.
+    """
+    wait = WebDriverWait(driver, 20)
+
+    def safe(fn, msg=""):
+        try:
+            fn()
+        except Exception as e:
+            log(f"⚠ {msg}: {e}")
+
+    # ── Turn on ──
+    try:
+        turn_on = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+            (By.XPATH, "//div[contains(@class, 'Button__content') and text()='Turn on']")))
+        turn_on.click(); time.sleep(2)
+    except:
+        pass
+
+    # ── Description ──
+    log("Mengisi deskripsi...")
+    caption = wait.until(EC.presence_of_element_located(
+        (By.XPATH, "//div[@role='textbox'] | //div[contains(@class, 'notranslate public-DraftEditor-content')]")))
+    caption.click()
+    caption.send_keys(Keys.CONTROL + "a"); caption.send_keys(Keys.BACKSPACE)
+    caption.send_keys(deskripsi); time.sleep(1)
+
+    # ── Add product ──
+    log("Menambahkan produk...")
+    # A – click + Add
+    add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Add']]")))
+    add_btn.click(); time.sleep(2)
+    # B – Next 1
+    n1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Next']]")))
+    n1.click(); time.sleep(2)
+    # C – Radio button selection
+    log(f"STEP C: Memilih produk: {nama_produk_radio[:60]}...")
+    xpath_produk = f"//input[@type='radio' and @name='{nama_produk_radio}']"
+    radio = wait.until(EC.presence_of_element_located((By.XPATH, xpath_produk)))
+    target_radio_wrapper = radio.find_element(By.XPATH, "./..")
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target_radio_wrapper)
+    time.sleep(1)
+    try:
+        target_radio_wrapper.click()
+        log("Klik wrapper produk (standar)")
+    except:
+        driver.execute_script("arguments[0].click();", target_radio_wrapper)
+        log("Klik wrapper produk (JS)")
+    time.sleep(1)
+    log("✓ Radio button produk dipilih")
+
+    # D – Next 2 (Full logic from upload.py with verification & fallbacks)
+    log("STEP D: Mencoba klik Next tombol kedua...")
+    time.sleep(2)
+    
+    next_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
+    log(f"Ditemukan {len(next_buttons)} tombol Next")
+    
+    target_next = None
+    for i, btn in enumerate(next_buttons):
+        is_vis = btn.is_displayed()
+        is_en = btn.is_enabled()
+        cls = btn.get_attribute("class") or ""
+        aria_dis = btn.get_attribute("aria-disabled")
+        log(f"  Tombol {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}, aria-disabled={aria_dis}")
+        
+        if is_vis and "primary" in cls:
+            target_next = btn
+            log(f"  -> TERPILIH sebagai target")
+    
+    if target_next:
+        log("Tombol target ditemukan, mencoba klik...")
+        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_next)
+        time.sleep(1)
+        
+        # Method 1: ActionChains
+        try:
+            actions = ActionChains(driver)
+            actions.move_to_element(target_next).click().perform()
+            log("Klik dengan ActionChains berhasil")
+        except Exception as e_ac:
+            log(f"ActionChains gagal: {e_ac}")
+            # Method 2: Regular click
+            try:
+                target_next.click()
+                log("Klik biasa berhasil")
+            except:
+                # Method 3: JavaScript
+                driver.execute_script("arguments[0].click();", target_next)
+                log("Klik JavaScript berhasil")
+        
+        time.sleep(2)
+        
+        # VERIFICATION: Check if product input appeared
+        input_produk = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
+        
+        if len(input_produk) > 0 and input_produk[0].is_displayed():
+            log("✓ VERIFIKASI BERHASIL: Input nama produk muncul")
+        else:
+            after_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
+            if len(after_buttons) == len(next_buttons):
+                log("✗ VERIFIKASI GAGAL: Tombol Next masih sama, mencoba alternatif...")
+                try:
+                    target_radio_wrapper.send_keys(Keys.ENTER)
+                    log("Mengirim ENTER ke radio button")
+                    time.sleep(2)
+                except:
+                    pass
+                
+                input_produk_after = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
+                if len(input_produk_after) > 0:
+                    log("✓ Metode alternatif berhasil!")
+                else:
+                    raise Exception("Tidak bisa klik Next kedua setelah semua percobaan")
+            else:
+                log("✓ Next kedua berhasil diklik")
+    else:
+        raise Exception("Tombol Next kedua tidak ditemukan")
+
+    # E – Product title input
+    log(f"STEP E: Mengisi judul produk: {nama_produk_input}")
+    pi = wait.until(EC.element_to_be_clickable(
+        (By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")))
+    pi.click()
+    pi.send_keys(Keys.CONTROL + "a"); pi.send_keys(Keys.BACKSPACE)
+    pi.send_keys(nama_produk_input)
+    log(f"✓ Input nama produk diisi dengan: {nama_produk_input}")
+    time.sleep(1)
+
+    # F – Add last (Full logic from upload.py with verification)
+    log("STEP F: Mencoba klik tombol Add terakhir...")
+    time.sleep(2)
+    
+    add_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
+    log(f"Ditemukan {len(add_buttons)} tombol Add")
+    
+    target_add = None
+    for i, btn in enumerate(add_buttons):
+        is_vis = btn.is_displayed()
+        is_en = btn.is_enabled()
+        cls = btn.get_attribute("class") or ""
+        log(f"  Tombol Add {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}")
+        
+        if is_vis:
+            parent_modal = btn.find_elements(By.XPATH, 
+                "./ancestor::div[contains(@class,'modal') or contains(@class,'Modal') or contains(@class,'dialog')]")
+            if parent_modal:
+                log(f"  -> Dalam modal, prioritas tinggi")
+                target_add = btn
+            elif target_add is None:
+                target_add = btn
+                log(f"  -> Target sementara")
+    
+    if target_add:
+        log("Tombol Add target ditemukan, mencoba klik...")
+        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_add)
+        time.sleep(1)
+        
+        try:
+            actions = ActionChains(driver)
+            actions.move_to_element(target_add).click().perform()
+            log("✓ Klik Add dengan ActionChains berhasil")
+        except Exception as e_add:
+            log(f"ActionChains gagal: {e_add}")
+            try:
+                driver.execute_script("arguments[0].click();", target_add)
+                log("✓ Klik Add dengan JavaScript berhasil")
+            except Exception as e_add2:
+                log(f"JavaScript gagal: {e_add2}")
+                try:
+                    loc = target_add.location
+                    sz = target_add.size
+                    x = loc['x'] + sz['width'] // 2
+                    y = loc['y'] + sz['height'] // 2
+                    ac = ActionChains(driver)
+                    ac.move_by_offset(x, y).click().perform()
+                    ac.move_by_offset(-x, -y).perform()
+                    log("✓ Klik Add dengan koordinat berhasil")
+                except Exception as e_add3:
+                    raise Exception(f"Semua metode klik Add gagal: {e_add3}")
+        
+        time.sleep(2)
+        
+        # Verification (wrapped in try/except for stale elements after modal close)
+        try:
+            after_add = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
+            visible_after = [b for b in after_add if b.is_displayed()]
+            # Don't reference old add_buttons - they may be stale after modal close
+            if len(visible_after) == 0:
+                log("✓ VERIFIKASI: Tombol Add hilang (modal tertutup)")
+            else:
+                success_ind = driver.find_elements(By.XPATH, "//*[contains(text(),'added') or contains(text(),'Added')]")
+                if success_ind:
+                    log("✓ VERIFIKASI: Indikator produk ditambahkan")
+                else:
+                    log("⚠ VERIFIKASI: Menunggu modal tertutup...")
+                    time.sleep(2)
+        except Exception:
+            # Stale element = DOM changed = modal closed = success
+            log("✓ VERIFIKASI: DOM berubah (modal tertutup), produk berhasil ditambahkan")
+    else:
+        # Fallback strategies
+        try:
+            alt_add = driver.find_element(By.XPATH, "//button[contains(@class,'primary') and .//div[text()='Add']]")
+            driver.execute_script("arguments[0].click();", alt_add)
+            log("✓ Klik Add dengan selector alternatif")
+        except:
+            try:
+                footer_add = driver.find_element(By.XPATH, "//div[contains(@class,'footer')]//button[.//div[text()='Add']]")
+                driver.execute_script("arguments[0].click();", footer_add)
+                log("✓ Klik Add di footer")
+            except Exception as e_all:
+                raise Exception(f"Tidak bisa klik tombol Add: {e_all}")
+    
+    time.sleep(2)
+    log("✓ Produk ditambahkan")
+
+    # ── G – Show More & Switches ──
+    log("Mengatur switches...")
+    safe(lambda: (
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});",
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@data-e2e='advanced_settings_container']")))),
+        time.sleep(1),
+        wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//div[@data-e2e='advanced_settings_container']"))).click(),
+        time.sleep(2)
+    ), "Show more")
+
+    safe(lambda: (
+        driver.execute_script("arguments[0].click();",
+            wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//div[@data-e2e='disclose_content_container']//div[contains(@class,'Switch__content')]")))),
+        time.sleep(2)
+    ), "Disclose switch")
+
+    safe(lambda: (
+        driver.execute_script("arguments[0].click();",
+            wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//span[contains(.,'Branded content')]/preceding-sibling::label")))),
+        time.sleep(1)
+    ), "Branded content")
+
+    safe(lambda: (
+        driver.execute_script("arguments[0].click();",
+            wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//div[@data-e2e='aigc_container']//div[contains(@class,'Switch__content')]")))),
+        time.sleep(1)
+    ), "AI-generated")
+
+    # ── H, I, J, J2 – Sounds (conditional) ──
+    if add_sound:
+        log("Menambahkan sound...")
+        try:
+            sb = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-button-name='sounds']")))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sb)
+            time.sleep(1); driver.execute_script("arguments[0].click();", sb); time.sleep(3)
+            # Favorites
+            ft = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(
+                (By.XPATH, "//button[@role='tab' and @aria-controls='panel-favorites']")))
+            driver.execute_script("arguments[0].click();", ft); time.sleep(3)
+            # + button
+            plus = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(
+                (By.XPATH, "//button[@data-icon-only='true' and @data-type='stroke' and .//span[@data-icon='PlusBold']]")))
+            driver.execute_script("arguments[0].click();", plus)
+            WebDriverWait(driver, 30).until(
+                lambda d: d.find_element(By.XPATH,
+                    "//button[@data-icon-only='true' and @data-type='stroke' and .//span[@data-icon='PlusBold']]"
+                ).get_attribute("aria-disabled") == "true"
+                or not d.find_element(By.XPATH,
+                    "//button[@data-icon-only='true' and @data-type='stroke' and .//span[@data-icon='PlusBold']]"
+                ).is_enabled()
+            )
+            log("✓ Sound ditambahkan")
+        except Exception as e:
+            log(f"⚠ Sound: {e}")
+
+        # ── J2 – Mute original ──
+        safe(lambda: (
+            driver.execute_script("arguments[0].click();",
+                WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                    (By.XPATH, "//button[@data-icon-only='true' and @data-type='text' and .//span[@data-icon='VolumeUp']]")))),
+            time.sleep(1)
+        ), "Mute original")
+    else:
+        log("⏭ Sound dilewati (tidak diaktifkan)")
+
+    # ── K – Save (only needed after sounds modal) ──
+    if add_sound:
+        log("Klik Save (menutup sounds modal)...")
+        try:
+            sv = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                (By.XPATH, "//div[contains(@class,'Button__content') and contains(@class,'type-primary')]//*[text()='Save']/ancestor::button | //button[.//div[contains(@class,'Button__content') and contains(@class,'type-primary') and .//text()='Save']]")))
+            driver.execute_script("arguments[0].click();", sv); time.sleep(3)
+            log("✓ Sounds saved")
+        except:
+            try:
+                sv2 = driver.find_element(By.XPATH, "//div[contains(@class,'Button__content') and contains(.,'Save')]/ancestor::button")
+                driver.execute_script("arguments[0].click();", sv2); time.sleep(3)
+                log("✓ Sounds saved (fallback)")
+            except Exception as e_sv:
+                log(f"⚠ Save sounds gagal: {e_sv}")
+
+    # ── L – Schedule ──
+    log("Mengatur schedule...")
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located(
+        (By.XPATH, "//*[contains(text(),'When to post')]")))
+    time.sleep(1)
+
+    sr = wait.until(EC.element_to_be_clickable(
+        (By.XPATH, "//input[@name='postSchedule' and @value='schedule']/ancestor::label")))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sr)
+    time.sleep(1); driver.execute_script("arguments[0].click();", sr); time.sleep(2)
+
+    # ── Time picker ──
+    target_hour = f"{schedule_dt.hour:02d}"
+    target_min_val = (schedule_dt.minute // 5) * 5
+    target_min = f"{target_min_val:02d}"
+    log(f"Setting time to {target_hour}:{target_min}")
+
+    ti = wait.until(EC.element_to_be_clickable(
+        (By.XPATH, "//div[contains(@class,'TUXTextInputCore')]//input[@readonly and contains(@value,':')]")))
+    driver.execute_script("arguments[0].click();", ti); time.sleep(2)
+
+    # Hour
+    try:
+        hs = WebDriverWait(driver, 5).until(EC.presence_of_element_located(
+            (By.XPATH, f"//div[contains(@class,'tiktok-timepicker-time-picker-container')]//span[contains(@class,'tiktok-timepicker-left') and text()='{target_hour}']")))
+        hs.click(); log(f"✓ Jam {target_hour}")
+    except:
+        try:
+            hc = driver.find_element(By.XPATH, "//div[contains(@class,'tiktok-timepicker-time-picker-container')]//div[contains(@class,'tiktok-timepicker-time-scroll-container')][1]")
+            driver.execute_script("arguments[0].scrollTop=0;", hc); time.sleep(1)
+            hs2 = driver.find_element(By.XPATH, f"//span[contains(@class,'tiktok-timepicker-left') and text()='{target_hour}']")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", hs2); time.sleep(.5)
+            hs2.click(); log(f"✓ Jam {target_hour} (scroll)")
+        except Exception as eh:
+            log(f"⚠ Jam gagal: {eh}")
+    time.sleep(1)
+
+    # Minute
+    try:
+        ms = WebDriverWait(driver, 5).until(EC.presence_of_element_located(
+            (By.XPATH, f"//div[contains(@class,'tiktok-timepicker-time-picker-container')]//span[contains(@class,'tiktok-timepicker-right') and text()='{target_min}']")))
+        ms.click(); log(f"✓ Menit {target_min}")
+    except:
+        try:
+            mcs = driver.find_elements(By.XPATH, "//div[contains(@class,'tiktok-timepicker-time-picker-container')]//div[contains(@class,'tiktok-timepicker-time-scroll-container')]")
+            if len(mcs) >= 2:
+                driver.execute_script("arguments[0].scrollTop=0;", mcs[1]); time.sleep(1)
+            ms2 = driver.find_element(By.XPATH, f"//span[contains(@class,'tiktok-timepicker-right') and text()='{target_min}']")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", ms2); time.sleep(.5)
+            ms2.click(); log(f"✓ Menit {target_min} (scroll)")
+        except Exception as em:
+            log(f"⚠ Menit gagal: {em}")
+    time.sleep(1)
+
+    driver.execute_script("document.body.click();"); time.sleep(1)
+
+    # ── Date picker ──
+    target_day = str(schedule_dt.day)
+    target_date_str = schedule_dt.strftime("%Y-%m-%d")
+    log(f"Setting date to {target_date_str} (day {target_day})")
+
+    di_list = driver.find_elements(By.XPATH, "//div[contains(@class,'TUXTextInputCore')]//input[@readonly]")
+    for di in di_list:
+        v = di.get_attribute("value") or ""
+        if "-" in v and len(v) == 10 and di.is_displayed():
+            driver.execute_script("arguments[0].click();", di); time.sleep(2); break
+
+    # Check if we need to navigate to correct month
+    try:
+        month_title = driver.find_element(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'month-title')]")
+        cal_month = month_title.text.strip()
+        target_month = schedule_dt.strftime("%B")
+        # Navigate forward if needed
+        while cal_month != target_month:
+            next_arrow = driver.find_elements(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'arrow')]")
+            if len(next_arrow) >= 2:
+                next_arrow[1].click(); time.sleep(1)
+            cal_month = driver.find_element(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'month-title')]").text.strip()
+    except:
+        pass
+
+    try:
+        ds = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+            (By.XPATH, f"//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'day') and contains(@class,'valid') and text()='{target_day}']")))
+        ds.click(); log(f"✓ Tanggal {target_date_str}")
+    except:
+        try:
+            spans = driver.find_elements(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'day')]")
+            for s in spans:
+                if s.text.strip() == target_day and s.is_displayed():
+                    sc = s.get_attribute("class") or ""
+                    if "header" not in sc:
+                        s.click(); log(f"✓ Tanggal {target_date_str} (fallback)"); break
+        except Exception as ed:
+            log(f"⚠ Date gagal: {ed}")
+    time.sleep(2)
+    log("✓ Schedule diatur!")
+
+    # ── Post / Schedule button ──
+    log("Klik tombol Schedule...")
+    time.sleep(2)
+    
+    # Specifically target the button that contains text 'Schedule' (not 'Save Draft')
+    # The Schedule button has: data-e2e="post_video_button", type-primary, text='Schedule'
+    try:
+        sch_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+            (By.XPATH, "//button[@data-e2e='post_video_button' and .//div[contains(text(),'Schedule')]]")))
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sch_btn)
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", sch_btn)
+        log("✓ Tombol Schedule diklik")
+    except Exception as e_sch:
+        log(f"⚠ Selector utama gagal: {e_sch}, mencoba fallback...")
+        # Fallback: find by text content 'Schedule' with primary type
+        try:
+            sch_btn2 = driver.find_element(
+                By.XPATH, "//button[contains(@class,'type-primary') and .//div[contains(text(),'Schedule')]]")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sch_btn2)
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", sch_btn2)
+            log("✓ Tombol Schedule diklik (fallback)")
+        except:
+            # Last resort: find all buttons, pick the one with text Schedule
+            all_btns = driver.find_elements(By.XPATH, "//button")
+            for b in all_btns:
+                try:
+                    if b.text.strip() == "Schedule" and b.is_displayed():
+                        driver.execute_script("arguments[0].click();", b)
+                        log("✓ Tombol Schedule diklik (text match)")
+                        break
+                except:
+                    continue
+
+    # Confirm popup
+    try:
+        cb = WebDriverWait(driver, 7).until(EC.element_to_be_clickable(
+            (By.XPATH, "//button[.//div[text()='Schedule' or text()='Confirm']]")))
+        driver.execute_script("arguments[0].click();", cb)
+        log("✓ Konfirmasi diklik")
+    except:
+        pass
+
+    log("✓ Video berhasil di-schedule!")
+    time.sleep(3)
+
+
+# ═══════════════════════════════════════════════════════════════
+# GUI APPLICATION
+# ═══════════════════════════════════════════════════════════════
+class TikTokSchedulerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("TikTok Multi-Upload Scheduler")
+        self.root.configure(bg=BG)
+        self.root.state("zoomed")  # fullscreen
+
+        self.stop_event = threading.Event()
+        self.chrome_proc = None
+        self.driver = None
+        self.running = False
+        self.start_time = None
+
+        # Style
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Card.TFrame", background=BG_CARD)
+        style.configure("TLabel", background=BG_CARD, foreground=FG, font=("Segoe UI", 10))
+        style.configure("Header.TLabel", background=BG, foreground=ACCENT, font=("Segoe UI", 18, "bold"))
+        style.configure("Sub.TLabel", background=BG, foreground=FG_DIM, font=("Segoe UI", 9))
+        style.configure("Accent.TButton", background=BTN_BG, foreground=BTN_FG, font=("Segoe UI", 11, "bold"), padding=10)
+        style.map("Accent.TButton", background=[("active", BTN_HOVER)])
+        style.configure("Danger.TButton", background=BTN_DANGER, foreground="#fff", font=("Segoe UI", 11, "bold"), padding=10)
+        style.configure("Green.Horizontal.TProgressbar", troughcolor=BG_INPUT, background=SUCCESS)
+
+        self._build_ui()
+
+    # ───────── UI BUILD ─────────
+    def _build_ui(self):
+        # Header
+        hdr = tk.Frame(self.root, bg=BG, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="🚀 TikTok Multi-Upload Scheduler", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 22, "bold")).pack(side="left", padx=20)
+        self.timer_label = tk.Label(hdr, text="⏱ 00:00:00", bg=BG, fg=WARN,
+                                    font=("Segoe UI", 16, "bold"))
+        self.timer_label.pack(side="right", padx=20)
+
+        # Main container with two columns
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(fill="both", expand=True, padx=15, pady=5)
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(0, weight=1)
+
+        # ═══ LEFT COLUMN ═══
+        left = tk.Frame(main, bg=BG)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
+        # Card: Video Settings
+        self._card(left, "📂 Video Settings", self._build_video_settings)
+        # Card: Product Settings
+        self._card(left, "🏷️ Product Settings", self._build_product_settings)
+        # Card: Schedule Settings
+        self._card(left, "📅 Schedule Settings", self._build_schedule_settings)
+
+        # ═══ RIGHT COLUMN ═══
+        right = tk.Frame(main, bg=BG)
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+
+        # Card: Chrome Settings
+        self._card(right, "🌐 Chrome Settings", self._build_chrome_settings)
+        # Card: Progress
+        self._card(right, "📊 Progress", self._build_progress, expand=True)
+
+        # Bottom bar
+        bot = tk.Frame(self.root, bg=BG, pady=10)
+        bot.pack(fill="x")
+
+        self.start_btn = tk.Button(bot, text="▶  MULAI UPLOAD", bg="#7b2ff7", fg="white",
+                                   font=("Segoe UI", 14, "bold"), relief="flat", padx=30, pady=8,
+                                   activebackground=BTN_HOVER, activeforeground="white",
+                                   command=self._on_start, cursor="hand2")
+        self.start_btn.pack(side="left", padx=20)
+
+        self.stop_btn = tk.Button(bot, text="⏹  STOP", bg=BTN_DANGER, fg="white",
+                                  font=("Segoe UI", 14, "bold"), relief="flat", padx=30, pady=8,
+                                  activebackground="#ff7777", command=self._on_stop,
+                                  state="disabled", cursor="hand2")
+        self.stop_btn.pack(side="left", padx=5)
+
+        self.status_label = tk.Label(bot, text="Status: Idle", bg=BG, fg=FG_DIM,
+                                     font=("Segoe UI", 11))
+        self.status_label.pack(side="right", padx=20)
+
+    def _card(self, parent, title, builder_fn, expand=False):
+        frame = tk.LabelFrame(parent, text=f"  {title}  ", bg=BG_CARD, fg=ACCENT,
+                               font=("Segoe UI", 11, "bold"), bd=1, relief="groove",
+                               highlightbackground=BORDER, padx=12, pady=8)
+        frame.pack(fill="both", expand=expand, pady=5)
+        builder_fn(frame)
+        return frame
+
+    def _entry(self, parent, label, default="", row=0, width=50):
+        tk.Label(parent, text=label, bg=BG_CARD, fg=FG, font=("Segoe UI", 9)).grid(
+            row=row, column=0, sticky="w", pady=3)
+        e = tk.Entry(parent, width=width, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                     font=("Segoe UI", 10), relief="flat", bd=2,
+                     highlightthickness=1, highlightcolor=ACCENT)
+        e.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        e.insert(0, default)
+        parent.columnconfigure(1, weight=1)
+        return e
+
+    # ── Video Settings ──
+    def _build_video_settings(self, f):
+        row = 0
+        tk.Label(f, text="Folder Video:", bg=BG_CARD, fg=FG, font=("Segoe UI", 9)).grid(
+            row=row, column=0, sticky="w", pady=3)
+        ff = tk.Frame(f, bg=BG_CARD)
+        ff.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        self.folder_entry = tk.Entry(ff, width=40, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                                     font=("Segoe UI", 10), relief="flat", bd=2,
+                                     highlightthickness=1, highlightcolor=ACCENT)
+        self.folder_entry.pack(side="left", fill="x", expand=True)
+        tk.Button(ff, text="Browse", bg=ACCENT2, fg="white", relief="flat", padx=8,
+                  font=("Segoe UI", 9), command=self._browse_folder, cursor="hand2").pack(side="right", padx=(5, 0))
+        f.columnconfigure(1, weight=1)
+
+        row += 1
+        tk.Label(f, text="Mulai dari video:", bg=BG_CARD, fg=FG, font=("Segoe UI", 9)).grid(
+            row=row, column=0, sticky="w", pady=3)
+        sf = tk.Frame(f, bg=BG_CARD)
+        sf.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        self.start_from_combo = ttk.Combobox(sf, state="readonly", width=50,
+                                              font=("Segoe UI", 9))
+        self.start_from_combo.pack(side="left", fill="x", expand=True)
+        self.start_from_combo.set("-- Pilih folder dulu --")
+        self._video_list = []  # Store full video list
+        tk.Button(sf, text="↻", bg=ACCENT2, fg="white", relief="flat", padx=6,
+                  font=("Segoe UI", 10, "bold"), command=self._refresh_video_list,
+                  cursor="hand2").pack(side="right", padx=(5, 0))
+
+        row += 1
+        self.count_entry = self._entry(f, "Jumlah upload:", "20", row)
+
+        row += 1
+        btn_frame = tk.Frame(f, bg=BG_CARD)
+        btn_frame.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        tk.Button(btn_frame, text="📝 View Upload History", bg=BG_INPUT, fg=ACCENT,
+                  relief="flat", padx=10, pady=2, font=("Segoe UI", 9),
+                  command=self._show_upload_history, cursor="hand2").pack(side="left")
+
+    # ── Product Settings ──
+    def _build_product_settings(self, f):
+        row = 0
+        self.product_radio_entry = self._entry(f, "Nama Produk (Radio):", "", row, 45)
+        row += 1
+        self.product_title_entry = self._entry(f, "Judul Produk (Input E):", "beli sebelum promonya habis", row, 45)
+        row += 1
+        tk.Label(f, text="Deskripsi (1 per baris):", bg=BG_CARD, fg=FG,
+                 font=("Segoe UI", 9)).grid(row=row, column=0, sticky="nw", pady=3)
+        self.desc_text = tk.Text(f, height=5, width=45, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                                 font=("Segoe UI", 10), relief="flat", bd=2, wrap="word",
+                                 highlightthickness=1, highlightcolor=ACCENT)
+        self.desc_text.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        self.desc_text.insert("1.0", "Segera Try out di speedu.online")
+        row += 1
+        self.add_sound_var = tk.BooleanVar(value=False)
+        cb = tk.Checkbutton(f, text="Tambahkan Sound (dari Favorites)", variable=self.add_sound_var,
+                            bg=BG_CARD, fg=FG, selectcolor=BG_INPUT, activebackground=BG_CARD,
+                            activeforeground=FG, font=("Segoe UI", 9), cursor="hand2")
+        cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+
+    # ── Schedule Settings ──
+    def _build_schedule_settings(self, f):
+        row = 0
+        tk.Label(f, text="Mulai Schedule:", bg=BG_CARD, fg=FG, font=("Segoe UI", 9)).grid(
+            row=row, column=0, sticky="w", pady=3)
+        tf = tk.Frame(f, bg=BG_CARD)
+        tf.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        tomorrow = (datetime.now() + timedelta(days=1))
+        self.hour_entry = tk.Entry(tf, width=4, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                                   font=("Segoe UI", 10), relief="flat", justify="center")
+        self.hour_entry.pack(side="left"); self.hour_entry.insert(0, "01")
+        tk.Label(tf, text=":", bg=BG_CARD, fg=FG, font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.minute_entry = tk.Entry(tf, width=4, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                                     font=("Segoe UI", 10), relief="flat", justify="center")
+        self.minute_entry.pack(side="left"); self.minute_entry.insert(0, "00")
+        tk.Label(tf, text="  Tanggal:", bg=BG_CARD, fg=FG, font=("Segoe UI", 9)).pack(side="left", padx=(10, 0))
+        self.date_entry = tk.Entry(tf, width=12, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                                   font=("Segoe UI", 10), relief="flat", justify="center")
+        self.date_entry.pack(side="left", padx=(5, 0))
+        self.date_entry.insert(0, tomorrow.strftime("%Y-%m-%d"))
+        f.columnconfigure(1, weight=1)
+
+        row += 1
+        self.interval_entry = self._entry(f, "Interval (menit):", "60", row)
+
+    # ── Chrome Settings ──
+    def _build_chrome_settings(self, f):
+        self.userdata_entry = self._entry(f, "User Data Dir:", r"C:\tiktok_automation\user_data\1", 0, 45)
+        self.port_entry = self._entry(f, "Debug Port:", "9222", 1)
+
+    # ── Progress ──
+    def _build_progress(self, f):
+        pf = tk.Frame(f, bg=BG_CARD)
+        pf.pack(fill="x", pady=(0, 5))
+        self.progress_label = tk.Label(pf, text="0 / 0  (0%)", bg=BG_CARD, fg=ACCENT,
+                                       font=("Segoe UI", 11, "bold"))
+        self.progress_label.pack(side="left")
+        self.eta_label = tk.Label(pf, text="", bg=BG_CARD, fg=FG_DIM, font=("Segoe UI", 9))
+        self.eta_label.pack(side="right")
+
+        self.progress_bar = ttk.Progressbar(f, mode="determinate", length=400,
+                                            style="Green.Horizontal.TProgressbar")
+        self.progress_bar.pack(fill="x", pady=(0, 8))
+
+        self.log_box = scrolledtext.ScrolledText(f, bg="#0a0a15", fg="#aaffaa",
+                                                  font=("Consolas", 9), relief="flat",
+                                                  insertbackground=SUCCESS, wrap="word")
+        self.log_box.pack(fill="both", expand=True)
+        self.log_box.tag_config("error", foreground=ERROR)
+        self.log_box.tag_config("success", foreground=SUCCESS)
+        self.log_box.tag_config("warn", foreground=WARN)
+        self.log_box.tag_config("info", foreground=ACCENT)
+
+    # ───────── ACTIONS ─────────
+    def _browse_folder(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.folder_entry.delete(0, tk.END)
+            self.folder_entry.insert(0, d)
+            self._refresh_video_list()
+
+    def _refresh_video_list(self):
+        """Populate the dropdown with video files from the selected folder."""
+        folder = self.folder_entry.get().strip()
+        if not folder or not os.path.isdir(folder):
+            self.start_from_combo['values'] = []
+            self.start_from_combo.set("-- Folder tidak valid --")
+            self._video_list = []
+            return
+
+        exts = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv")
+        videos = sorted(
+            [f for f in os.listdir(folder) if f.lower().endswith(exts)],
+            key=lambda x: os.path.getmtime(os.path.join(folder, x))
+        )
+        self._video_list = videos
+
+        # Load upload history to mark already uploaded
+        db = load_db()
+        folder_name = os.path.basename(folder)
+        uploaded = get_uploaded_videos(folder_name, db)
+
+        display_list = []
+        for i, v in enumerate(videos):
+            status = "✓" if v in uploaded else ""
+            display_list.append(f"{i+1}. {v} {status}")
+
+        self.start_from_combo['values'] = display_list
+        if display_list:
+            self.start_from_combo.current(0)
+        else:
+            self.start_from_combo.set("-- Tidak ada video --")
+
+    def _show_upload_history(self):
+        """Show upload history in a popup window."""
+        db = load_db()
+        win = tk.Toplevel(self.root)
+        win.title("Upload History")
+        win.geometry("600x500")
+        win.configure(bg=BG)
+        win.attributes('-topmost', True)
+
+        tk.Label(win, text="📝 Upload History", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 16, "bold")).pack(pady=10)
+
+        text = scrolledtext.ScrolledText(win, bg="#0a0a15", fg="#aaffaa",
+                                          font=("Consolas", 10), relief="flat",
+                                          wrap="word")
+        text.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+
+        if not db:
+            text.insert(tk.END, "Belum ada riwayat upload.\n")
+        else:
+            for folder_name, videos in db.items():
+                text.insert(tk.END, f"\n═══ 📁 {folder_name} ({len(videos)} video) ═══\n", )
+                for i, v in enumerate(videos, 1):
+                    text.insert(tk.END, f"  {i}. {v}\n")
+
+        text.config(state="disabled")
+
+        tk.Button(win, text="Tutup", bg=BTN_DANGER, fg="white", relief="flat",
+                  padx=20, pady=5, font=("Segoe UI", 10),
+                  command=win.destroy, cursor="hand2").pack(pady=(0, 10))
+
+    def _log(self, msg, tag=None):
+        ts = datetime.now().strftime("%H:%M:%S")
+        auto_tag = tag
+        if not auto_tag:
+            if "✓" in msg or "berhasil" in msg.lower():
+                auto_tag = "success"
+            elif "⚠" in msg or "gagal" in msg.lower():
+                auto_tag = "warn"
+            elif "❌" in msg or "error" in msg.lower():
+                auto_tag = "error"
+        def _do():
+            self.log_box.insert(tk.END, f"[{ts}] {msg}\n", auto_tag or "")
+            self.log_box.see(tk.END)
+        self.root.after(0, _do)
+
+    def _update_progress(self, current, total):
+        pct = int(current / total * 100) if total else 0
+        def _do():
+            self.progress_bar["maximum"] = total
+            self.progress_bar["value"] = current
+            self.progress_label.config(text=f"{current} / {total}  ({pct}%)")
+        self.root.after(0, _do)
+
+    def _update_timer(self):
+        if not self.running:
+            return
+        elapsed = time.time() - self.start_time
+        h = int(elapsed // 3600)
+        m = int((elapsed % 3600) // 60)
+        s = int(elapsed % 60)
+        self.timer_label.config(text=f"⏱ {h:02d}:{m:02d}:{s:02d}")
+        self.root.after(1000, self._update_timer)
+
+    def _set_status(self, text, color=FG_DIM):
+        self.root.after(0, lambda: self.status_label.config(text=f"Status: {text}", fg=color))
+
+    def _on_start(self):
+        # Validate
+        folder = self.folder_entry.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Error", "Folder video tidak valid!")
+            return
+
+        product_radio = self.product_radio_entry.get().strip()
+        if not product_radio:
+            messagebox.showerror("Error", "Nama Produk (Radio) harus diisi!")
+            return
+
+        self.running = True
+        self.stop_event.clear()
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.start_time = time.time()
+        self._update_timer()
+        self.log_box.delete("1.0", tk.END)
+
+        threading.Thread(target=self._run_automation, daemon=True).start()
+
+    def _on_stop(self):
+        self.stop_event.set()
+        self._set_status("Stopping...", WARN)
+        self._log("⏹ Stop requested by user", "warn")
+
+    def _run_automation(self):
+        try:
+            self._set_status("Starting...", ACCENT)
+
+            # ── Gather inputs ──
+            folder = self.folder_entry.get().strip()
+            folder_name = os.path.basename(folder)
+            start_from_idx = self.start_from_combo.current()
+            start_from = max(0, start_from_idx) if start_from_idx >= 0 else 0
+            count = int(self.count_entry.get().strip() or "20")
+            product_radio = self.product_radio_entry.get().strip()
+            product_title = self.product_title_entry.get().strip()
+            add_sound = self.add_sound_var.get()
+            descs_raw = self.desc_text.get("1.0", tk.END).strip()
+            descs = [d.strip() for d in descs_raw.split("\n") if d.strip()]
+            if not descs:
+                descs = [""]
+            hour = int(self.hour_entry.get().strip() or "1")
+            minute = int(self.minute_entry.get().strip() or "0")
+            date_str = self.date_entry.get().strip()
+            interval = int(self.interval_entry.get().strip() or "60")
+            userdata = self.userdata_entry.get().strip()
+            port = self.port_entry.get().strip() or "9222"
+
+            start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=hour, minute=minute)
+
+            # ── List videos ──
+            exts = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv")
+            all_videos = sorted(
+                [f for f in os.listdir(folder) if f.lower().endswith(exts)],
+                key=lambda x: os.path.getmtime(os.path.join(folder, x))
+            )
+            self._log(f"📂 Folder: {folder} ({len(all_videos)} video)", "info")
+
+            # Filter already uploaded
+            db = load_db()
+            uploaded = get_uploaded_videos(folder_name, db)
+
+            # Apply start_from (0-indexed from dropdown)
+            available = all_videos[start_from:]
+            # Filter out already uploaded
+            to_upload = [v for v in available if v not in uploaded][:count]
+
+            if not to_upload:
+                self._log("❌ Tidak ada video untuk diupload!", "error")
+                self._finish()
+                return
+
+            total = len(to_upload)
+            self._log(f"🎬 {total} video akan diupload", "info")
+            self._update_progress(0, total)
+
+            # ── Open Chrome ──
+            self._log(f"🌐 Membuka Chrome (port {port})...", "info")
+            self.chrome_proc = open_chrome_debug(userdata, port)
+            time.sleep(2)
+            self.driver = connect_selenium(port)
+            self._log("✓ Chrome terhubung!", "success")
+
+            # ── Upload loop ──
+            for idx, video_name in enumerate(to_upload):
+                if self.stop_event.is_set():
+                    self._log("⏹ Dihentikan oleh user", "warn")
+                    break
+
+                video_path = os.path.join(folder, video_name)
+                current_dt = start_dt + timedelta(minutes=interval * idx)
+                desc = descs[idx % len(descs)]
+
+                self._log(f"\n{'═'*50}", "info")
+                self._log(f"📹 [{idx+1}/{total}] {video_name}", "info")
+                self._log(f"⏰ Schedule: {current_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+                self._log(f"📝 Deskripsi: {desc[:50]}...", "info")
+                self._set_status(f"Uploading {idx+1}/{total}: {video_name}", ACCENT)
+
+                try:
+                    # Navigate to FRESH upload page (force=True to avoid leftover state)
+                    self._log("Navigasi ke halaman upload baru...", "info")
+                    navigate_upload_page(self.driver, force=(idx > 0))
+                    time.sleep(3)
+
+                    # Upload file
+                    do_upload_file(self.driver, video_path, self._log)
+                    time.sleep(5)
+
+                    # Post video with schedule
+                    do_post_video(self.driver, desc, product_radio, product_title,
+                                 self._log, current_dt, self.stop_event,
+                                 add_sound=add_sound)
+
+                    # Mark as uploaded
+                    mark_uploaded(folder_name, video_name, db)
+                    self._log(f"✓ {video_name} berhasil di-schedule!", "success")
+
+                except Exception as e:
+                    self._log(f"❌ Error pada {video_name}: {e}", "error")
+
+                self._update_progress(idx + 1, total)
+
+                # Wait before next upload
+                if idx < total - 1 and not self.stop_event.is_set():
+                    self._log("Menunggu 10 detik sebelum video berikutnya...", "info")
+                    time.sleep(10)
+
+            # ── Done ──
+            self._log(f"\n🎉 SELESAI! {total} video telah diproses.", "success")
+            self._set_status("Selesai!", SUCCESS)
+
+            # Sound notification
+            try:
+                for _ in range(3):
+                    winsound.Beep(1000, 300)
+                    time.sleep(0.2)
+                winsound.Beep(1500, 500)
+            except:
+                pass
+
+        except Exception as e:
+            self._log(f"❌ Fatal error: {e}", "error")
+            self._set_status(f"Error: {e}", ERROR)
+        finally:
+            self._finish()
+
+    def _finish(self):
+        self.running = False
+        # Close Chrome by PID
+        if self.chrome_proc:
+            self._log(f"Menutup Chrome (PID: {self.chrome_proc.pid})...", "info")
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except:
+                pass
+            try:
+                self.chrome_proc.terminate()
+                self._log("✓ Chrome ditutup.", "success")
+            except:
+                pass
+            self.chrome_proc = None
+            self.driver = None
+
+        self.root.after(0, lambda: self.start_btn.config(state="normal"))
+        self.root.after(0, lambda: self.stop_btn.config(state="disabled"))
+
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TikTokSchedulerApp(root)
+    root.mainloop()

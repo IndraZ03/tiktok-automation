@@ -1,0 +1,61 @@
+{
+   "checksum": "46287eb80227292e5e8bb757d6c83286",
+   "roots": {
+      "bookmark_bar": {
+         "children": [ {
+            "date_added": "13289930799332549",
+            "date_last_used": "0",
+            "guid": "feae3503-d397-4d42-880f-3adb21f11825",
+            "id": "5",
+            "name": "Selenium Tutorial for Beginners: Learn WebDriver & Testing",
+            "type": "url",
+            "url": "https://www.guru99.com/selenium-tutorial.html"
+         }, {
+            "date_added": "13291095371763432",
+            "date_last_used": "0",
+            "guid": "590a4dab-68f1-4607-8f18-95e611cb9583",
+            "id": "6",
+            "name": "Download data aov indo 1.44.1 by faishalkc.zip",
+            "type": "url",
+            "url": "https://acefile.co/f/66147157/data-aov-indo-1-44-1-by-faishalkc-zip"
+         }, {
+            "date_added": "13291460440776342",
+            "date_last_used": "0",
+            "guid": "443a4368-c919-494a-b0ea-77700534b653",
+            "id": "7",
+            "name": "Perbedaan Web Crawling dan Web Scraping Halaman 1 - Kompasiana.com",
+            "type": "url",
+            "url": "https://www.kompasiana.com/nsaripurba/5df4e568097f3647ba28cd42/perbedaan-web-crawling-dan-web-scraping-bonus-kodingan-python-untuk-scrap-situs-imdb-com"
+         } ],
+         "date_added": "13415594837072361",
+         "date_last_used": "0",
+         "date_modified": "13291460440776342",
+         "guid": "0bc5d13f-2cba-5d74-951f-3f233fe6c908",
+         "id": "1",
+         "name": "Bilah bookmark",
+         "type": "folder"
+      },
+      "other": {
+         "children": [  ],
+         "date_added": "13415594837072361",
+         "date_last_used": "0",
+         "date_modified": "0",
+         "guid": "82b081ec-3dd3-529c-8475-ab6c344590dd",
+         "id": "2",
+         "name": "Bookmark lain",
+         "type": "folder"
+      },
+      "synced": {
+         "children": [  ],
+         "date_added": "13415594837072361",
+         "date_last_used": "0",
+         "date_modified": "0",
+         "guid": "4cf2e351-0e85-532b-bb37-df045d8f8d0f",
+         "id": "3",
+         "name": "Bookmark seluler",
+         "type": "folder"
+      }
+   },
+   "sync_metadata": "CuABCr8BCIiBAhK4ASAAkgGjAQqgAQoOY2hyb21lX3N5bmNfYm0SBTUxIWJtGhIJf9KBTtNKBgARf9KBTtNKBgAiNAmrPVpO00oGABADGQdUuhEHeKq8IAEqHDUxIWJtL2ZkOjkxNjM3MjM1NTk0Njg4OTMxNjEiNAmrPVpO00oGABADGQdUuhEHeKq8IAEqHDUxIWJtL2ZkOjkxNjM3MjM1NTk0Njg4OTMxNjEpa0GETtNKBgDqAQwI+9TEzAYQoPiuvwMSACoYSUhBazhwYS9vdFJRUTRtSGh5SzlVdz09SAMSwwEIAxK+AQocbmpnRHU4OGVDcnZYcDg2cEQ3ZkhHY3FGcDg4PRJmWjpBRHF0QVp5dFJjRlpjS2d2TGs1eUlPRkVxZzM2VHhOaVgxakl4YldTUUFlZHhjUzRHOWNmVTA2bGtRZ09FM1RDQ28rQjMzT2ZZd1h4Q2huLytIMXVXRmROZE0wYzQwZ0NSQT09GAAgACgAMKb2lbWC5fUCOABAAEoceXpOQjAxY241NEE3Y1JVMHVUKy9QZ21UdFVvPVoAZQAAAAASqwEIARKmAQoceXhKLzZmdmtlY3I3a3A1RVF6QjR0V0xwZGJFPRJOWjpBRHF0QVp3TWtSNU0wY2hwN2g1N24xMDhwMWZJVGsrYmN3MW5KZmNTZUxDa25wS0RMZ0Z0VkVwaFN2WWJKaFFZK1hZM1BWckhvR3NPGAAgACgAMKb2lbWC5fUCOABAAEocYVJDV0xnaEY5YjVJbnFLSUR2dUovanZRa0ZjPVoAZQAAAAAS7AEIBxLnAQocQ1FzK0puTmtGcCtkT3lMTm1mZmV5MnBMNFFBPRJmWjpBRHF0QVp6SU93MlVyT1h2a3AybEpwMVRHamU0QlNHVXRNQ1AxSEFTSGVDd3FrSGpON1VaYUN6ZVFyYjZadnRmZ3Jua2cvcktQcU5EdWt5RmpVcU9QaGg1UURacG1wZlBQUT09GAAgACgAMJnIpoXQvfYCOMmVw8D3L0DJlcPA9y9KHFpJUWtsbWx0dTJ2VmR2RXMvRURGYjNxTWx1cz1aHyIdu0RmZUxyQTBXb2xQeXIxRFprb0RxZDFxbHFvTT1lVS/LzRLDAQgCEr4BChxZY1NUb252RVNQd3FDczRMMmNyVmh2NjhMOTg9EmZaOkFEcXRBWnk2endQdEVXWVdWUmw3cEpsWEhuMEg3N1pCTk1mZ0JZZ0ZNK05NVkU0ZG1TUTFNN3VjMk1PRFVWUU52NzF6VDZ2UnpSdkg2WStnYzRncFVVRjZkN1JTbFhDblJRPT0YACAAKAAwpvaVtYLl9QI4AEAAShxvUFZraHdCUmJWNjVLQ1dSMitJT05IV29PdTg9WgBlAAAAABLrAQgGEuYBChw0Zkx4WjdCRjM3SXV3NDdDdWlvanhIV3JrNXM9EmZaOkFEcXRBWnpJT3cyVXJPWHZrcDJsSnAxVEdqZTQ1Y3M0OTZOTEdPN1RURlQzNm1Ka09rWHpFR2NUZDdWdUV0NW1wMFdhMFdueGRBVE9TSEo2ZHJMU1lwZHFHWlVFT2QvSG53PT0YACAAKAAwvYzliICz9gI49I+5kvYvQPSPuZL2L0ocWlp6MlNWOFVEWm5zUnJ6WTNLQmZsYS9iMVQ0PVoeIhx3T3FNcWlFbUw2amRRZlEwRDdyRkJPQURVOE09ZYsgwKMS6wEIBRLmAQocNE1tL1pMSExoUTNyVVZZNW5lV3R3VklaU1Y4PRJmWjpBRHF0QVp6SU93MlVyT1h2a3AybEpwMVRHamU0RWZsZCtTM3dqaEora1JuNlArRmNMbTl1OW83cTdVV0xWVGIrSnBjUWlxQ0dCNkc4a2FSMmhCbXpYRDlQR0V0alNuMWNpZz09GAAgACgAMJbF2t+NkfYCOOWhkefxL0DloZHn8S9KHDRXVFFVZHNpNTNrdXBuMlRnWTlUTmd2YTY5QT1aHiIcczFBaDRxMmRUdmUwR2szcy9vY2gzemhBbWtnPWV2sTLmMAE4AA==",
+   "version": 1
+}

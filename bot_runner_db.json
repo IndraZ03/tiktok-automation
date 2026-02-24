@@ -1,0 +1,112 @@
+{
+  "bots": {
+    "SPEEDU Bot": {
+      "total_starts": 4,
+      "total_crashes": 0,
+      "current_status": "running",
+      "uptime_start": "2026-02-23 10:18:22",
+      "events": [
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:34:42"
+        },
+        {
+          "type": "restart",
+          "timestamp": "2026-02-23 09:34:45"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:34:50"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:37:32"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-23 09:41:06",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:03:34"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 10:18:22"
+        }
+      ]
+    },
+    "Grok Bot": {
+      "total_starts": 4,
+      "total_crashes": 0,
+      "current_status": "running",
+      "uptime_start": "2026-02-23 10:18:23",
+      "events": [
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:34:43"
+        },
+        {
+          "type": "restart",
+          "timestamp": "2026-02-23 09:34:50"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:34:55"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:37:33"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-23 09:41:07",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:03:34"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 10:18:23"
+        }
+      ]
+    },
+    "TikTok Bot": {
+      "total_starts": 4,
+      "total_crashes": 0,
+      "current_status": "running",
+      "uptime_start": "2026-02-23 10:18:24",
+      "events": [
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:34:44"
+        },
+        {
+          "type": "restart",
+          "timestamp": "2026-02-23 09:34:55"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:35:00"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-23 09:35:00",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:00:00"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 09:37:34"
+        },
+        {
+          "type": "stop",
+          "timestamp": "2026-02-23 09:41:07",
+          "reason": "Dihentikan oleh user (Ctrl+C)",
+          "uptime_duration": "0:03:33"
+        },
+        {
+          "type": "start",
+          "timestamp": "2026-02-23 10:18:24"
+        }
+      ]
+    }
+  }
+}

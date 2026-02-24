@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "regexSubstitution": "chrome-extension://cbnaodkpfinfiipjblikofhlhlcickei/src/pdfviewer/web/viewer.html?file=\\1"
+      }
+    },
+    "condition": {
+      "regexFilter": "^(file:///.*\\.pdf(\\?.*=.*)?)$",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "regexSubstitution": "chrome-extension://cbnaodkpfinfiipjblikofhlhlcickei/src/pdfviewer/web/viewer.html?file=\\1"
+      }
+    },
+    "condition": {
+      "regexFilter": "^(file:///.*\\.pdf\\?forcedefault=false)",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 2,
+    "action": {
+      "type": "allow"
+    },
+    "condition": {
+      "regexFilter": "^(file:///.*\\.pdf\\?forcedefault=true)",
+      "resourceTypes": ["main_frame"]
+    }
+  }
+]

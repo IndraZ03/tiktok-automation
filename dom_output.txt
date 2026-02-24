@@ -1,0 +1,115 @@
+﻿python.exe : Traceback 
+(most recent call last):
+At line:1 char:1
++ & c:/tiktok_automation/Scr
+ipts/python.exe 
+c:/tiktok_automation/inspec 
+...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
+    + CategoryInfo          
+    : NotSpecified: (Trace  
+  back (most recent call    
+ last)::String) [], Remo    
+teException
+    + FullyQualifiedErrorId 
+    : NativeCommandError
+ 
+  File "c:\tiktok_automation
+\inspect_dom.py", line 14, 
+in <module>
+    driver = webdriver.Chrom
+e(service=service, 
+options=chrome_options)
+             ^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\chrome\webdriver.p
+y", line 45, in __init__
+    super().__init__(
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\chromium\webdriver
+.py", line 66, in __init__
+    super().__init__(command
+_executor=executor, 
+options=self.options)
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\common\webdriver.p
+y", line 25, in __init__
+    super().__init__(*args, 
+**kwargs)
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\remote\webdriver.p
+y", line 257, in __init__
+    self.start_session(capab
+ilities)
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\remote\webdriver.p
+y", line 352, in 
+start_session
+    response = self.execute(
+Command.NEW_SESSION, 
+caps)["value"]
+               ^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\remote\webdriver.p
+y", line 432, in execute
+    self.error_handler.check
+_response(response)
+  File "C:\tiktok_automation
+\Lib\site-packages\selenium\
+webdriver\remote\errorhandle
+r.py", line 232, in 
+check_response
+    raise 
+exception_class(message, 
+screen, stacktrace)
+selenium.common.exceptions.S
+essionNotCreatedException: 
+Message: session not 
+created: cannot connect to 
+chrome at 127.0.0.1:9222
+from chrome not reachable; 
+For documentation on this 
+error, please visit: https:/
+/www.selenium.dev/documentat
+ion/webdriver/troubleshootin
+g/errors#sessionnotcreatedex
+ception
+Stacktrace:
+Symbols not available. 
+Dumping unresolved 
+backtrace:
+	0x46f3e3
+	0x46f424
+	0x261ece
+	0x2556b8
+	0x29c572
+	0x292845
+	0x292666
+	0x2dae7f
+	0x2da697
+	0x2cebb6
+	0x2a0319
+	0x2a10d4
+	0x6c46a4
+	0x6bf9a9
+	0x6dc940
+	0x4880f8
+	0x48fe4d
+	0x477c18
+	0x477de2
+	0x4618ea
+	0x75c05d49
+	0x776bd83b
+	0x776bd7c1
+
