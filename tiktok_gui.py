@@ -420,6 +420,37 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
             except Exception as e_sv:
                 log(f"⚠ Save sounds gagal: {e_sv}")
 
+    # ── Content Check Lite ── Jika toggle ON, klik agar menjadi OFF
+    try:
+        log("Memeriksa Content Check Lite...")
+        # Primary: cari span teks → parent jsx div → Switch checked-true → input switch
+        checked_switches = driver.find_elements(
+            By.XPATH,
+            "//span[contains(text(),'Content check lite')]"
+            "/ancestor::div[contains(@class,'jsx-')]"
+            "//div[contains(@class,'Switch__root--checked-true')]"
+            "//input[@role='switch']"
+        )
+        if not checked_switches:
+            # Fallback: cari div aria-checked="true" → Switch__root → input switch
+            checked_switches = driver.find_elements(
+                By.XPATH,
+                "//div[@aria-checked='true' and contains(@class,'Switch__content')]"
+                "/ancestor::div[contains(@class,'Switch__root')]"
+                "//input[@role='switch']"
+            )
+        if checked_switches:
+            switch_input = checked_switches[0]
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", switch_input)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", switch_input)
+            time.sleep(1)
+            log("✓ Content Check Lite dimatikan.")
+        else:
+            log("Content Check Lite sudah OFF atau tidak ditemukan.")
+    except Exception as e:
+        log(f"⚠ Content Check Lite: {e}")
+
     # ── L – Schedule ──
     log("Mengatur schedule...")
     WebDriverWait(driver, 15).until(EC.presence_of_element_located(
