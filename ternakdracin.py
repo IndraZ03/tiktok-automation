@@ -6,7 +6,8 @@ import math
 from tqdm import tqdm
 import time
 import threading
-
+from PIL import Image
+Image.ANTIALIAS = Image.LANCZOS  # Atau Image.Resampling.LANCZOS kalau Pillow >=10
 # Ganti dengan token bot Telegram kamu (dapat dari BotFather)
 BOT_TOKEN = '8577651733:AAG69uuoImXQpe5qcEtMdlwgu3_6rQAvaBI'
 
