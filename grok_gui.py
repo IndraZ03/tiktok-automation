@@ -696,14 +696,19 @@ class AutomationEngine:
         pairs = [(all_files[i], all_files[i + 1])
                  for i in range(0, len(all_files) - 1, 2)]
 
-        # Cari nomor output merged selanjutnya
-        existing_merged = glob.glob(os.path.join(merged_dir, "merged_*.mp4"))
-        next_num = len(existing_merged) + 1
+        # Cari nomor output merged selanjutnya (angka murni: 1.mp4, 2.mp4, ...)
+        existing_merged = glob.glob(os.path.join(merged_dir, "*.mp4"))
+        existing_nums = []
+        for f in existing_merged:
+            m = re.fullmatch(r'(\d+)\.mp4', os.path.basename(f))
+            if m:
+                existing_nums.append(int(m.group(1)))
+        next_num = (max(existing_nums) + 1) if existing_nums else 1
 
         for idx, (vid1, vid2) in enumerate(pairs):
             if self._stop.is_set():
                 break
-            out_name = f"merged_{next_num + idx:04d}.mp4"
+            out_name = f"{next_num + idx}.mp4"
             out_path = os.path.join(merged_dir, out_name)
 
             # Buat file daftar (concat demuxer)
