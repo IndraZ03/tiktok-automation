@@ -5,6 +5,7 @@ from moviepy.editor import VideoFileClip, ImageClip, TextClip, CompositeVideoCli
 import math
 from tqdm import tqdm
 import time
+import threading
 
 # Ganti dengan token bot Telegram kamu (dapat dari BotFather)
 BOT_TOKEN = '8577651733:AAG69uuoImXQpe5qcEtMdlwgu3_6rQAvaBI'
@@ -46,11 +47,30 @@ def handle_download_command(message):
     progress_msg_id = progress_msg.message_id
 
     try:
-        # Progress hook untuk yt-dlp
+        # Variable shared untuk percent download
+        current_percent = "0"
+        download_complete = False
+
+        # Progress hook untuk yt-dlp (update variable)
         def download_progress(d):
+            nonlocal current_percent
             if d['status'] == 'downloading':
-                percent = d.get('_percent_str', '0%').strip('%')
-                update_progress(message, progress_msg_id, f"Mengunduh video: {percent}%...")
+                current_percent = d.get('_percent_str', '0%').strip('%')
+
+        # Thread untuk update realtime setiap 1 detik
+        def realtime_update_thread():
+            nonlocal download_complete
+            last_text = ""
+            while not download_complete:
+                new_text = f"Mengunduh video: {current_percent}%..."
+                if new_text != last_text:
+                    update_progress(message, progress_msg_id, new_text)
+                    last_text = new_text
+                time.sleep(1)
+
+        # Jalankan thread update
+        update_thread = threading.Thread(target=realtime_update_thread)
+        update_thread.start()
 
         # Opsi yt-dlp untuk download video terbaik
         ydl_opts = {
@@ -66,6 +86,10 @@ def handle_download_command(message):
             video_title = info['title']
             video_ext = info['ext']
             video_path = os.path.join(OUTPUT_FOLDER, f"{video_title}.{video_ext}")
+
+        # Stop thread setelah download selesai
+        download_complete = True
+        update_thread.join()
 
         # Update progress ke splitting
         update_progress(message, progress_msg_id, "Download selesai. Mulai splitting: 0%...")
