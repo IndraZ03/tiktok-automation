@@ -634,6 +634,9 @@ class AutomationEngine:
                 self.set_tab_status(i, 0, "stopped")
         else:
             self.log("🎉 SEMUA SIKLUS SELESAI!")
+            # ── Merge videos if enabled ───────────────────────────────────
+            if cfg.get("merge_videos", True):
+                self.merge_videos_pairs()
             self.stat_q.put({"done": True})
 
         # ── Kill Chrome after all cycles done or stopped ─────────────────────
@@ -642,6 +645,83 @@ class AutomationEngine:
         except Exception:
             pass
         self.kill_chrome()
+
+    # ── Merge Videos ──────────────────────────────────────────────────────────
+    def merge_videos_pairs(self):
+        """Gabungkan setiap pasangan 2 video menjadi 1 video ~20 detik menggunakan FFmpeg."""
+        output_dir  = self.cfg["output_dir"]
+        merged_dir  = self.cfg.get("merged_dir",
+                                   os.path.join(output_dir, "..", "Output_Merged"))
+        merged_dir  = os.path.normpath(merged_dir)
+        os.makedirs(merged_dir, exist_ok=True)
+
+        # Kumpulkan semua file .mp4 di output_dir, urutkan berdasarkan nomor
+        def _sort_key(f):
+            m = re.search(r'(\d+)', os.path.basename(f))
+            return int(m.group(1)) if m else 0
+
+        all_files = sorted(
+            glob.glob(os.path.join(output_dir, "*.mp4")),
+            key=_sort_key
+        )
+
+        if len(all_files) < 2:
+            self.log("Merge: kurang dari 2 video di output dir, skip.", "WARN")
+            return
+
+        self.log(f"🎬 Mulai merge {len(all_files)} video menjadi pasangan (2→1)...")
+
+        pairs = [(all_files[i], all_files[i + 1])
+                 for i in range(0, len(all_files) - 1, 2)]
+
+        # Cari nomor output merged selanjutnya
+        existing_merged = glob.glob(os.path.join(merged_dir, "merged_*.mp4"))
+        next_num = len(existing_merged) + 1
+
+        for idx, (vid1, vid2) in enumerate(pairs):
+            if self._stop.is_set():
+                break
+            out_name = f"merged_{next_num + idx:04d}.mp4"
+            out_path = os.path.join(merged_dir, out_name)
+
+            # Buat file daftar (concat demuxer)
+            list_file = os.path.join(merged_dir, f"_list_{idx}.txt")
+            try:
+                with open(list_file, "w", encoding="utf-8") as lf:
+                    lf.write(f"file '{vid1}'\n")
+                    lf.write(f"file '{vid2}'\n")
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", list_file,
+                    "-c", "copy",
+                    out_path
+                ]
+                self.log(
+                    f"  Merge [{idx+1}/{len(pairs)}]: "
+                    f"{os.path.basename(vid1)} + {os.path.basename(vid2)} → {out_name}"
+                )
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode == 0:
+                    self.log(f"  ✅  {out_name} berhasil dibuat")
+                else:
+                    self.log(f"  ❌ Gagal merge: {result.stderr[-300:]}", "ERROR")
+            except FileNotFoundError:
+                self.log("  ❌ FFmpeg tidak ditemukan! Pastikan ffmpeg ada di PATH.", "ERROR")
+                break
+            except Exception as e:
+                self.log(f"  ❌ Error merge pasangan {idx+1}: {e}", "ERROR")
+            finally:
+                if os.path.exists(list_file):
+                    try:
+                        os.remove(list_file)
+                    except Exception:
+                        pass
+
+        self.log(f"🎬 Merge selesai! Hasil tersimpan di: {merged_dir}")
+        self.stat_q.put({"merged_dir": merged_dir})
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -861,35 +941,60 @@ class GrokApp(tk.Tk):
         self._chk_use_img_all.pack(side="left")
         self._on_alternate_changed()  # Set initial visibility
 
+        # ── Row 2b - Checkbox: Gabungkan 2 video menjadi 1 (20 detik) ─────
+        chk_frame2 = tk.Frame(card, bg=CARD)
+        chk_frame2.grid(row=2, column=0, columnspan=6, sticky="w", pady=(2, 0))
+        # (actually put in separate row; we need to shift rows below by using a new frame)
+        # Reset: use a dedicated sub-frame below chk_frame
+        chk_frame2.grid_forget()
+        merge_frame = tk.Frame(card, bg=CARD)
+        merge_frame.grid(row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
+
+        self.var_merge_videos = tk.BooleanVar(value=True)
+        chk_merge = ttk.Checkbutton(
+            merge_frame,
+            text="🎬 Gabungkan 2 Video Menjadi 1 (output 10 dtk → digabung jadi 20 dtk) setelah semua siklus",
+            variable=self.var_merge_videos,
+            style="TCheckbutton")
+        chk_merge.pack(side="left")
+
         # Paths
-        tk.Label(card, text="Output Dir:", **lbl_kw).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        tk.Label(card, text="Output Dir:", **lbl_kw).grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.var_outdir = tk.StringVar(value=r"C:\tiktok_automation\Output")
         ent_out = ttk.Entry(card, textvariable=self.var_outdir, width=30)
-        ent_out.grid(row=3, column=1, columnspan=4, sticky="ew", padx=(4, 4), pady=(8, 0))
+        ent_out.grid(row=4, column=1, columnspan=4, sticky="ew", padx=(4, 4), pady=(8, 0))
         ttk.Button(card, text="…", style="Flat.TButton", width=3,
                    command=lambda: self._browse_dir(self.var_outdir)
-                   ).grid(row=3, column=5, padx=(0, 4), pady=(8, 0))
+                   ).grid(row=4, column=5, padx=(0, 4), pady=(8, 0))
 
-        tk.Label(card, text="Bahan Dir:", **lbl_kw).grid(row=4, column=0, sticky="w", pady=(4, 0))
+        tk.Label(card, text="Bahan Dir:", **lbl_kw).grid(row=5, column=0, sticky="w", pady=(4, 0))
         self.var_bahandir = tk.StringVar(value=r"C:\tiktok_automation\tab_bahan")
         ent_bhn = ttk.Entry(card, textvariable=self.var_bahandir, width=30)
-        ent_bhn.grid(row=4, column=1, columnspan=4, sticky="ew", padx=(4, 4), pady=(4, 0))
+        ent_bhn.grid(row=5, column=1, columnspan=4, sticky="ew", padx=(4, 4), pady=(4, 0))
         ttk.Button(card, text="…", style="Flat.TButton", width=3,
                    command=lambda: self._browse_dir(self.var_bahandir)
-                   ).grid(row=4, column=5, padx=(0, 4), pady=(4, 0))
+                   ).grid(row=5, column=5, padx=(0, 4), pady=(4, 0))
 
-        # ──── Row 5: Output Destination (Local / Google Drive) ────────────────────────
+        tk.Label(card, text="Merged Dir:", **lbl_kw).grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.var_mergeddir = tk.StringVar(value=r"C:\tiktok_automation\Output_Merged")
+        ent_mrg = ttk.Entry(card, textvariable=self.var_mergeddir, width=30)
+        ent_mrg.grid(row=6, column=1, columnspan=4, sticky="ew", padx=(4, 4), pady=(4, 0))
+        ttk.Button(card, text="…", style="Flat.TButton", width=3,
+                   command=lambda: self._browse_dir(self.var_mergeddir)
+                   ).grid(row=6, column=5, padx=(0, 4), pady=(4, 0))
+
+        # ──── Row 8: Output Destination (Local / Google Drive) ────────────────────────
         sep2 = tk.Frame(card, bg=BORDER, height=1)
-        sep2.grid(row=5, column=0, columnspan=6, sticky="ew", pady=(10, 6))
+        sep2.grid(row=8, column=0, columnspan=6, sticky="ew", pady=(10, 6))
 
         tk.Label(card, text="💾  Simpan Output:", bg=CARD, fg=ACCENT,
-                 font=("Segoe UI", 10, "bold")).grid(row=6, column=0, columnspan=2,
+                 font=("Segoe UI", 10, "bold")).grid(row=9, column=0, columnspan=2,
                                                      sticky="w", pady=(0, 4))
 
         self.var_save_mode = tk.StringVar(value="local")
 
         dest_frame = tk.Frame(card, bg=CARD)
-        dest_frame.grid(row=7, column=0, columnspan=6, sticky="w")
+        dest_frame.grid(row=10, column=0, columnspan=6, sticky="w")
 
         rb_local = tk.Radiobutton(
             dest_frame, text="📂  Lokal (default)",
@@ -911,7 +1016,7 @@ class GrokApp(tk.Tk):
 
         # GDrive row (hidden by default)
         self._gdrive_row = tk.Frame(card, bg=CARD)
-        self._gdrive_row.grid(row=8, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        self._gdrive_row.grid(row=11, column=0, columnspan=6, sticky="ew", pady=(6, 0))
 
         tk.Label(self._gdrive_row, text="Link Folder GDrive:",
                  bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(side="left")
@@ -1261,6 +1366,8 @@ class GrokApp(tk.Tk):
             "debug_port":       self.var_port.get(),
             "output_dir":       self.var_outdir.get(),
             "tab_bahan_dir":    self.var_bahandir.get(),
+            "merged_dir":       self.var_mergeddir.get(),
+            "merge_videos":     self.var_merge_videos.get(),
             "chrome_path":      r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             "user_data_dir":    r"C:\tiktok_automation\user_data\1",
             "target_url":       "https://vidabot.markasai.com/generate-grok",
@@ -1336,10 +1443,20 @@ class GrokApp(tk.Tk):
                 if ev.get("done"):
                     self._set_idle()
                     self._refresh_output_folder()
-                    messagebox.showinfo(
-                        "🎉 Selesai!",
-                        f"Semua siklus telah selesai!\nCek folder output: {self.var_outdir.get()}"
-                    )
+                    merged_dir = ev.get("merged_dir", "")
+                    if merged_dir:
+                        info_msg = (
+                            f"Semua siklus telah selesai!\n"
+                            f"Video asli: {self.var_outdir.get()}\n"
+                            f"Video gabungan: {merged_dir}"
+                        )
+                    else:
+                        info_msg = f"Semua siklus telah selesai!\nCek folder output: {self.var_outdir.get()}"
+                    messagebox.showinfo("🎉 Selesai!", info_msg)
+
+                if "merged_dir" in ev and not ev.get("done"):
+                    # partial merge notification
+                    self._append_log(f"🎬 Video gabungan tersimpan di: {ev['merged_dir']}")
         except queue.Empty:
             pass
 

@@ -52,6 +52,8 @@ DEFAULTS = {
     "alternate_image": True,    # True = selang-seling, False = lihat use_image_all
     "use_image_all": False,     # Jika alternate_image False, apakah semua pakai image
     "output_dir": os.path.join(APP_DIR, "Output"),
+    "merged_dir": os.path.join(APP_DIR, "Output_Merged"),
+    "merge_videos": True,       # Gabungkan 2 video menjadi 1 (20 dtk) setelah semua siklus
     "tab_bahan_dir": os.path.join(APP_DIR, "tab_bahan"),
     "save_local": True,
     "user_data_dir": os.path.join(APP_DIR, "user_data", "1"),
@@ -309,6 +311,8 @@ def settings_text(cfg):
         f"7️⃣ Bahan Dir: <code>{cfg['tab_bahan_dir']}</code>\n"
         f"8️⃣ Simpan Lokal: <b>{'✅ Ya' if cfg['save_local'] else '❌ Tidak'}</b>\n"
         f"9️⃣ User Data Dir: <code>{cfg['user_data_dir']}</code>\n"
+        f"🎬 Gabung 2 Video (20 dtk): <b>{'✅ Aktif' if cfg.get('merge_videos', True) else '❌ Nonaktif'}</b>\n"
+        f"   Merged Dir: <code>{cfg.get('merged_dir', os.path.join(APP_DIR, 'Output_Merged'))}</code>\n"
         f"🔟 Prompts ({len(cfg['prompts'])}):\n{prompts_preview}\n\n"
         "Kirim nomor (1-9) untuk ubah, atau gunakan tombol di bawah.\n"
         "Kirim /cancel untuk tutup."
@@ -324,6 +328,10 @@ def settings_kb(cfg):
          InlineKeyboardButton(
             f"{'☑' if cfg['save_local'] else '☐'} Simpan Lokal",
             callback_data="stg_toggle_local"
+        ),
+         InlineKeyboardButton(
+            f"{'🎬☑' if cfg.get('merge_videos', True) else '🎬☐'} Gabung Video",
+            callback_data="stg_toggle_merge"
         )],
         [InlineKeyboardButton("🔄 Selang-seling Image", callback_data="stg_img_alternate"),
          InlineKeyboardButton("🖼 Semua Image", callback_data="stg_img_all"),
@@ -484,6 +492,9 @@ async def settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "stg_toggle_local":
         cfg["save_local"] = not cfg["save_local"]
 
+    elif data == "stg_toggle_merge":
+        cfg["merge_videos"] = not cfg.get("merge_videos", True)
+
     elif data == "stg_img_alternate":
         cfg["alternate_image"] = True
 
@@ -573,6 +584,8 @@ async def start_generate(bot, chat_id, uid, cfg):
         "n_cycles": cfg["n_cycles"],
         "prompts": cfg["prompts"],
         "output_dir": cfg["output_dir"],
+        "merged_dir": cfg.get("merged_dir", os.path.join(APP_DIR, "Output_Merged")),
+        "merge_videos": cfg.get("merge_videos", True),
         "tab_bahan_dir": cfg["tab_bahan_dir"],
         "debug_port": cfg["debug_port"],
         "headless": cfg["headless"],

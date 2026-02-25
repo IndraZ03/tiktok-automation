@@ -461,6 +461,38 @@ def do_post_tiktok(driver, deskripsi, schedule_dt, log_fn):
     caption.send_keys(Keys.CONTROL + "a"); caption.send_keys(Keys.BACKSPACE)
     caption.send_keys(deskripsi); time.sleep(1)
     
+    # ── Content Check Lite ── Jika toggle ON, klik agar menjadi OFF
+    try:
+        log_fn("  Memeriksa Content Check Lite...", "info")
+        # Cari switch Content Check Lite yang sedang checked (ON)
+        # Indikator: div dengan class Switch__root--checked-true di dekat headline 'Content check lite'
+        checked_switches = driver.find_elements(
+            By.XPATH,
+            "//span[contains(text(),'Content check lite')]"
+            "/ancestor::div[contains(@class,'jsx-')]"
+            "//div[contains(@class,'Switch__root--checked-true')]"
+            "//input[@role='switch']"
+        )
+        if not checked_switches:
+            # Fallback: cari semua switch input yang checked (aria-checked="true")
+            checked_switches = driver.find_elements(
+                By.XPATH,
+                "//div[@aria-checked='true' and contains(@class,'Switch__content')]"
+                "/ancestor::div[contains(@class,'Switch__root')]"
+                "//input[@role='switch']"
+            )
+        if checked_switches:
+            switch_input = checked_switches[0]
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", switch_input)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", switch_input)
+            time.sleep(1)
+            log_fn("  Content Check Lite dimatikan.", "success")
+        else:
+            log_fn("  Content Check Lite sudah OFF atau tidak ditemukan.", "info")
+    except Exception as e:
+        log_fn(f"  Warning Content Check Lite: {e}", "warn")
+    
     # ── Schedule ──
     log_fn("  Mengatur schedule...", "info")
     WebDriverWait(driver, 15).until(EC.presence_of_element_located(
