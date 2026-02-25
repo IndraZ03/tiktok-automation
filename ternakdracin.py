@@ -6,8 +6,7 @@ import math
 from tqdm import tqdm
 import time
 import threading
-from PIL import Image
-Image.ANTIALIAS = Image.LANCZOS  # Atau Image.Resampling.LANCZOS kalau Pillow >=10
+
 # Ganti dengan token bot Telegram kamu (dapat dari BotFather)
 BOT_TOKEN = '8577651733:AAG69uuoImXQpe5qcEtMdlwgu3_6rQAvaBI'
 
@@ -92,80 +91,97 @@ def handle_download_command(message):
         download_complete = True
         update_thread.join()
 
+        # Tambah delay untuk beri waktu rename file selesai (fix WinError 32)
+        time.sleep(2)
+
         # Update progress ke splitting
         update_progress(message, progress_msg_id, "Download selesai. Mulai splitting: 0%...")
 
-        # Split video menjadi chunk 3 menit (180 detik)
-        clip = VideoFileClip(video_path)
-        duration = clip.duration
-        width, height = clip.size
-        chunk_duration = 180  # 3 menit dalam detik
-        num_chunks = math.ceil(duration / chunk_duration)
+        # Retry mechanism kalau file masih locked
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Split video menjadi chunk 3 menit (180 detik)
+                clip = VideoFileClip(video_path)
+                duration = clip.duration
+                width, height = clip.size
+                chunk_duration = 180  # 3 menit dalam detik
+                num_chunks = math.ceil(duration / chunk_duration)
 
-        # Ukuran watermark: 10% dari lebar video
-        watermark_size = int(width * 0.1)
-        # Ukuran font text: 5% dari tinggi video
-        font_size = int(height * 0.05)
+                # Ukuran watermark: 10% dari lebar video
+                watermark_size = int(width * 0.1)
+                # Ukuran font text: 5% dari tinggi video
+                font_size = int(height * 0.05)
 
-        # Load logo jika ada
-        if os.path.exists(LOGO_PATH):
-            logo = ImageClip(LOGO_PATH).resize(width=watermark_size).set_position(("left", "top"))
-        else:
-            logo = None
-            bot.reply_to(message, "Warning: logo.png tidak ditemukan, skip watermark.")
+                # Load logo jika ada
+                if os.path.exists(LOGO_PATH):
+                    logo = ImageClip(LOGO_PATH).resize(width=watermark_size).set_position(("left", "top"))
+                else:
+                    logo = None
+                    bot.reply_to(message, "Warning: logo.png tidak ditemukan, skip watermark.")
 
-        total_steps = num_chunks * 100  # Estimasi total progress untuk semua chunk
-        current_step = 0
+                total_steps = num_chunks * 100  # Estimasi total progress untuk semua chunk
+                current_step = 0
 
-        for i in range(num_chunks):
-            start_time = i * chunk_duration
-            end_time = min((i + 1) * chunk_duration, duration)
-            chunk_clip = clip.subclip(start_time, end_time)
-            chunk_duration_actual = end_time - start_time  # Durasi aktual chunk
+                for i in range(num_chunks):
+                    start_time = i * chunk_duration
+                    end_time = min((i + 1) * chunk_duration, duration)
+                    chunk_clip = clip.subclip(start_time, end_time)
+                    chunk_duration_actual = end_time - start_time  # Durasi aktual chunk
 
-            # Text overlay: "Judul Video - Part X" di bawah tengah
-            text = TextClip(f"{video_title} - Part {i+1}", fontsize=font_size, color='white', stroke_color='black', stroke_width=1)
-            text = text.set_position(('center', 'bottom')).set_duration(chunk_duration_actual)
+                    # Text overlay: "Judul Video - Part X" di bawah tengah
+                    text = TextClip(f"{video_title} - Part {i+1}", fontsize=font_size, color='white', stroke_color='black', stroke_width=1)
+                    text = text.set_position(('center', 'bottom')).set_duration(chunk_duration_actual)
 
-            # Komposisi: Video + Watermark (jika ada) + Text
-            elements = [chunk_clip, text]
-            if logo:
-                logo_chunk = logo.set_duration(chunk_duration_actual)  # Sesuaikan durasi logo
-                elements.append(logo_chunk)
+                    # Komposisi: Video + Watermark (jika ada) + Text
+                    elements = [chunk_clip, text]
+                    if logo:
+                        logo_chunk = logo.set_duration(chunk_duration_actual)  # Sesuaikan durasi logo
+                        elements.append(logo_chunk)
 
-            final_chunk = CompositeVideoClip(elements)
+                    final_chunk = CompositeVideoClip(elements)
 
-            # Simpan chunk dengan progress bar (tqdm untuk track write_videofile)
-            chunk_filename = os.path.join(OUTPUT_FOLDER, f"{video_title}_part_{i+1}.{video_ext}")
+                    # Simpan chunk dengan progress bar (tqdm untuk track write_videofile)
+                    chunk_filename = os.path.join(OUTPUT_FOLDER, f"{video_title}_part_{i+1}.{video_ext}")
 
-            # Custom progress untuk moviepy write (pakai tqdm)
-            with tqdm(total=100, desc=f"Chunk {i+1}", leave=False) as pbar:
-                def progress_callback(progress):
-                    nonlocal current_step
-                    pbar.n = int(progress * 100)
-                    pbar.refresh()
-                    overall_percent = int((current_step + pbar.n) / total_steps * 100)
-                    update_progress(message, progress_msg_id, f"Splitting chunk {i+1}/{num_chunks}: {pbar.n}% (Total: {overall_percent}%)...")
-                
-                # Moviepy nggak punya built-in callback, jadi kita simulasi dengan time-based update
-                # Tapi untuk akurat, kita pakai wrapper sederhana
-                start_render = time.time()
-                final_chunk.write_videofile(chunk_filename, codec='libx264', audio_codec='aac', logger=None)  # Matikan logger default
-                # Simulasi progress (karena moviepy lambat di callback, kita update setiap detik)
-                while time.time() - start_render < chunk_duration_actual / 2:  # Estimasi waktu render
-                    elapsed = time.time() - start_render
-                    estimated_progress = min(1, elapsed / (chunk_duration_actual / 2))  # Asumsi render ~setengah durasi
-                    progress_callback(estimated_progress)
-                    time.sleep(1)
-                progress_callback(1.0)  # Selesai
+                    # Custom progress untuk moviepy write (pakai tqdm)
+                    with tqdm(total=100, desc=f"Chunk {i+1}", leave=False) as pbar:
+                        def progress_callback(progress):
+                            nonlocal current_step
+                            pbar.n = int(progress * 100)
+                            pbar.refresh()
+                            overall_percent = int((current_step + pbar.n) / total_steps * 100)
+                            update_progress(message, progress_msg_id, f"Splitting chunk {i+1}/{num_chunks}: {pbar.n}% (Total: {overall_percent}%)...")
+                        
+                        # Moviepy nggak punya built-in callback, jadi kita simulasi dengan time-based update
+                        start_render = time.time()
+                        final_chunk.write_videofile(chunk_filename, codec='libx264', audio_codec='aac', logger=None)  # Matikan logger default
+                        # Simulasi progress (karena moviepy lambat di callback, kita update setiap detik)
+                        while time.time() - start_render < chunk_duration_actual / 2:  # Estimasi waktu render
+                            elapsed = time.time() - start_render
+                            estimated_progress = min(1, elapsed / (chunk_duration_actual / 2))  # Asumsi render ~setengah durasi
+                            progress_callback(estimated_progress)
+                            time.sleep(1)
+                        progress_callback(1.0)  # Selesai
 
-            current_step += 100
-            bot.reply_to(message, f"Chunk {i+1} selesai (dengan watermark & overlay): {chunk_filename}")
+                    current_step += 100
+                    bot.reply_to(message, f"Chunk {i+1} selesai (dengan watermark & overlay): {chunk_filename}")
 
-        # Hapus file original jika tidak dibutuhkan (opsional, uncomment jika mau)
-        # os.remove(video_path)
+                # Tutup clip setelah selesai (hindari lock)
+                clip.close()
 
-        update_progress(message, progress_msg_id, "Proses selesai! Semua chunk disimpan di folder video-yt.")
+                # Hapus file original jika tidak dibutuhkan (opsional, uncomment jika mau)
+                # os.remove(video_path)
+
+                update_progress(message, progress_msg_id, "Proses selesai! Semua chunk disimpan di folder video-yt.")
+                break  # Sukses, keluar loop retry
+
+            except PermissionError as pe:
+                if attempt < max_retries - 1:
+                    bot.reply_to(message, f"File locked (WinError 32), retry ke-{attempt+1} setelah 2 detik...")
+                    time.sleep(2)
+                else:
+                    raise pe  # Gagal setelah max retry
 
     except Exception as e:
         bot.reply_to(message, f"Error: {str(e)}")
