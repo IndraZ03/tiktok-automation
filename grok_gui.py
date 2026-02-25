@@ -413,11 +413,33 @@ class AutomationEngine:
                     break
             except: pass
 
-            # Error?
+            # Error? (debug log)
             try:
                 logs = driver.find_element(By.ID, "debugLog").get_attribute("innerText")
                 if any(x in logs for x in ["Switching worker", "7 failed", "12 failed"]):
                     self.log(f"Tab {tab_idx+1}: Error terdeteksi di log", "WARN")
+                    self.set_tab_status(tab_idx, 0, "error")
+                    return False
+            except: pass
+
+            # Generation Failed UI? (video-placeholder merah muncul)
+            try:
+                fail_els = driver.find_elements(
+                    By.XPATH,
+                    "//div[contains(@class,'video-placeholder') and .//*[contains(text(),'Generation Failed')]]"
+                )
+                if fail_els:
+                    # Ambil pesan alasan jika ada
+                    reason = ""
+                    try:
+                        sub = fail_els[0].find_elements(By.XPATH, ".//div[contains(@style,'font-size:12px')]")
+                        if sub:
+                            reason = sub[0].text.strip()
+                    except: pass
+                    self.log(
+                        f"Tab {tab_idx+1}: ❌ Generation Failed{' – ' + reason if reason else ''}. "
+                        f"Tab akan di-refresh & generate ulang...", "WARN"
+                    )
                     self.set_tab_status(tab_idx, 0, "error")
                     return False
             except: pass
