@@ -345,42 +345,76 @@ class AutomationEngine:
         self.log(f"Total tab: {len(driver.window_handles)}")
 
     # ── Generate Task ────────────────────────────────────────────────────────
-    def do_generate(self, driver, tab_idx, prompt, use_image):
-        self.set_tab_status(tab_idx, 0, "generating")
-        # Login guard
-        if "login" in driver.current_url:
-            self.set_tab_status(tab_idx, 0, "login")
-            self.do_login(driver)
-        wait = WebDriverWait(driver, 10)
+    def do_generate(self, driver, tab_idx, prompt, use_image, max_retries=3) -> bool:
+        """Fill prompt, optionally upload image, click Generate.
+        Returns True if generation was successfully started, False otherwise.
+        Retries up to max_retries times with a page refresh between attempts."""
+        url = self.cfg.get("target_url", "https://vidabot.markasai.com/generate-grok")
 
-        # Fill prompt
-        try:
-            pa = wait.until(EC.element_to_be_clickable((By.ID, "promptInput")))
-            pa.clear()
-            driver.execute_script("arguments[0].value = arguments[1];", pa, prompt)
-            driver.execute_script(
-                "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pa)
-        except Exception as e:
-            self.log(f"Tab {tab_idx+1}: Gagal isi prompt – {e}", "WARN")
-            return
+        for attempt in range(1, max_retries + 1):
+            if self._stop.is_set():
+                return False
 
-        # Upload image
-        if use_image:
-            img = self.get_random_image()
-            if img:
-                try:
-                    driver.find_element(By.ID, "imageInput").send_keys(img)
-                    time.sleep(1)
-                except Exception as e:
-                    self.log(f"Tab {tab_idx+1}: Gagal upload gambar – {e}", "WARN")
+            self.set_tab_status(tab_idx, 0, "generating")
 
-        # Click Generate
-        try:
-            btn = wait.until(EC.element_to_be_clickable((By.ID, "btnGenerate")))
-            btn.click()
-            self.log(f"Tab {tab_idx+1}: Generate diklik ✓")
-        except Exception as e:
-            self.log(f"Tab {tab_idx+1}: Gagal klik Generate – {e}", "ERROR")
+            # Login guard
+            try:
+                if "login" in driver.current_url:
+                    self.set_tab_status(tab_idx, 0, "login")
+                    self.do_login(driver)
+            except Exception:
+                pass
+
+            wait = WebDriverWait(driver, 15)
+
+            # Fill prompt
+            try:
+                pa = wait.until(EC.element_to_be_clickable((By.ID, "promptInput")))
+                pa.clear()
+                driver.execute_script("arguments[0].value = arguments[1];", pa, prompt)
+                driver.execute_script(
+                    "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pa)
+            except Exception as e:
+                self.log(f"Tab {tab_idx+1}: Gagal isi prompt (attempt {attempt}/{max_retries}) – {e}", "WARN")
+                if attempt < max_retries:
+                    self.log(f"Tab {tab_idx+1}: Refresh halaman & coba lagi...", "INFO")
+                    try:
+                        driver.get(url)
+                        time.sleep(3)
+                    except Exception:
+                        pass
+                    continue
+                return False
+
+            # Upload image
+            if use_image:
+                img = self.get_random_image()
+                if img:
+                    try:
+                        driver.find_element(By.ID, "imageInput").send_keys(img)
+                        time.sleep(1)
+                    except Exception as e:
+                        self.log(f"Tab {tab_idx+1}: Gagal upload gambar – {e}", "WARN")
+
+            # Click Generate
+            try:
+                btn = wait.until(EC.element_to_be_clickable((By.ID, "btnGenerate")))
+                btn.click()
+                self.log(f"Tab {tab_idx+1}: Generate diklik ✓")
+                return True
+            except Exception as e:
+                self.log(f"Tab {tab_idx+1}: Gagal klik Generate (attempt {attempt}/{max_retries}) – {e}", "ERROR")
+                if attempt < max_retries:
+                    self.log(f"Tab {tab_idx+1}: Refresh halaman & coba lagi...", "INFO")
+                    try:
+                        driver.get(url)
+                        time.sleep(3)
+                    except Exception:
+                        pass
+                    continue
+                return False
+
+        return False
 
     # ── Wait & Download ──────────────────────────────────────────────────────
     def wait_and_download(self, driver, tab_idx) -> bool:
@@ -496,11 +530,28 @@ class AutomationEngine:
                         with open(save_path, 'wb') as f:
                             for chunk in r.iter_content(8192):
                                 f.write(chunk)
+                        downloaded = True
                         self.log(f"Tab {tab_idx+1}: ✅ Saved {filename} (fallback)")
                 except Exception as e:
                     self.log(f"Tab {tab_idx+1}: Fallback fail – {e}", "ERROR")
                 driver.close()
                 driver.switch_to.window(main_tab)
+
+            # ── Validate downloaded file ──────────────────────────────────
+            if downloaded and os.path.exists(save_path):
+                fsize = os.path.getsize(save_path)
+                if fsize < 10240:  # < 10 KB = almost certainly corrupt
+                    self.log(f"Tab {tab_idx+1}: ⚠ File {filename} terlalu kecil ({fsize} bytes), dihapus.", "WARN")
+                    try:
+                        os.remove(save_path)
+                    except Exception:
+                        pass
+                    downloaded = False
+
+            if not downloaded:
+                self.log(f"Tab {tab_idx+1}: ❌ Download gagal total.", "ERROR")
+                self.set_tab_status(tab_idx, 0, "error")
+                return False
 
             self.set_tab_status(tab_idx, 100, "success")
 
@@ -603,6 +654,8 @@ class AutomationEngine:
                 for i in range(n_tabs):
                     task_handles[i] = cur[i] if i < len(cur) else None
 
+            failed_tabs = []  # track tabs that need re-generation
+
             for i in range(n_tabs):
                 if self._stop.is_set():
                     break
@@ -610,6 +663,7 @@ class AutomationEngine:
                 handle = task_handles[i]
                 if not handle:
                     self.log(f"Tab {i+1}: Closed/Failed – skip")
+                    failed_tabs.append(i)
                     continue
 
                 try:
@@ -618,34 +672,81 @@ class AutomationEngine:
                     self.log(f"Tab {i+1}: Tidak ditemukan", "WARN")
                     task_handles[i] = None
                     self.set_tab_status(i, 0, "error")
+                    failed_tabs.append(i)
                     continue
 
                 ok = self.wait_and_download(driver, i)
                 if not ok:
-                    driver.close()
-                    task_handles[i] = None
+                    # DON'T close the tab – refresh in-place & regenerate
+                    failed_tabs.append(i)
 
-            # Respawn failed tabs
-            self.log("--- Memeriksa tab yang perlu di-restart ---")
-            for i in range(n_tabs):
+            # ── Handle failed tabs: refresh in-place first, then respawn if needed ──
+            if failed_tabs:
+                self.log(f"--- {len(failed_tabs)} tab gagal, mencoba recovery ---")
+
+            for i in failed_tabs:
                 if self._stop.is_set():
                     break
+
+                handle = task_handles[i]
+
+                # ── If handle is still valid, try in-place refresh + regenerate ──
+                if handle is not None:
+                    try:
+                        driver.switch_to.window(handle)
+                        self.log(f"Tab {i+1}: Refresh halaman & generate ulang...")
+                        driver.get(url)
+                        time.sleep(3)
+                        # Login guard
+                        if "login" in driver.current_url:
+                            self.set_tab_status(i, 0, "login")
+                            self.do_login(driver)
+                            if url not in driver.current_url:
+                                driver.get(url)
+                                time.sleep(2)
+                        gen_ok = self.do_generate(driver, i, tab_config[i][0], tab_config[i][1])
+                        if gen_ok:
+                            self.log(f"Tab {i+1}: ✓ Generate ulang berhasil dimulai")
+                            continue
+                        else:
+                            # In-place recovery failed, close and respawn
+                            self.log(f"Tab {i+1}: In-place recovery gagal, respawning...", "WARN")
+                            try:
+                                driver.close()
+                            except Exception:
+                                pass
+                            task_handles[i] = None
+                    except Exception as e:
+                        self.log(f"Tab {i+1}: Error saat recovery – {e}", "WARN")
+                        task_handles[i] = None
+
+                # ── Respawn: create a brand new tab (last resort) ──
                 if task_handles[i] is None:
                     self.log(f"Respawning Tab {i+1}...")
-                    driver.switch_to.new_window('tab')
-                    nh = driver.current_window_handle
-                    task_handles[i] = nh
-                    driver.get(url)
-                    time.sleep(2)
-                    # Login guard on respawn
-                    if "login" in driver.current_url:
-                        self.set_tab_status(i, 0, "login")
-                        self.do_login(driver)
-                        if url not in driver.current_url:
-                            driver.get(url)
-                            time.sleep(1)
-                    self.do_generate(driver, i, tab_config[i][0], tab_config[i][1])
-                    time.sleep(1)
+                    try:
+                        driver.switch_to.new_window('tab')
+                        nh = driver.current_window_handle
+                        task_handles[i] = nh
+                        driver.get(url)
+                        time.sleep(3)
+                        # Login guard on respawn
+                        if "login" in driver.current_url:
+                            self.set_tab_status(i, 0, "login")
+                            self.do_login(driver)
+                            if url not in driver.current_url:
+                                driver.get(url)
+                                time.sleep(2)
+                        gen_ok = self.do_generate(driver, i, tab_config[i][0], tab_config[i][1])
+                        if not gen_ok:
+                            self.log(f"Tab {i+1}: ❌ Respawn generate gagal, tab akan di-skip.", "ERROR")
+                            try:
+                                driver.close()
+                            except Exception:
+                                pass
+                            task_handles[i] = None
+                    except Exception as e:
+                        self.log(f"Tab {i+1}: ❌ Respawn gagal total – {e}", "ERROR")
+                        task_handles[i] = None
 
             elapsed = time.time() - t0
             self.log(f"Siklus {cycle+1} selesai – {int(elapsed//60)}m {int(elapsed%60)}s")
@@ -682,13 +783,23 @@ class AutomationEngine:
             m = re.search(r'(\d+)', os.path.basename(f))
             return int(m.group(1)) if m else 0
 
-        all_files = sorted(
+        all_files_raw = sorted(
             glob.glob(os.path.join(output_dir, "*.mp4")),
             key=_sort_key
         )
 
+        # Validate each file: must exist and be > 10KB
+        MIN_SIZE = 10240  # 10 KB
+        all_files = []
+        for f in all_files_raw:
+            if os.path.exists(f) and os.path.getsize(f) > MIN_SIZE:
+                all_files.append(f)
+            else:
+                sz = os.path.getsize(f) if os.path.exists(f) else 0
+                self.log(f"Merge: skip file invalid/corrupt: {os.path.basename(f)} ({sz} bytes)", "WARN")
+
         if len(all_files) < 2:
-            self.log("Merge: kurang dari 2 video di output dir, skip.", "WARN")
+            self.log("Merge: kurang dari 2 video valid di output dir, skip.", "WARN")
             return
 
         self.log(f"🎬 Mulai merge {len(all_files)} video menjadi pasangan (2→1)...")
