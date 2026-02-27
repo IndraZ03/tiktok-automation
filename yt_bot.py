@@ -221,12 +221,17 @@ def get_video_info(filepath):
 
 
 def sanitize_filename(title):
-    """Bersihkan judul untuk nama file."""
-    title = re.sub(r'[<>:"/\\|?*]', '', title)
-    title = title.strip()
-    if len(title) > 80:
-        title = title[:80]
-    return title
+    """Bersihkan judul untuk nama file (Windows-safe)."""
+    # Remove characters that are problematic on Windows
+    title = re.sub(r'[<>:"/\\|?*!,;\[\]{}()\']', '', title)
+    # Replace multiple spaces/dots with single
+    title = re.sub(r'\s+', ' ', title)
+    title = re.sub(r'\.{2,}', '.', title)
+    title = title.strip('. ')
+    # Limit length to avoid path-too-long issues (title appears in both folder and filename)
+    if len(title) > 60:
+        title = title[:60].rstrip('. ')
+    return title if title else "video"
 
 
 def truncate_title(title, max_len=20):
@@ -607,14 +612,19 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     last_edit_time = [time.time()]  # mutable for closure
     MIN_EDIT_INTERVAL = 2.0  # minimum detik antar edit agar tidak rate-limited
     
-    async def safe_edit(text):
-        """Edit message dengan rate limiting."""
+    async def safe_edit(text, force=False):
+        """Edit message dengan rate limiting dan timeout."""
         now = time.time()
-        if now - last_edit_time[0] < MIN_EDIT_INTERVAL:
+        if not force and now - last_edit_time[0] < MIN_EDIT_INTERVAL:
             return
         try:
-            await progress_msg.edit_text(text, parse_mode=ParseMode.HTML)
-            last_edit_time[0] = now
+            await asyncio.wait_for(
+                progress_msg.edit_text(text, parse_mode=ParseMode.HTML),
+                timeout=5.0
+            )
+            last_edit_time[0] = time.time()
+        except asyncio.TimeoutError:
+            logger.warning("Telegram edit_text timeout, skipping update")
         except Exception:
             pass
     
@@ -709,7 +719,6 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 
                 stages[2]["pct"] = int(part_num / len(output_files) * 100)
                 stages[2]["detail"] = f"{saved_count}/{len(output_files)} uploaded"
-                last_edit_time[0] = 0
                 await safe_edit(build_progress_message(title, stages))
             
             save_location = f"Google Drive (folder: {folder_id[:20]}...)" if folder_id else "Google Drive (root)"
@@ -717,21 +726,47 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             # ── Simpan ke folder lokal video_yt/<judul> ──
             video_folder = os.path.join(FINAL_DIR, safe_title)
-            os.makedirs(video_folder, exist_ok=True)
+            try:
+                os.makedirs(video_folder, exist_ok=True)
+            except Exception as e:
+                logger.error(f"Cannot create folder {video_folder}: {e}")
+                stages[2]["status"] = "error"
+                stages[2]["detail"] = f"Gagal buat folder: {str(e)[:100]}"
+                await safe_edit(build_progress_message(title, stages), force=True)
+                raise Exception(f"Gagal buat folder output: {e}")
             
             for i, out_file in enumerate(output_files):
                 part_num = i + 1
                 fname = os.path.basename(out_file)
                 dest = os.path.join(video_folder, fname)
+                
+                # Check if source file exists
+                if not os.path.exists(out_file):
+                    logger.error(f"Source file not found: {out_file}")
+                    stages[2]["detail"] = f"{saved_count}/{len(output_files)} tersimpan (Part {part_num} not found)"
+                    await safe_edit(build_progress_message(title, stages))
+                    continue
+                
                 try:
                     shutil.move(out_file, dest)
                     saved_count += 1
                 except Exception as e:
-                    logger.error(f"Move error {fname}: {e}")
+                    logger.error(f"Move error {fname}: {e}, trying copy...")
+                    # Fallback: copy + delete (move can fail cross-drive on Windows)
+                    try:
+                        shutil.copy2(out_file, dest)
+                        try:
+                            os.remove(out_file)
+                        except Exception:
+                            pass
+                        saved_count += 1
+                    except Exception as e2:
+                        logger.error(f"Copy also failed {fname}: {e2}")
+                        stages[2]["detail"] = f"{saved_count}/{len(output_files)} tersimpan (err: {str(e2)[:60]})"
+                        await safe_edit(build_progress_message(title, stages), force=True)
                 
                 stages[2]["pct"] = int(part_num / len(output_files) * 100)
                 stages[2]["detail"] = f"{saved_count}/{len(output_files)} tersimpan"
-                last_edit_time[0] = 0
                 await safe_edit(build_progress_message(title, stages))
             
             save_location = video_folder
