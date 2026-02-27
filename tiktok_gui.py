@@ -117,7 +117,7 @@ def do_upload_file(driver, file_path, log):
 
 def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
                   schedule_dt, stop_event, add_sound=False, add_product=True,
-                  skip_switches=False):
+                  skip_switches=False, hashtags=None):
     """
     Full posting flow: description, product, switches, sounds, schedule.
     schedule_dt: datetime object for when to schedule.
@@ -145,6 +145,28 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
     caption.click()
     caption.send_keys(Keys.CONTROL + "a"); caption.send_keys(Keys.BACKSPACE)
     caption.send_keys(deskripsi); time.sleep(1)
+
+    # ── Hashtags (typed char-by-char + Tab to confirm autocomplete) ──
+    if hashtags:
+        log(f"Menambahkan {len(hashtags)} hashtag...")
+        for tag in hashtags:
+            tag = tag.strip().lstrip('#')
+            if not tag:
+                continue
+            log(f"  Mengetik #{tag}...")
+            caption.send_keys(' ')
+            time.sleep(0.3)
+            caption.send_keys('#')
+            time.sleep(0.5)
+            for ch in tag:
+                caption.send_keys(ch)
+                time.sleep(0.15)
+            time.sleep(1.5)
+            caption.send_keys(Keys.TAB)
+            time.sleep(1)
+            log(f"  ✓ #{tag} ditambahkan")
+        log("✓ Semua hashtag ditambahkan")
+        time.sleep(1)
 
     # ── Add product ──
     if not add_product:
@@ -771,6 +793,14 @@ class TikTokSchedulerApp:
         self.desc_text.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
         self.desc_text.insert("1.0", "Segera Try out di speedu.online")
         row += 1
+        tk.Label(f, text="Hashtags (1 per baris):", bg=BG_CARD, fg=FG,
+                 font=("Segoe UI", 9)).grid(row=row, column=0, sticky="nw", pady=3)
+        self.hashtag_text = tk.Text(f, height=3, width=45, bg=BG_INPUT, fg=FG, insertbackground=FG,
+                                    font=("Segoe UI", 10), relief="flat", bd=2, wrap="word",
+                                    highlightthickness=1, highlightcolor=ACCENT)
+        self.hashtag_text.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        self.hashtag_text.insert("1.0", "fyp\nspeedu")
+        row += 1
         self.add_sound_var = tk.BooleanVar(value=False)
         cb = tk.Checkbutton(f, text="Tambahkan Sound (dari Favorites)", variable=self.add_sound_var,
                             bg=BG_CARD, fg=FG, selectcolor=BG_INPUT, activebackground=BG_CARD,
@@ -991,6 +1021,8 @@ class TikTokSchedulerApp:
             descs = [d.strip() for d in descs_raw.split("\n") if d.strip()]
             if not descs:
                 descs = [""]
+            hashtags_raw = self.hashtag_text.get("1.0", tk.END).strip()
+            hashtags = [h.strip() for h in hashtags_raw.split("\n") if h.strip()]
             hour = int(self.hour_entry.get().strip() or "1")
             minute = int(self.minute_entry.get().strip() or "0")
             date_str = self.date_entry.get().strip()
@@ -1063,7 +1095,7 @@ class TikTokSchedulerApp:
                     do_post_video(self.driver, desc, product_radio, product_title,
                                  self._log, current_dt, self.stop_event,
                                  add_sound=add_sound, add_product=add_product,
-                                 skip_switches=skip_switches)
+                                 skip_switches=skip_switches, hashtags=hashtags)
 
                     # Mark as uploaded
                     mark_uploaded(folder_name, video_name, db)
