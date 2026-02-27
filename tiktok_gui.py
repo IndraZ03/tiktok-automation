@@ -116,7 +116,7 @@ def do_upload_file(driver, file_path, log):
     time.sleep(5)
 
 def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
-                  schedule_dt, stop_event, add_sound=False):
+                  schedule_dt, stop_event, add_sound=False, add_product=True):
     """
     Full posting flow: description, product, switches, sounds, schedule.
     schedule_dt: datetime object for when to schedule.
@@ -146,194 +146,197 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
     caption.send_keys(deskripsi); time.sleep(1)
 
     # ── Add product ──
-    log("Menambahkan produk...")
+    if not add_product:
+        log("⏭ Produk dilewati (tidak diaktifkan)")
+    else:
+      log("Menambahkan produk...")
     # A – click + Add
-    add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Add']]")))
-    add_btn.click(); time.sleep(2)
-    # B – Next 1
-    n1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Next']]")))
-    n1.click(); time.sleep(2)
-    # C – Radio button selection
-    log(f"STEP C: Memilih produk: {nama_produk_radio[:60]}...")
-    xpath_produk = f"//input[@type='radio' and @name='{nama_produk_radio}']"
-    radio = wait.until(EC.presence_of_element_located((By.XPATH, xpath_produk)))
-    target_radio_wrapper = radio.find_element(By.XPATH, "./..")
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target_radio_wrapper)
-    time.sleep(1)
-    try:
-        target_radio_wrapper.click()
-        log("Klik wrapper produk (standar)")
-    except:
-        driver.execute_script("arguments[0].click();", target_radio_wrapper)
-        log("Klik wrapper produk (JS)")
-    time.sleep(1)
-    log("✓ Radio button produk dipilih")
+      add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Add']]")))
+      add_btn.click(); time.sleep(2)
+      # B – Next 1
+      n1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Next']]")))
+      n1.click(); time.sleep(2)
+      # C – Radio button selection
+      log(f"STEP C: Memilih produk: {nama_produk_radio[:60]}...")
+      xpath_produk = f"//input[@type='radio' and @name='{nama_produk_radio}']"
+      radio = wait.until(EC.presence_of_element_located((By.XPATH, xpath_produk)))
+      target_radio_wrapper = radio.find_element(By.XPATH, "./..")
+      driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target_radio_wrapper)
+      time.sleep(1)
+      try:
+          target_radio_wrapper.click()
+          log("Klik wrapper produk (standar)")
+      except:
+          driver.execute_script("arguments[0].click();", target_radio_wrapper)
+          log("Klik wrapper produk (JS)")
+      time.sleep(1)
+      log("✓ Radio button produk dipilih")
 
-    # D – Next 2 (Full logic from upload.py with verification & fallbacks)
-    log("STEP D: Mencoba klik Next tombol kedua...")
-    time.sleep(2)
-    
-    next_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
-    log(f"Ditemukan {len(next_buttons)} tombol Next")
-    
-    target_next = None
-    for i, btn in enumerate(next_buttons):
-        is_vis = btn.is_displayed()
-        is_en = btn.is_enabled()
-        cls = btn.get_attribute("class") or ""
-        aria_dis = btn.get_attribute("aria-disabled")
-        log(f"  Tombol {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}, aria-disabled={aria_dis}")
-        
-        if is_vis and "primary" in cls:
-            target_next = btn
-            log(f"  -> TERPILIH sebagai target")
-    
-    if target_next:
-        log("Tombol target ditemukan, mencoba klik...")
-        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_next)
-        time.sleep(1)
-        
-        # Method 1: ActionChains
-        try:
-            actions = ActionChains(driver)
-            actions.move_to_element(target_next).click().perform()
-            log("Klik dengan ActionChains berhasil")
-        except Exception as e_ac:
-            log(f"ActionChains gagal: {e_ac}")
-            # Method 2: Regular click
-            try:
-                target_next.click()
-                log("Klik biasa berhasil")
-            except:
-                # Method 3: JavaScript
-                driver.execute_script("arguments[0].click();", target_next)
-                log("Klik JavaScript berhasil")
-        
-        time.sleep(2)
-        
-        # VERIFICATION: Check if product input appeared
-        input_produk = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
-        
-        if len(input_produk) > 0 and input_produk[0].is_displayed():
-            log("✓ VERIFIKASI BERHASIL: Input nama produk muncul")
-        else:
-            after_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
-            if len(after_buttons) == len(next_buttons):
-                log("✗ VERIFIKASI GAGAL: Tombol Next masih sama, mencoba alternatif...")
-                try:
-                    target_radio_wrapper.send_keys(Keys.ENTER)
-                    log("Mengirim ENTER ke radio button")
-                    time.sleep(2)
-                except:
-                    pass
-                
-                input_produk_after = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
-                if len(input_produk_after) > 0:
-                    log("✓ Metode alternatif berhasil!")
-                else:
-                    raise Exception("Tidak bisa klik Next kedua setelah semua percobaan")
-            else:
-                log("✓ Next kedua berhasil diklik")
-    else:
-        raise Exception("Tombol Next kedua tidak ditemukan")
+      # D – Next 2 (Full logic from upload.py with verification & fallbacks)
+      log("STEP D: Mencoba klik Next tombol kedua...")
+      time.sleep(2)
+      
+      next_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
+      log(f"Ditemukan {len(next_buttons)} tombol Next")
+      
+      target_next = None
+      for i, btn in enumerate(next_buttons):
+          is_vis = btn.is_displayed()
+          is_en = btn.is_enabled()
+          cls = btn.get_attribute("class") or ""
+          aria_dis = btn.get_attribute("aria-disabled")
+          log(f"  Tombol {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}, aria-disabled={aria_dis}")
+          
+          if is_vis and "primary" in cls:
+              target_next = btn
+              log(f"  -> TERPILIH sebagai target")
+      
+      if target_next:
+          log("Tombol target ditemukan, mencoba klik...")
+          driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_next)
+          time.sleep(1)
+          
+          # Method 1: ActionChains
+          try:
+              actions = ActionChains(driver)
+              actions.move_to_element(target_next).click().perform()
+              log("Klik dengan ActionChains berhasil")
+          except Exception as e_ac:
+              log(f"ActionChains gagal: {e_ac}")
+              # Method 2: Regular click
+              try:
+                  target_next.click()
+                  log("Klik biasa berhasil")
+              except:
+                  # Method 3: JavaScript
+                  driver.execute_script("arguments[0].click();", target_next)
+                  log("Klik JavaScript berhasil")
+          
+          time.sleep(2)
+          
+          # VERIFICATION: Check if product input appeared
+          input_produk = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
+          
+          if len(input_produk) > 0 and input_produk[0].is_displayed():
+              log("✓ VERIFIKASI BERHASIL: Input nama produk muncul")
+          else:
+              after_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
+              if len(after_buttons) == len(next_buttons):
+                  log("✗ VERIFIKASI GAGAL: Tombol Next masih sama, mencoba alternatif...")
+                  try:
+                      target_radio_wrapper.send_keys(Keys.ENTER)
+                      log("Mengirim ENTER ke radio button")
+                      time.sleep(2)
+                  except:
+                      pass
+                  
+                  input_produk_after = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
+                  if len(input_produk_after) > 0:
+                      log("✓ Metode alternatif berhasil!")
+                  else:
+                      raise Exception("Tidak bisa klik Next kedua setelah semua percobaan")
+              else:
+                  log("✓ Next kedua berhasil diklik")
+      else:
+          raise Exception("Tombol Next kedua tidak ditemukan")
 
-    # E – Product title input
-    log(f"STEP E: Mengisi judul produk: {nama_produk_input}")
-    pi = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")))
-    pi.click()
-    pi.send_keys(Keys.CONTROL + "a"); pi.send_keys(Keys.BACKSPACE)
-    pi.send_keys(nama_produk_input)
-    log(f"✓ Input nama produk diisi dengan: {nama_produk_input}")
-    time.sleep(1)
+      # E – Product title input
+      log(f"STEP E: Mengisi judul produk: {nama_produk_input}")
+      pi = wait.until(EC.element_to_be_clickable(
+          (By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")))
+      pi.click()
+      pi.send_keys(Keys.CONTROL + "a"); pi.send_keys(Keys.BACKSPACE)
+      pi.send_keys(nama_produk_input)
+      log(f"✓ Input nama produk diisi dengan: {nama_produk_input}")
+      time.sleep(1)
 
-    # F – Add last (Full logic from upload.py with verification)
-    log("STEP F: Mencoba klik tombol Add terakhir...")
-    time.sleep(2)
-    
-    add_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
-    log(f"Ditemukan {len(add_buttons)} tombol Add")
-    
-    target_add = None
-    for i, btn in enumerate(add_buttons):
-        is_vis = btn.is_displayed()
-        is_en = btn.is_enabled()
-        cls = btn.get_attribute("class") or ""
-        log(f"  Tombol Add {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}")
-        
-        if is_vis:
-            parent_modal = btn.find_elements(By.XPATH, 
-                "./ancestor::div[contains(@class,'modal') or contains(@class,'Modal') or contains(@class,'dialog')]")
-            if parent_modal:
-                log(f"  -> Dalam modal, prioritas tinggi")
-                target_add = btn
-            elif target_add is None:
-                target_add = btn
-                log(f"  -> Target sementara")
-    
-    if target_add:
-        log("Tombol Add target ditemukan, mencoba klik...")
-        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_add)
-        time.sleep(1)
-        
-        try:
-            actions = ActionChains(driver)
-            actions.move_to_element(target_add).click().perform()
-            log("✓ Klik Add dengan ActionChains berhasil")
-        except Exception as e_add:
-            log(f"ActionChains gagal: {e_add}")
-            try:
-                driver.execute_script("arguments[0].click();", target_add)
-                log("✓ Klik Add dengan JavaScript berhasil")
-            except Exception as e_add2:
-                log(f"JavaScript gagal: {e_add2}")
-                try:
-                    loc = target_add.location
-                    sz = target_add.size
-                    x = loc['x'] + sz['width'] // 2
-                    y = loc['y'] + sz['height'] // 2
-                    ac = ActionChains(driver)
-                    ac.move_by_offset(x, y).click().perform()
-                    ac.move_by_offset(-x, -y).perform()
-                    log("✓ Klik Add dengan koordinat berhasil")
-                except Exception as e_add3:
-                    raise Exception(f"Semua metode klik Add gagal: {e_add3}")
-        
-        time.sleep(2)
-        
-        # Verification (wrapped in try/except for stale elements after modal close)
-        try:
-            after_add = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
-            visible_after = [b for b in after_add if b.is_displayed()]
-            # Don't reference old add_buttons - they may be stale after modal close
-            if len(visible_after) == 0:
-                log("✓ VERIFIKASI: Tombol Add hilang (modal tertutup)")
-            else:
-                success_ind = driver.find_elements(By.XPATH, "//*[contains(text(),'added') or contains(text(),'Added')]")
-                if success_ind:
-                    log("✓ VERIFIKASI: Indikator produk ditambahkan")
-                else:
-                    log("⚠ VERIFIKASI: Menunggu modal tertutup...")
-                    time.sleep(2)
-        except Exception:
-            # Stale element = DOM changed = modal closed = success
-            log("✓ VERIFIKASI: DOM berubah (modal tertutup), produk berhasil ditambahkan")
-    else:
-        # Fallback strategies
-        try:
-            alt_add = driver.find_element(By.XPATH, "//button[contains(@class,'primary') and .//div[text()='Add']]")
-            driver.execute_script("arguments[0].click();", alt_add)
-            log("✓ Klik Add dengan selector alternatif")
-        except:
-            try:
-                footer_add = driver.find_element(By.XPATH, "//div[contains(@class,'footer')]//button[.//div[text()='Add']]")
-                driver.execute_script("arguments[0].click();", footer_add)
-                log("✓ Klik Add di footer")
-            except Exception as e_all:
-                raise Exception(f"Tidak bisa klik tombol Add: {e_all}")
-    
-    time.sleep(2)
-    log("✓ Produk ditambahkan")
+      # F – Add last (Full logic from upload.py with verification)
+      log("STEP F: Mencoba klik tombol Add terakhir...")
+      time.sleep(2)
+      
+      add_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
+      log(f"Ditemukan {len(add_buttons)} tombol Add")
+      
+      target_add = None
+      for i, btn in enumerate(add_buttons):
+          is_vis = btn.is_displayed()
+          is_en = btn.is_enabled()
+          cls = btn.get_attribute("class") or ""
+          log(f"  Tombol Add {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}")
+          
+          if is_vis:
+              parent_modal = btn.find_elements(By.XPATH, 
+                  "./ancestor::div[contains(@class,'modal') or contains(@class,'Modal') or contains(@class,'dialog')]")
+              if parent_modal:
+                  log(f"  -> Dalam modal, prioritas tinggi")
+                  target_add = btn
+              elif target_add is None:
+                  target_add = btn
+                  log(f"  -> Target sementara")
+      
+      if target_add:
+          log("Tombol Add target ditemukan, mencoba klik...")
+          driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_add)
+          time.sleep(1)
+          
+          try:
+              actions = ActionChains(driver)
+              actions.move_to_element(target_add).click().perform()
+              log("✓ Klik Add dengan ActionChains berhasil")
+          except Exception as e_add:
+              log(f"ActionChains gagal: {e_add}")
+              try:
+                  driver.execute_script("arguments[0].click();", target_add)
+                  log("✓ Klik Add dengan JavaScript berhasil")
+              except Exception as e_add2:
+                  log(f"JavaScript gagal: {e_add2}")
+                  try:
+                      loc = target_add.location
+                      sz = target_add.size
+                      x = loc['x'] + sz['width'] // 2
+                      y = loc['y'] + sz['height'] // 2
+                      ac = ActionChains(driver)
+                      ac.move_by_offset(x, y).click().perform()
+                      ac.move_by_offset(-x, -y).perform()
+                      log("✓ Klik Add dengan koordinat berhasil")
+                  except Exception as e_add3:
+                      raise Exception(f"Semua metode klik Add gagal: {e_add3}")
+          
+          time.sleep(2)
+          
+          # Verification (wrapped in try/except for stale elements after modal close)
+          try:
+              after_add = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
+              visible_after = [b for b in after_add if b.is_displayed()]
+              # Don't reference old add_buttons - they may be stale after modal close
+              if len(visible_after) == 0:
+                  log("✓ VERIFIKASI: Tombol Add hilang (modal tertutup)")
+              else:
+                  success_ind = driver.find_elements(By.XPATH, "//*[contains(text(),'added') or contains(text(),'Added')]")
+                  if success_ind:
+                      log("✓ VERIFIKASI: Indikator produk ditambahkan")
+                  else:
+                      log("⚠ VERIFIKASI: Menunggu modal tertutup...")
+                      time.sleep(2)
+          except Exception:
+              # Stale element = DOM changed = modal closed = success
+              log("✓ VERIFIKASI: DOM berubah (modal tertutup), produk berhasil ditambahkan")
+      else:
+          # Fallback strategies
+          try:
+              alt_add = driver.find_element(By.XPATH, "//button[contains(@class,'primary') and .//div[text()='Add']]")
+              driver.execute_script("arguments[0].click();", alt_add)
+              log("✓ Klik Add dengan selector alternatif")
+          except:
+              try:
+                  footer_add = driver.find_element(By.XPATH, "//div[contains(@class,'footer')]//button[.//div[text()='Add']]")
+                  driver.execute_script("arguments[0].click();", footer_add)
+                  log("✓ Klik Add di footer")
+              except Exception as e_all:
+                  raise Exception(f"Tidak bisa klik tombol Add: {e_all}")
+      
+      time.sleep(2)
+      log("✓ Produk ditambahkan")
 
     # ── G – Show More & Switches ──
     log("Mengatur switches...")
@@ -746,6 +749,12 @@ class TikTokSchedulerApp:
     # ── Product Settings ──
     def _build_product_settings(self, f):
         row = 0
+        self.add_product_var = tk.BooleanVar(value=True)
+        cb_product = tk.Checkbutton(f, text="Tambahkan Produk", variable=self.add_product_var,
+                                    bg=BG_CARD, fg=FG, selectcolor=BG_INPUT, activebackground=BG_CARD,
+                                    activeforeground=FG, font=("Segoe UI", 9, "bold"), cursor="hand2")
+        cb_product.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        row += 1
         self.product_radio_entry = self._entry(f, "Nama Produk (Radio):", "", row, 45)
         row += 1
         self.product_title_entry = self._entry(f, "Judul Produk (Input E):", "beli sebelum promonya habis", row, 45)
@@ -931,8 +940,9 @@ class TikTokSchedulerApp:
             messagebox.showerror("Error", "Folder video tidak valid!")
             return
 
+        add_product = self.add_product_var.get()
         product_radio = self.product_radio_entry.get().strip()
-        if not product_radio:
+        if add_product and not product_radio:
             messagebox.showerror("Error", "Nama Produk (Radio) harus diisi!")
             return
 
@@ -964,6 +974,7 @@ class TikTokSchedulerApp:
             product_radio = self.product_radio_entry.get().strip()
             product_title = self.product_title_entry.get().strip()
             add_sound = self.add_sound_var.get()
+            add_product = self.add_product_var.get()
             descs_raw = self.desc_text.get("1.0", tk.END).strip()
             descs = [d.strip() for d in descs_raw.split("\n") if d.strip()]
             if not descs:
@@ -1039,7 +1050,7 @@ class TikTokSchedulerApp:
                     # Post video with schedule
                     do_post_video(self.driver, desc, product_radio, product_title,
                                  self._log, current_dt, self.stop_event,
-                                 add_sound=add_sound)
+                                 add_sound=add_sound, add_product=add_product)
 
                     # Mark as uploaded
                     mark_uploaded(folder_name, video_name, db)
