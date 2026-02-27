@@ -452,30 +452,116 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
     # ── Content Check Lite ── Jika toggle ON, klik agar menjadi OFF
     try:
         log("Memeriksa Content Check Lite...")
-        # Primary: cari span teks → parent jsx div → Switch checked-true → input switch
-        checked_switches = driver.find_elements(
-            By.XPATH,
-            "//span[contains(text(),'Content check lite')]"
-            "/ancestor::div[contains(@class,'jsx-')]"
-            "//div[contains(@class,'Switch__root--checked-true')]"
-            "//input[@role='switch']"
-        )
-        if not checked_switches:
-            # Fallback: cari div aria-checked="true" → Switch__root → input switch
-            checked_switches = driver.find_elements(
+        content_check_clicked = False
+
+        # Strategy 1: Cari teks 'Content check lite' lalu klik Switch__content di sebelahnya
+        try:
+            switch_divs = driver.find_elements(
                 By.XPATH,
-                "//div[@aria-checked='true' and contains(@class,'Switch__content')]"
-                "/ancestor::div[contains(@class,'Switch__root')]"
-                "//input[@role='switch']"
+                "//span[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'content check')]"
+                "/ancestor::div[1]//div[contains(@class,'Switch__content')]"
             )
-        if checked_switches:
-            switch_input = checked_switches[0]
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", switch_input)
-            time.sleep(0.5)
-            driver.execute_script("arguments[0].click();", switch_input)
-            time.sleep(1)
-            log("✓ Content Check Lite dimatikan.")
-        else:
+            if not switch_divs:
+                switch_divs = driver.find_elements(
+                    By.XPATH,
+                    "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'content check')]"
+                    "/ancestor::div[position()<=5]//div[contains(@class,'Switch')]"
+                )
+            for sd in switch_divs:
+                cls = sd.get_attribute("class") or ""
+                aria = sd.get_attribute("aria-checked") or ""
+                parent = sd.find_elements(By.XPATH, "./ancestor::div[contains(@class,'Switch__root')][1]")
+                parent_cls = parent[0].get_attribute("class") if parent else ""
+                is_on = ("checked-true" in cls or "checked-true" in parent_cls
+                         or aria == "true")
+                log(f"  Switch ditemukan: class={cls[:60]}, aria-checked={aria}, is_on={is_on}")
+                if is_on:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sd)
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", sd)
+                    time.sleep(1)
+                    content_check_clicked = True
+                    log("✓ Content Check Lite dimatikan (Strategy 1).")
+                    break
+        except Exception as e1:
+            log(f"  Strategy 1 gagal: {e1}")
+
+        # Strategy 2: Cari semua switch yang ON lalu cocokkan dengan teks 'content check'
+        if not content_check_clicked:
+            try:
+                all_on_switches = driver.find_elements(
+                    By.XPATH,
+                    "//div[contains(@class,'Switch__root--checked-true')]//div[contains(@class,'Switch__content')]"
+                    " | //div[@aria-checked='true' and contains(@class,'Switch')]"
+                )
+                for sw in all_on_switches:
+                    # Cek apakah ada teks 'content check' di container parent
+                    containers = sw.find_elements(
+                        By.XPATH,
+                        "./ancestor::div[position()<=5]"
+                    )
+                    for cont in containers:
+                        txt = (cont.text or "").lower()
+                        if "content check" in txt:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sw)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", sw)
+                            time.sleep(1)
+                            content_check_clicked = True
+                            log("✓ Content Check Lite dimatikan (Strategy 2).")
+                            break
+                    if content_check_clicked:
+                        break
+            except Exception as e2:
+                log(f"  Strategy 2 gagal: {e2}")
+
+        # Strategy 3: Gunakan JavaScript untuk cari dan klik
+        if not content_check_clicked:
+            try:
+                result = driver.execute_script("""
+                    var spans = document.querySelectorAll('span, div, label, p');
+                    for (var i = 0; i < spans.length; i++) {
+                        var txt = (spans[i].textContent || '').toLowerCase().trim();
+                        if (txt.includes('content check')) {
+                            var parent = spans[i].closest('div[class*="jsx-"], div[class*="container"], div[class*="row"], div[class*="setting"]') || spans[i].parentElement;
+                            if (!parent) continue;
+                            // Cari switch di dalam parent
+                            var switchEl = parent.querySelector('div[class*="Switch__content"], div[class*="switch"], div[role="switch"], input[role="switch"]');
+                            if (!switchEl) {
+                                // Cari di sibling
+                                var siblings = parent.querySelectorAll('div[class*="Switch"]');
+                                if (siblings.length > 0) switchEl = siblings[0];
+                            }
+                            if (switchEl) {
+                                var cls = switchEl.className || '';
+                                var aria = switchEl.getAttribute('aria-checked') || '';
+                                var rootEl = switchEl.closest('div[class*="Switch__root"]');
+                                var rootCls = rootEl ? rootEl.className : '';
+                                if (cls.includes('checked-true') || rootCls.includes('checked-true') || aria === 'true') {
+                                    switchEl.scrollIntoView({block: 'center'});
+                                    switchEl.click();
+                                    return 'clicked';
+                                } else {
+                                    return 'already_off';
+                                }
+                            }
+                        }
+                    }
+                    return 'not_found';
+                """)
+                if result == 'clicked':
+                    time.sleep(1)
+                    content_check_clicked = True
+                    log("✓ Content Check Lite dimatikan (Strategy 3 - JS).")
+                elif result == 'already_off':
+                    content_check_clicked = True
+                    log("Content Check Lite sudah OFF (Strategy 3 - JS).")
+                else:
+                    log("Content Check Lite tidak ditemukan (Strategy 3 - JS).")
+            except Exception as e3:
+                log(f"  Strategy 3 gagal: {e3}")
+
+        if not content_check_clicked:
             log("Content Check Lite sudah OFF atau tidak ditemukan.")
     except Exception as e:
         log(f"⚠ Content Check Lite: {e}")
@@ -667,9 +753,9 @@ class TikTokSchedulerApp:
                                     font=("Segoe UI", 16, "bold"))
         self.timer_label.pack(side="right", padx=20)
 
-        # Main container with two columns
+        # Main container with two columns - pack setelah bottom bar
         main = tk.Frame(self.root, bg=BG)
-        main.pack(fill="both", expand=True, padx=15, pady=5)
+        main.pack(side="top", fill="both", expand=True, padx=15, pady=5)
         main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
         main.rowconfigure(0, weight=1)
@@ -694,9 +780,9 @@ class TikTokSchedulerApp:
         # Card: Progress
         self._card(right, "📊 Progress", self._build_progress, expand=True)
 
-        # Bottom bar
+        # Bottom bar - di-pack SEBELUM main agar selalu terlihat di bawah
         bot = tk.Frame(self.root, bg=BG, pady=10)
-        bot.pack(fill="x")
+        bot.pack(side="bottom", fill="x")
 
         self.start_btn = tk.Button(bot, text="▶  MULAI UPLOAD", bg="#7b2ff7", fg="white",
                                    font=("Segoe UI", 14, "bold"), relief="flat", padx=30, pady=8,
