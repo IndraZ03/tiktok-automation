@@ -116,7 +116,8 @@ def do_upload_file(driver, file_path, log):
     time.sleep(5)
 
 def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
-                  schedule_dt, stop_event, add_sound=False, add_product=True):
+                  schedule_dt, stop_event, add_sound=False, add_product=True,
+                  skip_switches=False):
     """
     Full posting flow: description, product, switches, sounds, schedule.
     schedule_dt: datetime object for when to schedule.
@@ -339,36 +340,39 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
       log("✓ Produk ditambahkan")
 
     # ── G – Show More & Switches ──
-    log("Mengatur switches...")
-    safe(lambda: (
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});",
-            wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@data-e2e='advanced_settings_container']")))),
-        time.sleep(1),
-        wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//div[@data-e2e='advanced_settings_container']"))).click(),
-        time.sleep(2)
-    ), "Show more")
+    if skip_switches:
+        log("⏭ Switches dilewati (tidak diaktifkan)")
+    else:
+        log("Mengatur switches...")
+        safe(lambda: (
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});",
+                wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@data-e2e='advanced_settings_container']")))),
+            time.sleep(1),
+            wait.until(EC.element_to_be_clickable(
+                (By.XPATH, "//div[@data-e2e='advanced_settings_container']"))).click(),
+            time.sleep(2)
+        ), "Show more")
 
-    safe(lambda: (
-        driver.execute_script("arguments[0].click();",
-            wait.until(EC.presence_of_element_located(
-                (By.XPATH, "//div[@data-e2e='disclose_content_container']//div[contains(@class,'Switch__content')]")))),
-        time.sleep(2)
-    ), "Disclose switch")
+        safe(lambda: (
+            driver.execute_script("arguments[0].click();",
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//div[@data-e2e='disclose_content_container']//div[contains(@class,'Switch__content')]")))),
+            time.sleep(2)
+        ), "Disclose switch")
 
-    safe(lambda: (
-        driver.execute_script("arguments[0].click();",
-            wait.until(EC.presence_of_element_located(
-                (By.XPATH, "//span[contains(.,'Branded content')]/preceding-sibling::label")))),
-        time.sleep(1)
-    ), "Branded content")
+        safe(lambda: (
+            driver.execute_script("arguments[0].click();",
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//span[contains(.,'Branded content')]/preceding-sibling::label")))),
+            time.sleep(1)
+        ), "Branded content")
 
-    safe(lambda: (
-        driver.execute_script("arguments[0].click();",
-            wait.until(EC.presence_of_element_located(
-                (By.XPATH, "//div[@data-e2e='aigc_container']//div[contains(@class,'Switch__content')]")))),
-        time.sleep(1)
-    ), "AI-generated")
+        safe(lambda: (
+            driver.execute_script("arguments[0].click();",
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//div[@data-e2e='aigc_container']//div[contains(@class,'Switch__content')]")))),
+            time.sleep(1)
+        ), "AI-generated")
 
     # ── H, I, J, J2 – Sounds (conditional) ──
     if add_sound:
@@ -772,6 +776,13 @@ class TikTokSchedulerApp:
                             bg=BG_CARD, fg=FG, selectcolor=BG_INPUT, activebackground=BG_CARD,
                             activeforeground=FG, font=("Segoe UI", 9), cursor="hand2")
         cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        row += 1
+        self.skip_switches_var = tk.BooleanVar(value=False)
+        cb_switches = tk.Checkbutton(f, text="Skip Switches (Show More, Disclose, Branded, AI-generated)",
+                                     variable=self.skip_switches_var,
+                                     bg=BG_CARD, fg=FG, selectcolor=BG_INPUT, activebackground=BG_CARD,
+                                     activeforeground=FG, font=("Segoe UI", 9), cursor="hand2")
+        cb_switches.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
 
     # ── Schedule Settings ──
     def _build_schedule_settings(self, f):
@@ -975,6 +986,7 @@ class TikTokSchedulerApp:
             product_title = self.product_title_entry.get().strip()
             add_sound = self.add_sound_var.get()
             add_product = self.add_product_var.get()
+            skip_switches = self.skip_switches_var.get()
             descs_raw = self.desc_text.get("1.0", tk.END).strip()
             descs = [d.strip() for d in descs_raw.split("\n") if d.strip()]
             if not descs:
@@ -1050,7 +1062,8 @@ class TikTokSchedulerApp:
                     # Post video with schedule
                     do_post_video(self.driver, desc, product_radio, product_title,
                                  self._log, current_dt, self.stop_event,
-                                 add_sound=add_sound, add_product=add_product)
+                                 add_sound=add_sound, add_product=add_product,
+                                 skip_switches=skip_switches)
 
                     # Mark as uploaded
                     mark_uploaded(folder_name, video_name, db)
