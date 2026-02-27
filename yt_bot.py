@@ -58,16 +58,36 @@ GDRIVE_CREDS_FILE    = os.path.join(APP_DIR, "gdrive_credentials.json")
 
 SEGMENT_DURATION = 180  # 3 menit dalam detik
 
-# Watermark sizing — persentase dari lebar video (misal 12% = cocok untuk 9:16 TikTok)
-WATERMARK_WIDTH_PCT = 12   # persen dari lebar video
+# FFmpeg / FFprobe paths — auto-detect or use known WinGet install location
+def _find_bin(name):
+    """Find ffmpeg/ffprobe binary: check PATH first, then known install locations."""
+    found = shutil.which(name)
+    if found:
+        return found
+    # Common WinGet/manual install locations
+    candidates = [
+        os.path.expanduser(rf"~\AppData\Local\Microsoft\WinGet\Links\{name}.exe"),
+        rf"C:\ffmpeg\bin\{name}.exe",
+        os.path.join(APP_DIR, f"{name}.exe"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return name  # fallback to bare name, hope PATH works
+
+FFPROBE_PATH = _find_bin("ffprobe")
+FFMPEG_PATH  = _find_bin("ffmpeg")
+
+# Watermark sizing — persentase dari lebar video
+WATERMARK_WIDTH_PCT = 25   # persen dari lebar video (25% = lebih besar, jelas terlihat)
 WATERMARK_MARGIN_PCT = 2   # persen margin dari tepi
 
 # Text overlay style
 TEXT_FONT = "Arial"
-TEXT_SIZE_PCT = 3.5   # persen dari tinggi video
+TEXT_SIZE_PCT = 2.5   # persen dari tinggi video
 TEXT_COLOR = "white"
 TEXT_BORDER_COLOR = "black"
-TEXT_BORDER_W = 3
+TEXT_BORDER_W = 4
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -168,7 +188,7 @@ def get_video_duration(filepath):
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
+                FFPROBE_PATH, "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 filepath
@@ -176,7 +196,8 @@ def get_video_duration(filepath):
             capture_output=True, text=True, timeout=30
         )
         return float(result.stdout.strip())
-    except Exception:
+    except Exception as e:
+        logger.error(f"get_video_duration error: {e}")
         return 0
 
 
@@ -185,7 +206,7 @@ def get_video_info(filepath):
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
+                FFPROBE_PATH, "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=width,height",
                 "-of", "csv=p=0:s=x",
@@ -208,8 +229,8 @@ def sanitize_filename(title):
     return title
 
 
-def truncate_title(title, max_len=40):
-    """Potong judul untuk overlay text."""
+def truncate_title(title, max_len=20):
+    """Potong judul untuk overlay text agar tidak terpotong."""
     if len(title) > max_len:
         return title[:max_len - 3] + "..."
     return title
@@ -359,12 +380,11 @@ def build_ffmpeg_split_cmd(input_file, output_file, start_sec, duration,
     - Overlay logo.png di kiri atas (ukuran proporsional)
     - Text overlay "{title} - Part X/Y" di tengah bawah
     """
-    # Overlay text content
-    overlay_text = f"{title_text} - Part {part_num}/{total_parts}"
-    # Escape FFmpeg special characters in text
-    overlay_text = overlay_text.replace("'", "'\\''")
-    overlay_text = overlay_text.replace(":", "\\:")
-    overlay_text = overlay_text.replace("%", "%%")
+    # Overlay text — split into two lines to avoid cutoff
+
+    overlay_title = title_text.replace("'", "'\\\\''").replace(":", "\\\\:").replace("%", "%%")
+
+    overlay_part = f"Part {part_num}/{total_parts}"
     
     # Calculate watermark pixel width from video width percentage
     wm_width = max(32, int(video_width * WATERMARK_WIDTH_PCT / 100))
@@ -379,9 +399,20 @@ def build_ffmpeg_split_cmd(input_file, output_file, start_sec, duration,
         f"[1:v]scale={wm_width}:-1[wm];"
         # Overlay logo at top-left with margin
         f"[0:v][wm]overlay={margin_x}:{margin_x}[vid];"
-        # Draw text at bottom center
+        # Draw title text line
         f"[vid]drawtext="
-        f"text='{overlay_text}':"
+        f"text='{overlay_title}':"
+        f"font='{TEXT_FONT}':"
+        f"fontsize=h*{TEXT_SIZE_PCT}/100:"
+        f"fontcolor={TEXT_COLOR}:"
+        f"borderw={TEXT_BORDER_W}:"
+        f"bordercolor={TEXT_BORDER_COLOR}:"
+        f"x=(w-text_w)/2:"
+        f"y=h-text_h*2.5-h*{WATERMARK_MARGIN_PCT*2}/100"
+        f"[vid2];"
+        # Draw part number line below title
+        f"[vid2]drawtext="
+        f"text='{overlay_part}':"
         f"font='{TEXT_FONT}':"
         f"fontsize=h*{TEXT_SIZE_PCT}/100:"
         f"fontcolor={TEXT_COLOR}:"
@@ -393,7 +424,7 @@ def build_ffmpeg_split_cmd(input_file, output_file, start_sec, duration,
     )
     
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG_PATH, "-y",
         "-ss", str(start_sec),
         "-t", str(duration),
         "-i", input_file,
@@ -774,15 +805,24 @@ async def split_no_watermark(input_file, output_dir, title, progress_callback=No
                 f"Processing Part {part}/{total_parts}..."
             )
         
-        # Text overlay tanpa logo
-        overlay_text = f"{display_title} - Part {part}/{total_parts}"
-        overlay_text = overlay_text.replace("'", "'\\''")
-        overlay_text = overlay_text.replace(":", "\\:")
-        overlay_text = overlay_text.replace("%", "%%")
+        # Text overlay tanpa logo — two lines
+
+        overlay_title = display_title.replace("'", "'\\\\''").replace(":", "\\\\:").replace("%", "%%")
+
+        overlay_part = f"Part {part}/{total_parts}"
         
         filter_str = (
             f"drawtext="
-            f"text='{overlay_text}':"
+            f"text='{overlay_title}':"
+            f"font='{TEXT_FONT}':"
+            f"fontsize=h*{TEXT_SIZE_PCT}/100:"
+            f"fontcolor={TEXT_COLOR}:"
+            f"borderw={TEXT_BORDER_W}:"
+            f"bordercolor={TEXT_BORDER_COLOR}:"
+            f"x=(w-text_w)/2:"
+            f"y=h-text_h*2.5-h*{WATERMARK_MARGIN_PCT*2}/100,"
+            f"drawtext="
+            f"text='{overlay_part}':"
             f"font='{TEXT_FONT}':"
             f"fontsize=h*{TEXT_SIZE_PCT}/100:"
             f"fontcolor={TEXT_COLOR}:"
@@ -793,7 +833,7 @@ async def split_no_watermark(input_file, output_dir, title, progress_callback=No
         )
         
         cmd = [
-            "ffmpeg", "-y",
+            FFMPEG_PATH, "-y",
             "-ss", str(start_sec),
             "-t", str(seg_duration),
             "-i", input_file,
