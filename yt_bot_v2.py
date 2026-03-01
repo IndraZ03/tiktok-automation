@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, MessageHandler, filters, ContextTypes
+    MessageHandler, filters, ContextTypes
 )
 from telegram.constants import ParseMode
 
@@ -200,7 +200,7 @@ log_buffers = {}
 full_auto_tasks = {}
 active_tasks = {}
 
-SETTING_MENU = 0
+# Settings state tracked via user_data["in_settings"] flag
 
 def get_cfg(uid):
     if uid not in user_settings:
@@ -485,6 +485,7 @@ def stok_text():
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid): return
+    _exit_settings(ctx)  # exit settings mode if active
     cfg = get_cfg(uid)
     text = (f"🎬 <b>YouTube Bot + Full Auto Upload</b>\n\n"
             f"{stok_text()}\n"
@@ -493,10 +494,23 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
 
 # ═══════════════════════════════════════════════════════════════
-#  SETTINGS CONVERSATION
+#  SETTINGS (simple user_data state tracking, no ConversationHandler)
 # ═══════════════════════════════════════════════════════════════
+def _enter_settings(ctx):
+    """Mark user as in settings mode."""
+    ctx.user_data["in_settings"] = True
+    ctx.user_data["setting_field"] = None
+
+def _exit_settings(ctx):
+    """Mark user as out of settings mode."""
+    ctx.user_data["in_settings"] = False
+    ctx.user_data["setting_field"] = None
+
+def _is_in_settings(ctx):
+    return ctx.user_data.get("in_settings", False)
+
 async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id): return ConversationHandler.END
+    if not is_allowed(update.effective_user.id): return
     uid = update.effective_user.id
     cfg = get_cfg(uid)
     active = load_active_ud()
@@ -515,9 +529,25 @@ async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Contoh: kirim <code>1</code> lalu kirim deskripsi")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Tutup", callback_data="close_settings")]])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    # Reset setting_field state to avoid stale state
-    ctx.user_data["setting_field"] = None
-    return SETTING_MENU
+    _enter_settings(ctx)
+
+async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Global text handler — routes to settings_input if in settings mode."""
+    if not update.message or not update.message.text:
+        return
+    uid = update.effective_user.id
+    if not is_allowed(uid):
+        return
+    if not _is_in_settings(ctx):
+        return  # not in settings mode, ignore text
+    try:
+        await settings_input(update, ctx)
+    except Exception as e:
+        logger.error(f"[settings_input] error: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(f"❌ Error: {escape_html(str(e)[:200])}\nKirim /settings untuk coba lagi.", parse_mode=ParseMode.HTML)
+        except:
+            pass
 
 async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -542,7 +572,7 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"✅ Active UD: {', '.join(str(x) for x in nums)}\nKirim nomor lain atau /cancel")
             else:
                 await update.message.reply_text("❌ Format salah. Kirim nomor 1-7 dipisah koma/spasi.\nContoh: <code>2,5,6</code>", parse_mode=ParseMode.HTML)
-                return SETTING_MENU
+                return
         elif state == "stok_ud":
             ud_num = ctx.user_data.get("stok_ud_num")
             urls = [u.strip() for u in txt.split("\n") if u.strip()]
@@ -556,10 +586,10 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ctx.user_data["sched_ud_date_val"] = txt
                 ctx.user_data["setting_field"] = "sched_ud_time"
                 await update.message.reply_text(f"Kirim jam untuk UD {ud_num} (HH:MM):\nContoh: <code>14:30</code>", parse_mode=ParseMode.HTML)
-                return SETTING_MENU
+                return
             except:
                 await update.message.reply_text("❌ Format salah. Gunakan YYYY-MM-DD\nContoh: <code>2026-03-02</code>", parse_mode=ParseMode.HTML)
-                return SETTING_MENU
+                return
         elif state == "sched_ud_time":
             ud_num = ctx.user_data.get("sched_ud_num")
             date_val = ctx.user_data.get("sched_ud_date_val")
@@ -570,7 +600,7 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"✅ Schedule UD {ud_num}: {date_val} {jam}:{menit}\nKirim nomor lain atau /cancel")
             else:
                 await update.message.reply_text("❌ Format salah. Gunakan HH:MM\nContoh: <code>14:30</code>", parse_mode=ParseMode.HTML)
-                return SETTING_MENU
+                return
         elif state == "hapus_stok_ud":
             ud_num = ctx.user_data.get("hapus_ud_num")
             if txt.lower() == "all":
@@ -586,12 +616,11 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         await update.message.reply_text(f"✅ Dihapus: {removed[:60]}\nKirim nomor lain atau /cancel")
                     else:
                         await update.message.reply_text("❌ Nomor tidak valid. Coba lagi:")
-                        return SETTING_MENU
+                        return
                 except:
                     await update.message.reply_text("❌ Kirim nomor atau 'all'. Coba lagi:")
-                    return SETTING_MENU
+                    return
         elif state == "hashtags":
-            # Parse hashtags: bisa dipisah newline, koma, atau spasi
             raw_tags = re.split(r'[,\n]+', txt)
             tags = [t.strip().lstrip('#').strip() for t in raw_tags if t.strip().lstrip('#').strip()]
             cfg["hashtags"] = tags
@@ -600,7 +629,7 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ State tidak dikenal. Kirim /settings untuk mulai ulang.")
         ctx.user_data["setting_field"] = None
-        return SETTING_MENU
+        return
 
     # Parse commands like "4 2"
     parts = txt.split(None, 1)
@@ -612,14 +641,14 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "📝 Kirim deskripsi TikTok:\n"
             "Contoh: <code>Cek link di bio!</code>",
             parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "2":
         ctx.user_data["setting_field"] = "interval"
         await update.message.reply_text(
             "⏱ Kirim interval upload (dalam menit):\n"
             "Contoh: <code>60</code>",
             parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "3":
         ctx.user_data["setting_field"] = "active_ud"
         active = load_active_ud()
@@ -627,14 +656,14 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Active UD saat ini: <b>{', '.join(str(x) for x in active)}</b>\n"
             f"Kirim nomor UD yang diaktifkan (pisah koma/spasi).\nContoh: <code>2,5,6</code>",
             parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "4":
         if len(parts) < 2 or not parts[1].strip().isdigit():
             await update.message.reply_text(
                 "📦 Format: <code>4 nomor_ud</code>\n"
                 "Contoh: <code>4 2</code> (tambah stok ke UD 2)",
                 parse_mode=ParseMode.HTML)
-            return SETTING_MENU
+            return
         ud_num = int(parts[1].strip())
         ctx.user_data["setting_field"] = "stok_ud"
         ctx.user_data["stok_ud_num"] = ud_num
@@ -642,14 +671,14 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Kirim link YouTube untuk <b>UD {ud_num}</b> (satu per baris):\n"
             f"Contoh:\n<code>https://youtube.com/watch?v=xxx\nhttps://youtube.com/watch?v=yyy</code>",
             parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "5":
         if len(parts) < 2 or not parts[1].strip().isdigit():
             await update.message.reply_text(
                 "📋 Format: <code>5 nomor_ud</code>\n"
                 "Contoh: <code>5 2</code> (lihat stok UD 2)",
                 parse_mode=ParseMode.HTML)
-            return SETTING_MENU
+            return
         ud_num = int(parts[1].strip())
         links = load_stok_per_ud(ud_num)
         ss = load_schedule_per_ud(ud_num)
@@ -661,14 +690,14 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not links: t += "  <i>(kosong)</i>\n"
         t += "\nKirim nomor lain atau /cancel"
         await update.message.reply_text(t, parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "6":
         if len(parts) < 2 or not parts[1].strip().isdigit():
             await update.message.reply_text(
                 "📅 Format: <code>6 nomor_ud</code>\n"
                 "Contoh: <code>6 2</code> (edit schedule UD 2)",
                 parse_mode=ParseMode.HTML)
-            return SETTING_MENU
+            return
         ud_num = int(parts[1].strip())
         ctx.user_data["setting_field"] = "sched_ud_date"
         ctx.user_data["sched_ud_num"] = ud_num
@@ -678,19 +707,19 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Kirim tanggal baru (YYYY-MM-DD):\n"
             f"Contoh: <code>2026-03-02</code>",
             parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "7":
         if len(parts) < 2 or not parts[1].strip().isdigit():
             await update.message.reply_text(
                 "🗑 Format: <code>7 nomor_ud</code>\n"
                 "Contoh: <code>7 2</code> (hapus stok UD 2)",
                 parse_mode=ParseMode.HTML)
-            return SETTING_MENU
+            return
         ud_num = int(parts[1].strip())
         links = load_stok_per_ud(ud_num)
         if not links:
             await update.message.reply_text(f"Stok UD {ud_num} sudah kosong.\nKirim nomor lain atau /cancel")
-            return SETTING_MENU
+            return
         t = f"🗑 <b>Hapus Stok UD {ud_num}</b> ({len(links)} link)\n\n"
         for i, l in enumerate(links[:15]):
             t += f"  {i+1}. <code>{l[:60]}</code>\n"
@@ -698,7 +727,7 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["setting_field"] = "hapus_stok_ud"
         ctx.user_data["hapus_ud_num"] = ud_num
         await update.message.reply_text(t, parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
     if cmd == "8":
         ctx.user_data["setting_field"] = "hashtags"
         current = cfg.get('hashtags', [])
@@ -709,7 +738,7 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Contoh: <code>fyp, viral, tiktok</code>\n"
             f"atau:\n<code>fyp\nviral\ntiktok</code>",
             parse_mode=ParseMode.HTML)
-        return SETTING_MENU
+        return
 
     await update.message.reply_text(
         "❌ Perintah tidak dikenali.\n"
@@ -719,18 +748,10 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• <code>4 2</code> → tambah stok ke UD 2\n"
         "• <code>8</code> → ubah hashtags",
         parse_mode=ParseMode.HTML)
-    return SETTING_MENU
 
-async def cancel_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data.pop("setting_field", None)
-    await update.message.reply_text("Settings ditutup.", reply_markup=main_menu_kb(update.effective_user.id))
-    return ConversationHandler.END
-
-async def close_settings_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer("Settings ditutup")
-    await q.edit_message_text("⚙️ Settings ditutup.")
-    ctx.user_data.pop("setting_field", None)
-    return ConversationHandler.END
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _exit_settings(ctx)
+    await update.message.reply_text("⚙️ Settings ditutup.", reply_markup=main_menu_kb(update.effective_user.id))
 
 # ═══════════════════════════════════════════════════════════════
 #  FULL AUTO UPLOAD (download from stok → split → upload TikTok)
@@ -835,6 +856,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     if not is_allowed(uid): return
     data = q.data
+
+    # Handle close_settings from the ❌ Tutup button
+    if data == "close_settings":
+        _exit_settings(ctx)
+        await q.edit_message_text("⚙️ Settings ditutup.")
+        return
 
     if data == "refresh":
         cfg = get_cfg(uid)
@@ -1185,25 +1212,20 @@ def main():
     os.makedirs(TEMP_DIR, exist_ok=True)
     os.makedirs(FINAL_DIR, exist_ok=True)
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    settings_conv = ConversationHandler(
-        entry_points=[CommandHandler("settings", cmd_settings)],
-        states={SETTING_MENU: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, settings_input),
-            CallbackQueryHandler(close_settings_cb, pattern="^close_settings$"),
-        ]},
-        fallbacks=[CommandHandler("cancel", cancel_settings),
-                   CommandHandler("start", cancel_settings),
-                   CommandHandler("settings", cmd_settings),
-                   CallbackQueryHandler(close_settings_cb, pattern="^close_settings$")],
-        allow_reentry=True,
-        per_message=False,
-        conversation_timeout=600,
-    )
-    app.add_handler(settings_conv)
+
+    # Command handlers (checked first)
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("download", cmd_download))
+
+    # Text message handler — routes to settings if in settings mode
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+    # Callback query handler (inline buttons)
     app.add_handler(CallbackQueryHandler(button_handler))
+
     print("🎬 YouTube Bot + Full Auto is running...")
     app.run_polling()
 
