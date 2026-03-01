@@ -43,6 +43,11 @@ GDRIVE_CREDS_FILE = os.path.join(APP_DIR, "gdrive_credentials.json")
 SEGMENT_DURATION = 180
 STOK_LINK_FILE = os.path.join(APP_DIR, "yt_stok_link.json")
 SCHEDULE_STATE_FILE = os.path.join(APP_DIR, "yt_schedule_state.json")
+STOK_PER_UD_FILE = os.path.join(APP_DIR, "yt_stok_per_ud.json")
+SCHEDULE_PER_UD_FILE = os.path.join(APP_DIR, "yt_schedule_per_ud.json")
+ACTIVE_UD_FILE = os.path.join(APP_DIR, "yt_auto_userdata.json")
+DEFAULT_ACTIVE_UD = [2, 5, 6]
+UD_PORT_MAP = {1:"9222",2:"9223",3:"9224",4:"9225",5:"9226",6:"9227",7:"9228"}
 
 # FFmpeg
 def _find_bin(name):
@@ -108,6 +113,67 @@ def remove_stok_link(url):
     links = load_stok_links()
     links = [l for l in links if l != url]
     save_stok_links(links)
+
+# ═══════════════════════════════════════════════════════════════
+#  PER-USER-DATA STOK LINK
+# ═══════════════════════════════════════════════════════════════
+def _load_json(path, default=None):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f: return json.load(f)
+        except: pass
+    return default if default is not None else {}
+
+def _save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
+
+def load_stok_per_ud(ud_num):
+    all_stok = _load_json(STOK_PER_UD_FILE, {})
+    return all_stok.get(str(ud_num), [])
+
+def save_stok_per_ud(ud_num, links):
+    all_stok = _load_json(STOK_PER_UD_FILE, {})
+    all_stok[str(ud_num)] = links
+    _save_json(STOK_PER_UD_FILE, all_stok)
+
+def add_stok_per_ud(ud_num, new_links):
+    links = load_stok_per_ud(ud_num)
+    links.extend(new_links)
+    save_stok_per_ud(ud_num, links)
+
+def remove_stok_per_ud(ud_num, url):
+    links = load_stok_per_ud(ud_num)
+    links = [l for l in links if l != url]
+    save_stok_per_ud(ud_num, links)
+
+# ═══════════════════════════════════════════════════════════════
+#  PER-USER-DATA SCHEDULE STATE
+# ═══════════════════════════════════════════════════════════════
+def load_schedule_per_ud(ud_num):
+    all_sched = _load_json(SCHEDULE_PER_UD_FILE, {})
+    s = all_sched.get(str(ud_num))
+    if s and all(k in s for k in ("tanggal","jam","menit")):
+        return s
+    now = datetime.now()
+    return {"tanggal": now.strftime("%Y-%m-%d"), "jam": f"{now.hour:02d}", "menit": f"{now.minute:02d}"}
+
+def save_schedule_per_ud(ud_num, tanggal, jam, menit):
+    all_sched = _load_json(SCHEDULE_PER_UD_FILE, {})
+    all_sched[str(ud_num)] = {"tanggal": tanggal, "jam": jam, "menit": menit,
+                               "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _save_json(SCHEDULE_PER_UD_FILE, all_sched)
+
+# ═══════════════════════════════════════════════════════════════
+#  ACTIVE USER DATA CONFIG
+# ═══════════════════════════════════════════════════════════════
+def load_active_ud():
+    data = _load_json(ACTIVE_UD_FILE)
+    if isinstance(data, list): return data
+    if isinstance(data, dict) and "active" in data: return data["active"]
+    return list(DEFAULT_ACTIVE_UD)
+
+def save_active_ud(ud_list):
+    _save_json(ACTIVE_UD_FILE, {"active": ud_list})
 
 # ═══════════════════════════════════════════════════════════════
 #  DEFAULTS & STATE
@@ -404,24 +470,25 @@ def _list_folder_files(folder_name):
     return files
 
 def stok_text():
-    links = load_stok_links()
-    t = f"📦 <b>Stok Link YouTube</b>\n\nTotal: <b>{len(links)}</b> link\n"
-    for i, l in enumerate(links[:10]):
-        t += f"  {i+1}. <code>{l[:60]}</code>\n"
-    if len(links) > 10: t += f"  ... +{len(links)-10} lainnya\n"
+    active = load_active_ud()
+    t = f"📦 <b>Stok Link Per User Data</b>\n"
+    t += f"🟢 Aktif: <b>{', '.join(str(x) for x in active)}</b>\n\n"
+    for ud in sorted(set(active + list(range(1,8)))):
+        links = load_stok_per_ud(ud)
+        if not links and ud not in active: continue
+        marker = "🟢" if ud in active else "⚪"
+        ss = load_schedule_per_ud(ud)
+        t += f"{marker} <b>UD {ud}</b>: {len(links)} link | Sched: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n"
     return t
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid): return
     cfg = get_cfg(uid)
-    ss = load_schedule_state()
     text = (f"🎬 <b>YouTube Bot + Full Auto Upload</b>\n\n"
             f"{stok_text()}\n"
-            f"📅 Schedule terakhir: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n"
             f"📝 Deskripsi: <code>{cfg['deskripsi'][:50] or '(kosong)'}</code>\n"
-            f"⏱ Interval: <b>{cfg['interval']} menit</b>\n"
-            f"🌐 Port: <b>{cfg['debug_port']}</b>")
+            f"⏱ Interval: <b>{cfg['interval']} menit</b>")
     await update.message.reply_text(text, reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
 
 # ═══════════════════════════════════════════════════════════════
@@ -430,16 +497,16 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return ConversationHandler.END
     cfg = get_cfg(update.effective_user.id)
-    links = load_stok_links()
+    active = load_active_ud()
     text = ("⚙️ <b>Settings</b>\n\n"
-            f"1️⃣ Tanggal: <code>{cfg['tanggal']}</code>\n"
-            f"2️⃣ Jam: <code>{cfg['jam']}:{cfg['menit']}</code>\n"
-            f"3️⃣ Deskripsi: <code>{cfg['deskripsi'][:60] or '(kosong)'}</code>\n"
-            f"4️⃣ Stok Link: <b>{len(links)} link</b>\n"
-            f"5️⃣ User Data Dir: <code>{cfg['user_data_dir']}</code>\n"
-            f"6️⃣ Debug Port: <code>{cfg['debug_port']}</code>\n"
-            f"7️⃣ Interval: <code>{cfg['interval']} menit</code>\n\n"
-            "Kirim nomor (1-7) untuk ubah, atau /cancel")
+            f"1️⃣ Deskripsi: <code>{cfg['deskripsi'][:60] or '(kosong)'}</code>\n"
+            f"2️⃣ Interval: <code>{cfg['interval']} menit</code>\n"
+            f"3️⃣ Active User Data: <b>{', '.join(str(x) for x in active)}</b>\n"
+            f"4️⃣ Tambah Stok ke UD (kirim: <code>4 nomor_ud</code>)\n"
+            f"5️⃣ Lihat Stok UD (kirim: <code>5 nomor_ud</code>)\n"
+            f"6️⃣ Edit Schedule UD (kirim: <code>6 nomor_ud</code>)\n"
+            f"7️⃣ Hapus Stok UD (kirim: <code>7 nomor_ud</code>)\n\n"
+            "Kirim nomor untuk ubah, atau /cancel")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Tutup", callback_data="close_settings")]])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     return SETTING_MENU
@@ -449,41 +516,142 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cfg = get_cfg(uid)
     txt = update.message.text.strip()
     state = ctx.user_data.get("setting_field")
+
     if state:
-        if state == "date":
-            try:
-                datetime.strptime(txt, "%Y-%m-%d"); cfg["tanggal"] = txt
-            except: await update.message.reply_text("Format salah. YYYY-MM-DD"); return SETTING_MENU
-        elif state == "time":
-            parts = txt.replace(".",":").split(":")
-            if len(parts)==2: cfg["jam"]=parts[0].zfill(2); cfg["menit"]=parts[1].zfill(2)
-            else: await update.message.reply_text("Format salah. HH:MM"); return SETTING_MENU
-        elif state == "desc": cfg["deskripsi"] = txt
-        elif state == "stok":
+        if state == "desc":
+            cfg["deskripsi"] = txt
+        elif state == "interval":
+            cfg["interval"] = txt
+        elif state == "active_ud":
+            nums = [int(x) for x in re.split(r'[,\s]+', txt) if x.strip().isdigit()]
+            nums = [n for n in nums if 1 <= n <= 7]
+            if nums:
+                save_active_ud(nums)
+                await update.message.reply_text(f"✅ Active UD: {', '.join(str(x) for x in nums)}")
+            else:
+                await update.message.reply_text("Format salah. Kirim nomor 1-7 dipisah koma/spasi.")
+                return SETTING_MENU
+        elif state == "stok_ud":
+            ud_num = ctx.user_data.get("stok_ud_num")
             urls = [u.strip() for u in txt.split("\n") if u.strip()]
-            links = load_stok_links()
-            links.extend(urls)
-            save_stok_links(links)
-        elif state == "userdata": cfg["user_data_dir"] = txt
-        elif state == "port": cfg["debug_port"] = txt
-        elif state == "interval": cfg["interval"] = txt
+            add_stok_per_ud(ud_num, urls)
+            total = len(load_stok_per_ud(ud_num))
+            await update.message.reply_text(f"✅ {len(urls)} link ditambahkan ke UD {ud_num}. Total: {total}")
+        elif state == "sched_ud_date":
+            ud_num = ctx.user_data.get("sched_ud_num")
+            try:
+                datetime.strptime(txt, "%Y-%m-%d")
+                ctx.user_data["sched_ud_date_val"] = txt
+                ctx.user_data["setting_field"] = "sched_ud_time"
+                await update.message.reply_text(f"Kirim jam untuk UD {ud_num} (HH:MM):")
+                return SETTING_MENU
+            except:
+                await update.message.reply_text("Format salah. YYYY-MM-DD"); return SETTING_MENU
+        elif state == "sched_ud_time":
+            ud_num = ctx.user_data.get("sched_ud_num")
+            date_val = ctx.user_data.get("sched_ud_date_val")
+            parts = txt.replace(".",":").split(":")
+            if len(parts) == 2:
+                jam, menit = parts[0].zfill(2), parts[1].zfill(2)
+                save_schedule_per_ud(ud_num, date_val, jam, menit)
+                await update.message.reply_text(f"✅ Schedule UD {ud_num}: {date_val} {jam}:{menit}")
+            else:
+                await update.message.reply_text("Format salah. HH:MM"); return SETTING_MENU
+        elif state == "hapus_stok_ud":
+            ud_num = ctx.user_data.get("hapus_ud_num")
+            if txt.lower() == "all":
+                save_stok_per_ud(ud_num, [])
+                await update.message.reply_text(f"✅ Stok UD {ud_num} dikosongkan!")
+            else:
+                try:
+                    idx = int(txt) - 1
+                    links = load_stok_per_ud(ud_num)
+                    if 0 <= idx < len(links):
+                        removed = links.pop(idx)
+                        save_stok_per_ud(ud_num, links)
+                        await update.message.reply_text(f"✅ Dihapus: {removed[:60]}")
+                    else:
+                        await update.message.reply_text("Nomor tidak valid."); return SETTING_MENU
+                except:
+                    await update.message.reply_text("Kirim nomor atau 'all'."); return SETTING_MENU
         ctx.user_data["setting_field"] = None
         await update.message.reply_text("✅ Setting diperbarui!\nKirim nomor lain atau /cancel")
         return SETTING_MENU
-    prompts = {
-        "1": ("date","Kirim tanggal (YYYY-MM-DD):"),
-        "2": ("time","Kirim jam (HH:MM):"),
-        "3": ("desc","Kirim deskripsi TikTok:"),
-        "4": ("stok","Kirim link YouTube (satu per baris, bisa banyak sekaligus):"),
-        "5": ("userdata","Kirim path user data Chrome:"),
-        "6": ("port","Kirim debug port:"),
-        "7": ("interval","Kirim interval (menit):"),
-    }
-    if txt in prompts:
-        field, prompt = prompts[txt]
-        ctx.user_data["setting_field"] = field
-        await update.message.reply_text(prompt)
+
+    # Parse commands like "4 2"
+    parts = txt.split(None, 1)
+    cmd = parts[0]
+
+    if cmd == "1":
+        ctx.user_data["setting_field"] = "desc"
+        await update.message.reply_text("Kirim deskripsi TikTok:")
         return SETTING_MENU
+    if cmd == "2":
+        ctx.user_data["setting_field"] = "interval"
+        await update.message.reply_text("Kirim interval (menit):")
+        return SETTING_MENU
+    if cmd == "3":
+        ctx.user_data["setting_field"] = "active_ud"
+        active = load_active_ud()
+        await update.message.reply_text(
+            f"Active UD saat ini: <b>{', '.join(str(x) for x in active)}</b>\n"
+            f"Kirim nomor UD yang diaktifkan (pisah koma/spasi).\nContoh: <code>2,5,6</code>",
+            parse_mode=ParseMode.HTML)
+        return SETTING_MENU
+    if cmd == "4":
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await update.message.reply_text("Format: <code>4 nomor_ud</code>\nContoh: <code>4 2</code>", parse_mode=ParseMode.HTML)
+            return SETTING_MENU
+        ud_num = int(parts[1].strip())
+        ctx.user_data["setting_field"] = "stok_ud"
+        ctx.user_data["stok_ud_num"] = ud_num
+        await update.message.reply_text(f"Kirim link YouTube untuk <b>UD {ud_num}</b> (satu per baris):", parse_mode=ParseMode.HTML)
+        return SETTING_MENU
+    if cmd == "5":
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await update.message.reply_text("Format: <code>5 nomor_ud</code>", parse_mode=ParseMode.HTML)
+            return SETTING_MENU
+        ud_num = int(parts[1].strip())
+        links = load_stok_per_ud(ud_num)
+        ss = load_schedule_per_ud(ud_num)
+        t = f"📦 <b>Stok UD {ud_num}</b> ({len(links)} link)\n"
+        t += f"📅 Schedule: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n\n"
+        for i, l in enumerate(links[:15]):
+            t += f"  {i+1}. <code>{l[:60]}</code>\n"
+        if len(links) > 15: t += f"  ... +{len(links)-15} lainnya\n"
+        if not links: t += "  <i>(kosong)</i>\n"
+        await update.message.reply_text(t, parse_mode=ParseMode.HTML)
+        return SETTING_MENU
+    if cmd == "6":
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await update.message.reply_text("Format: <code>6 nomor_ud</code>", parse_mode=ParseMode.HTML)
+            return SETTING_MENU
+        ud_num = int(parts[1].strip())
+        ctx.user_data["setting_field"] = "sched_ud_date"
+        ctx.user_data["sched_ud_num"] = ud_num
+        ss = load_schedule_per_ud(ud_num)
+        await update.message.reply_text(
+            f"Schedule UD {ud_num} sekarang: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n"
+            f"Kirim tanggal baru (YYYY-MM-DD):", parse_mode=ParseMode.HTML)
+        return SETTING_MENU
+    if cmd == "7":
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await update.message.reply_text("Format: <code>7 nomor_ud</code>", parse_mode=ParseMode.HTML)
+            return SETTING_MENU
+        ud_num = int(parts[1].strip())
+        links = load_stok_per_ud(ud_num)
+        if not links:
+            await update.message.reply_text(f"Stok UD {ud_num} sudah kosong.")
+            return SETTING_MENU
+        t = f"🗑 <b>Hapus Stok UD {ud_num}</b> ({len(links)} link)\n\n"
+        for i, l in enumerate(links[:15]):
+            t += f"  {i+1}. <code>{l[:60]}</code>\n"
+        t += "\nKirim nomor untuk hapus 1 link, atau <code>all</code> untuk hapus semua."
+        ctx.user_data["setting_field"] = "hapus_stok_ud"
+        ctx.user_data["hapus_ud_num"] = ud_num
+        await update.message.reply_text(t, parse_mode=ParseMode.HTML)
+        return SETTING_MENU
+
     await update.message.reply_text("Kirim angka 1-7, atau /cancel")
     return SETTING_MENU
 
@@ -501,17 +669,20 @@ async def close_settings_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 #  FULL AUTO UPLOAD (download from stok → split → upload TikTok)
 # ═══════════════════════════════════════════════════════════════
-def _full_auto_single_upload(cfg, log_fn, stop_evt):
-    """Download 1 link from stok, split, upload all parts to TikTok."""
-    links = load_stok_links()
+def _full_auto_single_upload(cfg, log_fn, stop_evt, ud_num):
+    """Download 1 link from UD stok, split, upload all parts to TikTok using that UD."""
+    links = load_stok_per_ud(ud_num)
     if not links:
-        log_fn("❌ Stok link kosong!", "error"); return False
+        log_fn(f"❌ Stok UD {ud_num} kosong!", "error"); return False
 
     url = links[0]
-    log_fn(f"📥 Downloading: {url[:60]}...", "info")
+    log_fn(f"📥 [UD {ud_num}] Downloading: {url[:60]}...", "info")
 
-    job_temp = os.path.join(TEMP_DIR, f"auto_{int(time.time())}")
-    job_out = os.path.join(TEMP_DIR, f"auto_{int(time.time())}_out")
+    job_temp = os.path.join(TEMP_DIR, f"auto_ud{ud_num}_{int(time.time())}")
+    job_out = os.path.join(TEMP_DIR, f"auto_ud{ud_num}_{int(time.time())}_out")
+
+    userdata = os.path.join(APP_DIR, "user_data", str(ud_num))
+    port = UD_PORT_MAP.get(ud_num, str(9222 + ud_num - 1))
 
     try:
         filepath, title = download_video_sync(url, job_temp, log_fn)
@@ -525,22 +696,20 @@ def _full_auto_single_upload(cfg, log_fn, stop_evt):
         log_fn(f"✓ Split: {len(output_files)} parts", "success")
         if stop_evt.is_set(): return False
 
-        # Read schedule from state file
-        ss = load_schedule_state()
+        # Read schedule from per-UD state
+        ss = load_schedule_per_ud(ud_num)
         hour = int(ss["jam"]); minute = int(ss["menit"])
         date_str = ss["tanggal"]
         interval = int(cfg.get("interval", "60"))
         deskripsi = cfg.get("deskripsi", "")
-        userdata = cfg.get("user_data_dir", "")
-        port = cfg.get("debug_port", "9222")
 
         start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=hour, minute=minute)
-        log_fn(f"📅 Schedule mulai: {start_dt.strftime('%Y-%m-%d %H:%M')}", "info")
-        log_fn(f"🌐 Membuka Chrome (port {port})...", "info")
+        log_fn(f"📅 [UD {ud_num}] Schedule mulai: {start_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+        log_fn(f"🌐 [UD {ud_num}] Membuka Chrome (port {port})...", "info")
 
         chrome_proc = open_chrome_debug(userdata, port)
         driver = connect_selenium(port)
-        log_fn("✓ Chrome terhubung!", "success")
+        log_fn(f"✓ [UD {ud_num}] Chrome terhubung!", "success")
         uploaded = 0
 
         try:
@@ -548,7 +717,7 @@ def _full_auto_single_upload(cfg, log_fn, stop_evt):
                 if stop_evt.is_set(): break
                 if not os.path.exists(out_path): continue
                 sched_dt = start_dt + timedelta(minutes=interval * idx)
-                log_fn(f"[{idx+1}/{len(output_files)}] Upload: {os.path.basename(out_path)}", "info")
+                log_fn(f"[UD {ud_num}] [{idx+1}/{len(output_files)}] Upload: {os.path.basename(out_path)}", "info")
                 log_fn(f"  Schedule: {sched_dt.strftime('%Y-%m-%d %H:%M')}", "info")
                 try:
                     navigate_upload_page(driver, force=(idx > 0))
@@ -571,17 +740,16 @@ def _full_auto_single_upload(cfg, log_fn, stop_evt):
         if uploaded > 0:
             last_sched = start_dt + timedelta(minutes=interval*(uploaded-1))
             next_dt = last_sched + timedelta(minutes=interval)
-            save_schedule_state(next_dt.strftime("%Y-%m-%d"), f"{next_dt.hour:02d}", f"{next_dt.minute:02d}")
-            log_fn(f"💾 Next schedule: {next_dt.strftime('%Y-%m-%d %H:%M')}", "success")
-            # Remove used link from stok
-            remove_stok_link(url)
-            log_fn(f"🗑 Link dihapus dari stok", "success")
+            save_schedule_per_ud(ud_num, next_dt.strftime("%Y-%m-%d"), f"{next_dt.hour:02d}", f"{next_dt.minute:02d}")
+            log_fn(f"💾 [UD {ud_num}] Next schedule: {next_dt.strftime('%Y-%m-%d %H:%M')}", "success")
+            remove_stok_per_ud(ud_num, url)
+            log_fn(f"🗑 [UD {ud_num}] Link dihapus dari stok", "success")
 
-        log_fn(f"🎉 Selesai! {uploaded}/{len(output_files)} parts uploaded", "success")
+        log_fn(f"🎉 [UD {ud_num}] Selesai! {uploaded}/{len(output_files)} parts uploaded", "success")
         return True
 
     except Exception as e:
-        log_fn(f"❌ Error: {e}", "error")
+        log_fn(f"❌ [UD {ud_num}] Error: {e}", "error")
         return False
     finally:
         for d in [job_temp, job_out]:
@@ -599,9 +767,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     if data == "refresh":
-        ss = load_schedule_state(); cfg = get_cfg(uid)
+        cfg = get_cfg(uid)
         text = (f"🎬 <b>YouTube Bot + Full Auto Upload</b>\n\n{stok_text()}\n"
-                f"📅 Schedule: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n"
                 f"⏱ Interval: <b>{cfg['interval']} menit</b>")
         await q.edit_message_text(text, reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
         return
@@ -740,55 +907,67 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             asyncio.run_coroutine_threadsafe(_notify(bot, chat_id, text), main_loop)
 
         def _daemon():
-            _send("🤖 <b>Full Auto dimulai!</b>\nBot akan download dari stok → split → upload TikTok.")
+            active = load_active_ud()
+            _send(f"🤖 <b>Full Auto dimulai!</b>\nActive UD: <b>{', '.join(str(x) for x in active)}</b>\nBot akan download dari stok masing-masing UD → split → upload TikTok.")
             while not stop_auto.is_set():
-                links = load_stok_links()
-                if not links:
-                    _send("📦 Stok link kosong. Menunggu 60 detik...")
+                active = load_active_ud()
+                any_has_stok = False
+
+                for ud_num in active:
+                    if stop_auto.is_set(): break
+                    links = load_stok_per_ud(ud_num)
+                    if not links:
+                        continue
+                    any_has_stok = True
+
+                    state = load_schedule_per_ud(ud_num)
+                    try:
+                        trigger_dt = datetime.strptime(
+                            f"{state['tanggal']} {state['jam']}:{state['menit']}", "%Y-%m-%d %H:%M"
+                        ) + timedelta(minutes=1)
+                    except:
+                        _send(f"❌ Format schedule UD {ud_num} error!"); continue
+
+                    now = datetime.now()
+                    wait_sec = (trigger_dt - now).total_seconds()
+                    if wait_sec > 0:
+                        _send(f"⏳ <b>UD {ud_num}</b>: menunggu <code>{trigger_dt.strftime('%Y-%m-%d %H:%M')}</code> "
+                              f"({int(wait_sec//60)} menit lagi)...")
+                        elapsed = 0
+                        while elapsed < wait_sec and not stop_auto.is_set():
+                            time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
+                        if stop_auto.is_set(): break
+
+                    _send(f"🚀 <b>UD {ud_num}</b>: memulai download & upload...")
+                    lock = get_lock(uid)
+                    if not lock.acquire(blocking=True, timeout=60):
+                        _send("⚠️ Gagal acquire lock, skip..."); continue
+
+                    log_buffers[uid] = []
+                    log_fn = make_log_fn(uid)
+                    cfg = get_cfg(uid)
+                    inner_stop = threading.Event()
+                    try:
+                        _full_auto_single_upload(cfg, log_fn, inner_stop, ud_num)
+                    except Exception as e:
+                        _send(f"❌ [UD {ud_num}] Error: {e}")
+                    finally:
+                        lock.release()
+
+                    buf_lines = log_buffers.get(uid, [])
+                    summary = "\n".join(buf_lines[-8:])
+                    _send(f"🎉 <b>UD {ud_num}: selesai!</b>\n\n{summary}")
+                    if stop_auto.is_set(): break
+                    time.sleep(10)
+
+                if not any_has_stok and not stop_auto.is_set():
+                    _send("📦 Semua stok UD kosong. Menunggu 60 detik...")
                     for _ in range(12):
                         if stop_auto.is_set(): break
                         time.sleep(5)
-                    continue
 
-                state = load_schedule_state()
-                try:
-                    trigger_dt = datetime.strptime(
-                        f"{state['tanggal']} {state['jam']}:{state['menit']}", "%Y-%m-%d %H:%M"
-                    ) + timedelta(minutes=1)
-                except:
-                    _send("❌ Format schedule_state error!"); break
-
-                now = datetime.now()
-                wait_sec = (trigger_dt - now).total_seconds()
-                if wait_sec > 0:
-                    _send(f"⏳ <b>Full Auto</b>: menunggu <code>{trigger_dt.strftime('%Y-%m-%d %H:%M')}</code> "
-                          f"({int(wait_sec//60)} menit lagi)...")
-                    elapsed = 0
-                    while elapsed < wait_sec and not stop_auto.is_set():
-                        time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
-                    if stop_auto.is_set(): break
-
-                _send("🚀 <b>Full Auto</b>: memulai download & upload...")
-                lock = get_lock(uid)
-                if not lock.acquire(blocking=True, timeout=60):
-                    _send("⚠️ Gagal acquire lock, coba lagi..."); time.sleep(60); continue
-
-                log_buffers[uid] = []
-                log_fn = make_log_fn(uid)
-                cfg = get_cfg(uid)
-                inner_stop = threading.Event()
-                try:
-                    _full_auto_single_upload(cfg, log_fn, inner_stop)
-                except Exception as e:
-                    _send(f"❌ Error: {e}")
-                finally:
-                    lock.release()
-
-                lines = log_buffers.get(uid, [])
-                summary = "\n".join(lines[-8:])
-                _send(f"🎉 <b>Full Auto: selesai!</b>\n\n{summary}\n\n{stok_text()}")
-                if stop_auto.is_set(): break
-                time.sleep(10)
+                if not stop_auto.is_set():
+                    time.sleep(10)
 
             full_auto_tasks.pop(uid, None)
             _send("⏹ <b>Full Auto dihentikan.</b>")
@@ -796,8 +975,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         t = threading.Thread(target=_daemon, daemon=True, name=f"yt_full_auto_{uid}")
         full_auto_tasks[uid] = {"stop": stop_auto, "thread": t}
         t.start()
+        active = load_active_ud()
         await q.edit_message_text(
-            "🤖 <b>Full Auto aktif!</b>\nBot akan otomatis download stok link → split → upload ke TikTok.\n\nTekan <b>Stop Full Auto</b> untuk menghentikan.",
+            f"🤖 <b>Full Auto aktif!</b>\nActive UD: <b>{', '.join(str(x) for x in active)}</b>\n"
+            f"Bot akan otomatis download stok per UD → split → upload ke TikTok.\n\nTekan <b>Stop Full Auto</b> untuk menghentikan.",
             reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
         return
 
@@ -882,11 +1063,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<b>Perintah:</b>\n"
             "/start — Menu utama\n"
             "/download &lt;url&gt; — Download & split video\n"
-            "/settings — Konfigurasi (waktu, deskripsi, stok link, port)\n"
+            "/settings — Konfigurasi (deskripsi, interval, stok per UD, schedule per UD)\n"
             "/help — Panduan\n\n"
             "<b>Full Auto:</b>\n"
-            "Bot download link dari stok → split 3 menit → upload TikTok\n"
-            "Schedule berdasarkan tanggal terakhir (schedule_state)\n"
+            "Bot download link dari stok per User Data → split 3 menit → upload TikTok\n"
+            "Schedule per User Data (default aktif: UD 2, 5, 6)\n"
             "add_product=False, add_sound=False, skip_switches=True")
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
