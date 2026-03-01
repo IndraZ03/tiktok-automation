@@ -669,12 +669,11 @@ async def _process_settings_text(update, ctx, field):
         ctx.user_data["setting_field"] = None
         await update.message.reply_text("❌ Kirim /settings untuk mulai ulang.")
 
-async def _handle_settings_callback(q, ctx, data):
+async def _handle_settings_callback(q, ctx, data, bot):
     """Handle settings-related callback queries."""
     uid = q.from_user.id
     cfg = get_cfg(uid)
     chat_id = q.message.chat_id
-    bot = q.bot
 
     if data == "close_settings":
         ctx.user_data["in_settings"] = False
@@ -904,7 +903,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Route settings callbacks (set_*, close_settings, etc.)
     if data.startswith("set_") or data in ("close_settings", "set_back"):
-        handled = await _handle_settings_callback(q, ctx, data)
+        handled = await _handle_settings_callback(q, ctx, data, ctx.bot)
         if handled:
             return
 
