@@ -4,7 +4,7 @@
 import os, sys, re, math, time, shutil, asyncio, subprocess, logging, json, copy, threading
 from datetime import datetime, timedelta
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -485,7 +485,8 @@ def stok_text():
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid): return
-    _exit_settings(ctx)  # exit settings mode if active
+    ctx.user_data["in_settings"] = False
+    ctx.user_data["setting_field"] = None
     cfg = get_cfg(uid)
     text = (f"🎬 <b>YouTube Bot + Full Auto Upload</b>\n\n"
             f"{stok_text()}\n"
@@ -494,192 +495,260 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
 
 # ═══════════════════════════════════════════════════════════════
-#  SETTINGS (simple user_data state tracking, no ConversationHandler)
+#  SETTINGS (inline buttons + ForceReply, works in groups)
 # ═══════════════════════════════════════════════════════════════
-def _enter_settings(ctx):
-    """Mark user as in settings mode."""
-    ctx.user_data["in_settings"] = True
-    ctx.user_data["setting_field"] = None
+def _settings_kb():
+    """Build inline keyboard for settings menu."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Deskripsi", callback_data="set_desc"),
+         InlineKeyboardButton("⏱ Interval", callback_data="set_interval")],
+        [InlineKeyboardButton("📱 Active UD", callback_data="set_active_ud"),
+         InlineKeyboardButton("🏷 Hashtags", callback_data="set_hashtags")],
+        [InlineKeyboardButton("➕ Tambah Stok", callback_data="set_stok_pick"),
+         InlineKeyboardButton("📋 Lihat Stok", callback_data="set_view_pick")],
+        [InlineKeyboardButton("📅 Edit Schedule", callback_data="set_sched_pick"),
+         InlineKeyboardButton("🗑 Hapus Stok", callback_data="set_del_pick")],
+        [InlineKeyboardButton("❌ Tutup", callback_data="close_settings")],
+    ])
 
-def _exit_settings(ctx):
-    """Mark user as out of settings mode."""
-    ctx.user_data["in_settings"] = False
-    ctx.user_data["setting_field"] = None
+def _ud_picker_kb(prefix):
+    """Build UD picker (1-7) inline keyboard."""
+    rows = []
+    row = []
+    for i in range(1, 8):
+        row.append(InlineKeyboardButton(f"UD {i}", callback_data=f"{prefix}_{i}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅ Kembali", callback_data="set_back")])
+    return InlineKeyboardMarkup(rows)
 
-def _is_in_settings(ctx):
-    return ctx.user_data.get("in_settings", False)
-
-async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id): return
-    uid = update.effective_user.id
+def _settings_text(uid):
     cfg = get_cfg(uid)
     active = load_active_ud()
     hashtags_list = cfg.get('hashtags', [])
     hashtags_display = ', '.join(f'#{h}' for h in hashtags_list[:5]) if hashtags_list else '(kosong)'
-    text = ("⚙️ <b>Settings</b>\n\n"
-            f"1️⃣ Deskripsi: <code>{escape_html(cfg['deskripsi'][:60]) or '(kosong)'}</code>\n"
-            f"2️⃣ Interval: <code>{cfg['interval']} menit</code>\n"
-            f"3️⃣ Active User Data: <b>{', '.join(str(x) for x in active)}</b>\n"
-            f"4️⃣ Tambah Stok ke UD (kirim: <code>4 nomor_ud</code>)\n"
-            f"5️⃣ Lihat Stok UD (kirim: <code>5 nomor_ud</code>)\n"
-            f"6️⃣ Edit Schedule UD (kirim: <code>6 nomor_ud</code>)\n"
-            f"7️⃣ Hapus Stok UD (kirim: <code>7 nomor_ud</code>)\n"
-            f"8️⃣ Hashtags: <code>{escape_html(hashtags_display)}</code>\n\n"
-            "Kirim nomor untuk ubah, atau /cancel\n"
-            "Contoh: kirim <code>1</code> lalu kirim deskripsi")
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Tutup", callback_data="close_settings")]])
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    _enter_settings(ctx)
+    return ("⚙️ <b>Settings</b>\n\n"
+            f"📝 Deskripsi: <code>{escape_html(cfg['deskripsi'][:60]) or '(kosong)'}</code>\n"
+            f"⏱ Interval: <code>{cfg['interval']} menit</code>\n"
+            f"📱 Active UD: <b>{', '.join(str(x) for x in active)}</b>\n"
+            f"🏷 Hashtags: <code>{escape_html(hashtags_display)}</code>\n\n"
+            "Pilih tombol di bawah untuk mengubah:")
+
+async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    uid = update.effective_user.id
+    text = _settings_text(uid)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+    ctx.user_data["in_settings"] = True
+    ctx.user_data["setting_field"] = None
 
 async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Global text handler — routes to settings_input if in settings mode."""
+    """Global text handler — catches replies for settings input."""
     if not update.message or not update.message.text:
         return
     uid = update.effective_user.id
     if not is_allowed(uid):
         return
-    if not _is_in_settings(ctx):
-        return  # not in settings mode, ignore text
+    field = ctx.user_data.get("setting_field")
+    if not field:
+        return  # not waiting for text input
     try:
-        await settings_input(update, ctx)
+        await _process_settings_text(update, ctx, field)
     except Exception as e:
-        logger.error(f"[settings_input] error: {e}", exc_info=True)
+        logger.error(f"[settings] error: {e}", exc_info=True)
         try:
-            await update.message.reply_text(f"❌ Error: {escape_html(str(e)[:200])}\nKirim /settings untuk coba lagi.", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                f"❌ Error: {escape_html(str(e)[:200])}\nKirim /settings untuk coba lagi.")
         except:
             pass
 
-async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def _process_settings_text(update, ctx, field):
+    """Process text input for settings."""
     uid = update.effective_user.id
     cfg = get_cfg(uid)
     txt = update.message.text.strip()
-    state = ctx.user_data.get("setting_field")
+    logger.info(f"[settings_text] uid={uid}, field={field}, txt={txt!r}")
 
-    logger.info(f"[settings_input] uid={uid}, txt={txt!r}, state={state}")
-
-    if state:
-        if state == "desc":
-            cfg["deskripsi"] = txt
-            await update.message.reply_text(f"✅ Deskripsi diubah: <code>{escape_html(txt[:60])}</code>\nKirim nomor lain atau /cancel", parse_mode=ParseMode.HTML)
-        elif state == "interval":
-            cfg["interval"] = txt
-            await update.message.reply_text(f"✅ Interval diubah: <code>{txt} menit</code>\nKirim nomor lain atau /cancel", parse_mode=ParseMode.HTML)
-        elif state == "active_ud":
-            nums = [int(x) for x in re.split(r'[,\s]+', txt) if x.strip().isdigit()]
-            nums = [n for n in nums if 1 <= n <= 7]
-            if nums:
-                save_active_ud(nums)
-                await update.message.reply_text(f"✅ Active UD: {', '.join(str(x) for x in nums)}\nKirim nomor lain atau /cancel")
-            else:
-                await update.message.reply_text("❌ Format salah. Kirim nomor 1-7 dipisah koma/spasi.\nContoh: <code>2,5,6</code>", parse_mode=ParseMode.HTML)
-                return
-        elif state == "stok_ud":
-            ud_num = ctx.user_data.get("stok_ud_num")
-            urls = [u.strip() for u in txt.split("\n") if u.strip()]
-            add_stok_per_ud(ud_num, urls)
-            total = len(load_stok_per_ud(ud_num))
-            await update.message.reply_text(f"✅ {len(urls)} link ditambahkan ke UD {ud_num}. Total: {total}\nKirim nomor lain atau /cancel")
-        elif state == "sched_ud_date":
-            ud_num = ctx.user_data.get("sched_ud_num")
-            try:
-                datetime.strptime(txt, "%Y-%m-%d")
-                ctx.user_data["sched_ud_date_val"] = txt
-                ctx.user_data["setting_field"] = "sched_ud_time"
-                await update.message.reply_text(f"Kirim jam untuk UD {ud_num} (HH:MM):\nContoh: <code>14:30</code>", parse_mode=ParseMode.HTML)
-                return
-            except:
-                await update.message.reply_text("❌ Format salah. Gunakan YYYY-MM-DD\nContoh: <code>2026-03-02</code>", parse_mode=ParseMode.HTML)
-                return
-        elif state == "sched_ud_time":
-            ud_num = ctx.user_data.get("sched_ud_num")
-            date_val = ctx.user_data.get("sched_ud_date_val")
-            parts_time = txt.replace(".",":").split(":")
-            if len(parts_time) == 2:
-                jam, menit = parts_time[0].zfill(2), parts_time[1].zfill(2)
-                save_schedule_per_ud(ud_num, date_val, jam, menit)
-                await update.message.reply_text(f"✅ Schedule UD {ud_num}: {date_val} {jam}:{menit}\nKirim nomor lain atau /cancel")
-            else:
-                await update.message.reply_text("❌ Format salah. Gunakan HH:MM\nContoh: <code>14:30</code>", parse_mode=ParseMode.HTML)
-                return
-        elif state == "hapus_stok_ud":
-            ud_num = ctx.user_data.get("hapus_ud_num")
-            if txt.lower() == "all":
-                save_stok_per_ud(ud_num, [])
-                await update.message.reply_text(f"✅ Stok UD {ud_num} dikosongkan!\nKirim nomor lain atau /cancel")
-            else:
-                try:
-                    idx = int(txt) - 1
-                    links = load_stok_per_ud(ud_num)
-                    if 0 <= idx < len(links):
-                        removed = links.pop(idx)
-                        save_stok_per_ud(ud_num, links)
-                        await update.message.reply_text(f"✅ Dihapus: {removed[:60]}\nKirim nomor lain atau /cancel")
-                    else:
-                        await update.message.reply_text("❌ Nomor tidak valid. Coba lagi:")
-                        return
-                except:
-                    await update.message.reply_text("❌ Kirim nomor atau 'all'. Coba lagi:")
-                    return
-        elif state == "hashtags":
-            raw_tags = re.split(r'[,\n]+', txt)
-            tags = [t.strip().lstrip('#').strip() for t in raw_tags if t.strip().lstrip('#').strip()]
-            cfg["hashtags"] = tags
-            display = ', '.join(f'#{t}' for t in tags)
-            await update.message.reply_text(f"✅ Hashtags diubah: <code>{escape_html(display)}</code>\nKirim nomor lain atau /cancel", parse_mode=ParseMode.HTML)
-        else:
-            await update.message.reply_text("❌ State tidak dikenal. Kirim /settings untuk mulai ulang.")
+    if field == "desc":
+        cfg["deskripsi"] = txt
         ctx.user_data["setting_field"] = None
-        return
+        await update.message.reply_text(
+            f"✅ Deskripsi diubah: <code>{escape_html(txt[:60])}</code>",
+            parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+    elif field == "interval":
+        cfg["interval"] = txt
+        ctx.user_data["setting_field"] = None
+        await update.message.reply_text(
+            f"✅ Interval diubah: <code>{txt} menit</code>",
+            parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+    elif field == "active_ud":
+        nums = [int(x) for x in re.split(r'[,\s]+', txt) if x.strip().isdigit()]
+        nums = [n for n in nums if 1 <= n <= 7]
+        if nums:
+            save_active_ud(nums)
+            ctx.user_data["setting_field"] = None
+            await update.message.reply_text(
+                f"✅ Active UD: <b>{', '.join(str(x) for x in nums)}</b>",
+                parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+        else:
+            await update.message.reply_text(
+                "❌ Format salah. Kirim nomor 1-7 dipisah koma.\nContoh: <code>2,5,6</code>",
+                parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+    elif field == "hashtags":
+        raw_tags = re.split(r'[,\n]+', txt)
+        tags = [t.strip().lstrip('#').strip() for t in raw_tags if t.strip().lstrip('#').strip()]
+        cfg["hashtags"] = tags
+        display = ', '.join(f'#{t}' for t in tags)
+        ctx.user_data["setting_field"] = None
+        await update.message.reply_text(
+            f"✅ Hashtags: <code>{escape_html(display)}</code>",
+            parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+    elif field == "stok_ud":
+        ud_num = ctx.user_data.get("stok_ud_num")
+        urls = [u.strip() for u in txt.split("\n") if u.strip()]
+        add_stok_per_ud(ud_num, urls)
+        total = len(load_stok_per_ud(ud_num))
+        ctx.user_data["setting_field"] = None
+        await update.message.reply_text(
+            f"✅ {len(urls)} link ditambahkan ke UD {ud_num}. Total: {total}",
+            reply_markup=_settings_kb())
+    elif field == "sched_ud_date":
+        ud_num = ctx.user_data.get("sched_ud_num")
+        try:
+            datetime.strptime(txt, "%Y-%m-%d")
+            ctx.user_data["sched_ud_date_val"] = txt
+            ctx.user_data["setting_field"] = "sched_ud_time"
+            await update.message.reply_text(
+                f"Kirim jam untuk UD {ud_num} (HH:MM):\nContoh: <code>14:30</code>",
+                parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        except:
+            await update.message.reply_text(
+                "❌ Format salah. YYYY-MM-DD\nContoh: <code>2026-03-02</code>",
+                parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+    elif field == "sched_ud_time":
+        ud_num = ctx.user_data.get("sched_ud_num")
+        date_val = ctx.user_data.get("sched_ud_date_val")
+        parts_time = txt.replace(".",":").split(":")
+        if len(parts_time) == 2:
+            jam, menit = parts_time[0].zfill(2), parts_time[1].zfill(2)
+            save_schedule_per_ud(ud_num, date_val, jam, menit)
+            ctx.user_data["setting_field"] = None
+            await update.message.reply_text(
+                f"✅ Schedule UD {ud_num}: {date_val} {jam}:{menit}",
+                reply_markup=_settings_kb())
+        else:
+            await update.message.reply_text(
+                "❌ Format salah. HH:MM\nContoh: <code>14:30</code>",
+                parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+    elif field == "hapus_stok_ud":
+        ud_num = ctx.user_data.get("hapus_ud_num")
+        if txt.lower() == "all":
+            save_stok_per_ud(ud_num, [])
+            ctx.user_data["setting_field"] = None
+            await update.message.reply_text(
+                f"✅ Stok UD {ud_num} dikosongkan!", reply_markup=_settings_kb())
+        else:
+            try:
+                idx = int(txt) - 1
+                links = load_stok_per_ud(ud_num)
+                if 0 <= idx < len(links):
+                    removed = links.pop(idx)
+                    save_stok_per_ud(ud_num, links)
+                    ctx.user_data["setting_field"] = None
+                    await update.message.reply_text(
+                        f"✅ Dihapus: {removed[:60]}", reply_markup=_settings_kb())
+                else:
+                    await update.message.reply_text("❌ Nomor tidak valid.",
+                        reply_markup=ForceReply(selective=True))
+            except:
+                await update.message.reply_text("❌ Kirim nomor atau 'all'.",
+                    reply_markup=ForceReply(selective=True))
+    else:
+        ctx.user_data["setting_field"] = None
+        await update.message.reply_text("❌ Kirim /settings untuk mulai ulang.")
 
-    # Parse commands like "4 2"
-    parts = txt.split(None, 1)
-    cmd = parts[0]
+async def _handle_settings_callback(q, ctx, data):
+    """Handle settings-related callback queries."""
+    uid = q.from_user.id
+    cfg = get_cfg(uid)
+    chat_id = q.message.chat_id
+    bot = q.bot
 
-    if cmd == "1":
+    if data == "close_settings":
+        ctx.user_data["in_settings"] = False
+        ctx.user_data["setting_field"] = None
+        await q.edit_message_text("⚙️ Settings ditutup.")
+        return True
+
+    if data == "set_back":
+        text = _settings_text(uid)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+        return True
+
+    # Direct settings that need text input
+    if data == "set_desc":
         ctx.user_data["setting_field"] = "desc"
-        await update.message.reply_text(
-            "📝 Kirim deskripsi TikTok:\n"
-            "Contoh: <code>Cek link di bio!</code>",
-            parse_mode=ParseMode.HTML)
-        return
-    if cmd == "2":
+        await bot.send_message(chat_id,
+            f"📝 Deskripsi saat ini: <code>{escape_html(cfg['deskripsi'][:60]) or '(kosong)'}</code>\n\n"
+            "Kirim deskripsi baru:",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
+
+    if data == "set_interval":
         ctx.user_data["setting_field"] = "interval"
-        await update.message.reply_text(
-            "⏱ Kirim interval upload (dalam menit):\n"
-            "Contoh: <code>60</code>",
-            parse_mode=ParseMode.HTML)
-        return
-    if cmd == "3":
+        await bot.send_message(chat_id,
+            f"⏱ Interval saat ini: <code>{cfg['interval']} menit</code>\n\n"
+            "Kirim interval baru (menit):\nContoh: <code>60</code>",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
+
+    if data == "set_active_ud":
         ctx.user_data["setting_field"] = "active_ud"
         active = load_active_ud()
-        await update.message.reply_text(
-            f"Active UD saat ini: <b>{', '.join(str(x) for x in active)}</b>\n"
-            f"Kirim nomor UD yang diaktifkan (pisah koma/spasi).\nContoh: <code>2,5,6</code>",
-            parse_mode=ParseMode.HTML)
-        return
-    if cmd == "4":
-        if len(parts) < 2 or not parts[1].strip().isdigit():
-            await update.message.reply_text(
-                "📦 Format: <code>4 nomor_ud</code>\n"
-                "Contoh: <code>4 2</code> (tambah stok ke UD 2)",
-                parse_mode=ParseMode.HTML)
-            return
-        ud_num = int(parts[1].strip())
+        await bot.send_message(chat_id,
+            f"📱 Active UD saat ini: <b>{', '.join(str(x) for x in active)}</b>\n\n"
+            "Kirim nomor UD yang diaktifkan (pisah koma):\nContoh: <code>2,5,6</code>",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
+
+    if data == "set_hashtags":
+        ctx.user_data["setting_field"] = "hashtags"
+        current = cfg.get('hashtags', [])
+        current_display = ', '.join(f'#{t}' for t in current) if current else '(kosong)'
+        await bot.send_message(chat_id,
+            f"🏷 Hashtags saat ini: <code>{escape_html(current_display)}</code>\n\n"
+            "Kirim hashtag baru (pisah koma):\nContoh: <code>fyp, viral, tiktok</code>",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
+
+    # UD pickers (show UD 1-7 buttons)
+    if data in ("set_stok_pick", "set_view_pick", "set_sched_pick", "set_del_pick"):
+        labels = {"set_stok_pick": "➕ Tambah Stok — Pilih UD:",
+                  "set_view_pick": "📋 Lihat Stok — Pilih UD:",
+                  "set_sched_pick": "📅 Edit Schedule — Pilih UD:",
+                  "set_del_pick": "🗑 Hapus Stok — Pilih UD:"}
+        prefixes = {"set_stok_pick": "set_stok",
+                    "set_view_pick": "set_view",
+                    "set_sched_pick": "set_sched",
+                    "set_del_pick": "set_del"}
+        await q.edit_message_text(labels[data], reply_markup=_ud_picker_kb(prefixes[data]))
+        return True
+
+    # UD selected: Tambah Stok
+    if data.startswith("set_stok_"):
+        ud_num = int(data.split("_")[-1])
         ctx.user_data["setting_field"] = "stok_ud"
         ctx.user_data["stok_ud_num"] = ud_num
-        await update.message.reply_text(
-            f"Kirim link YouTube untuk <b>UD {ud_num}</b> (satu per baris):\n"
-            f"Contoh:\n<code>https://youtube.com/watch?v=xxx\nhttps://youtube.com/watch?v=yyy</code>",
-            parse_mode=ParseMode.HTML)
-        return
-    if cmd == "5":
-        if len(parts) < 2 or not parts[1].strip().isdigit():
-            await update.message.reply_text(
-                "📋 Format: <code>5 nomor_ud</code>\n"
-                "Contoh: <code>5 2</code> (lihat stok UD 2)",
-                parse_mode=ParseMode.HTML)
-            return
-        ud_num = int(parts[1].strip())
+        await bot.send_message(chat_id,
+            f"Kirim link YouTube untuk <b>UD {ud_num}</b> (satu per baris):",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
+
+    # UD selected: Lihat Stok (no text input needed)
+    if data.startswith("set_view_"):
+        ud_num = int(data.split("_")[-1])
         links = load_stok_per_ud(ud_num)
         ss = load_schedule_per_ud(ud_num)
         t = f"📦 <b>Stok UD {ud_num}</b> ({len(links)} link)\n"
@@ -688,69 +757,45 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             t += f"  {i+1}. <code>{l[:60]}</code>\n"
         if len(links) > 15: t += f"  ... +{len(links)-15} lainnya\n"
         if not links: t += "  <i>(kosong)</i>\n"
-        t += "\nKirim nomor lain atau /cancel"
-        await update.message.reply_text(t, parse_mode=ParseMode.HTML)
-        return
-    if cmd == "6":
-        if len(parts) < 2 or not parts[1].strip().isdigit():
-            await update.message.reply_text(
-                "📅 Format: <code>6 nomor_ud</code>\n"
-                "Contoh: <code>6 2</code> (edit schedule UD 2)",
-                parse_mode=ParseMode.HTML)
-            return
-        ud_num = int(parts[1].strip())
+        await q.edit_message_text(t, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Kembali", callback_data="set_back")]]))
+        return True
+
+    # UD selected: Edit Schedule
+    if data.startswith("set_sched_"):
+        ud_num = int(data.split("_")[-1])
         ctx.user_data["setting_field"] = "sched_ud_date"
         ctx.user_data["sched_ud_num"] = ud_num
         ss = load_schedule_per_ud(ud_num)
-        await update.message.reply_text(
-            f"Schedule UD {ud_num} sekarang: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n"
-            f"Kirim tanggal baru (YYYY-MM-DD):\n"
-            f"Contoh: <code>2026-03-02</code>",
-            parse_mode=ParseMode.HTML)
-        return
-    if cmd == "7":
-        if len(parts) < 2 or not parts[1].strip().isdigit():
-            await update.message.reply_text(
-                "🗑 Format: <code>7 nomor_ud</code>\n"
-                "Contoh: <code>7 2</code> (hapus stok UD 2)",
-                parse_mode=ParseMode.HTML)
-            return
-        ud_num = int(parts[1].strip())
+        await bot.send_message(chat_id,
+            f"📅 Schedule UD {ud_num}: <code>{ss['tanggal']} {ss['jam']}:{ss['menit']}</code>\n\n"
+            "Kirim tanggal baru (YYYY-MM-DD):\nContoh: <code>2026-03-02</code>",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
+
+    # UD selected: Hapus Stok
+    if data.startswith("set_del_"):
+        ud_num = int(data.split("_")[-1])
         links = load_stok_per_ud(ud_num)
         if not links:
-            await update.message.reply_text(f"Stok UD {ud_num} sudah kosong.\nKirim nomor lain atau /cancel")
-            return
+            await q.edit_message_text(f"Stok UD {ud_num} kosong.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Kembali", callback_data="set_back")]]))
+            return True
+        ctx.user_data["setting_field"] = "hapus_stok_ud"
+        ctx.user_data["hapus_ud_num"] = ud_num
         t = f"🗑 <b>Hapus Stok UD {ud_num}</b> ({len(links)} link)\n\n"
         for i, l in enumerate(links[:15]):
             t += f"  {i+1}. <code>{l[:60]}</code>\n"
-        t += "\nKirim nomor untuk hapus 1 link, atau <code>all</code> untuk hapus semua."
-        ctx.user_data["setting_field"] = "hapus_stok_ud"
-        ctx.user_data["hapus_ud_num"] = ud_num
-        await update.message.reply_text(t, parse_mode=ParseMode.HTML)
-        return
-    if cmd == "8":
-        ctx.user_data["setting_field"] = "hashtags"
-        current = cfg.get('hashtags', [])
-        current_display = ', '.join(f'#{t}' for t in current) if current else '(kosong)'
-        await update.message.reply_text(
-            f"🏷 Hashtags saat ini: <code>{escape_html(current_display)}</code>\n\n"
-            f"Kirim hashtag baru (pisahkan dengan koma atau baris baru):\n"
-            f"Contoh: <code>fyp, viral, tiktok</code>\n"
-            f"atau:\n<code>fyp\nviral\ntiktok</code>",
-            parse_mode=ParseMode.HTML)
-        return
+        await bot.send_message(chat_id,
+            t + "\nKirim nomor untuk hapus 1, atau <code>all</code> untuk hapus semua:",
+            parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        return True
 
-    await update.message.reply_text(
-        "❌ Perintah tidak dikenali.\n"
-        "Kirim angka <b>1-8</b>, atau /cancel\n\n"
-        "Contoh:\n"
-        "• <code>1</code> → ubah deskripsi\n"
-        "• <code>4 2</code> → tambah stok ke UD 2\n"
-        "• <code>8</code> → ubah hashtags",
-        parse_mode=ParseMode.HTML)
+    return False  # not a settings callback
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    _exit_settings(ctx)
+    ctx.user_data["in_settings"] = False
+    ctx.user_data["setting_field"] = None
     await update.message.reply_text("⚙️ Settings ditutup.", reply_markup=main_menu_kb(update.effective_user.id))
 
 # ═══════════════════════════════════════════════════════════════
@@ -857,11 +902,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(uid): return
     data = q.data
 
-    # Handle close_settings from the ❌ Tutup button
-    if data == "close_settings":
-        _exit_settings(ctx)
-        await q.edit_message_text("⚙️ Settings ditutup.")
-        return
+    # Route settings callbacks (set_*, close_settings, etc.)
+    if data.startswith("set_") or data in ("close_settings", "set_back"):
+        handled = await _handle_settings_callback(q, ctx, data)
+        if handled:
+            return
 
     if data == "refresh":
         cfg = get_cfg(uid)
