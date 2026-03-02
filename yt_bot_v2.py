@@ -871,14 +871,18 @@ _ud_current_folder = {}
 
 UPLOAD_BATCH_SIZE = 20  # max videos to upload per loop
 
+def _natural_sort_key(filepath):
+    """Extract natural sort key so Part2 comes before Part10."""
+    basename = os.path.basename(filepath).lower()
+    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', basename)]
+
 def _get_pending_videos(folder_path):
-    """Return sorted list of mp4 files still in the folder."""
+    """Return naturally-sorted list of mp4 files still in the folder."""
     if not folder_path or not os.path.isdir(folder_path):
         return []
-    files = sorted(
-        [os.path.join(folder_path, f) for f in os.listdir(folder_path)
-         if f.lower().endswith(".mp4") and os.path.isfile(os.path.join(folder_path, f))]
-    )
+    files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
+             if f.lower().endswith(".mp4") and os.path.isfile(os.path.join(folder_path, f))]
+    files.sort(key=_natural_sort_key)
     return files
 
 def _download_and_split_to_final(ud_num, log_fn, stop_evt):
@@ -946,6 +950,27 @@ def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
     hashtags = cfg.get("hashtags", [])
 
     start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=hour, minute=minute)
+
+    # ── Auto-koreksi: jika start_dt sudah lewat atau kurang dari 20 menit ke depan,
+    #    geser ke now + 20 menit (TikTok butuh minimal ~15-20 menit ke depan untuk schedule)
+    MIN_FUTURE_MINUTES = 60
+    now = datetime.now()
+    min_start = now + timedelta(minutes=MIN_FUTURE_MINUTES)
+    if start_dt < min_start:
+        old_dt = start_dt
+        start_dt = min_start.replace(second=0, microsecond=0)
+        # Bulatkan ke kelipatan 5 menit agar rapi di TikTok timepicker
+        rounded_min = ((start_dt.minute + 4) // 5) * 5
+        if rounded_min >= 60:
+            start_dt = start_dt.replace(minute=0) + timedelta(hours=1)
+        else:
+            start_dt = start_dt.replace(minute=rounded_min)
+        log_fn(f"⚠️ [UD {ud_num}] Schedule {old_dt.strftime('%Y-%m-%d %H:%M')} sudah lewat/terlalu dekat!", "warn")
+        log_fn(f"   → Digeser ke {start_dt.strftime('%Y-%m-%d %H:%M')} (now + {MIN_FUTURE_MINUTES} menit)", "warn")
+        # Simpan schedule yang sudah dikoreksi
+        save_schedule_per_ud(ud_num, start_dt.strftime("%Y-%m-%d"),
+                             f"{start_dt.hour:02d}", f"{start_dt.minute:02d}")
+
     batch = video_files[:UPLOAD_BATCH_SIZE]
     total = len(batch)
 
