@@ -464,34 +464,116 @@ def do_post_tiktok(driver, deskripsi, schedule_dt, log_fn):
     # ── Content Check Lite ── Jika toggle ON, klik agar menjadi OFF
     try:
         log_fn("  Memeriksa Content Check Lite...", "info")
-        # Cari switch Content Check Lite yang sedang checked (ON)
-        # Indikator: div dengan class Switch__root--checked-true di dekat headline 'Content check lite'
-        checked_switches = driver.find_elements(
-            By.XPATH,
-            "//span[contains(text(),'Content check lite')]"
-            "/ancestor::div[contains(@class,'jsx-')]"
-            "//div[contains(@class,'Switch__root--checked-true')]"
-            "//input[@role='switch']"
-        )
-        if not checked_switches:
-            # Fallback: cari semua switch input yang checked (aria-checked="true")
-            checked_switches = driver.find_elements(
+        content_check_clicked = False
+
+        # Strategy 1: Cari teks 'Content check' lalu klik Switch__content di sebelahnya
+        try:
+            switch_divs = driver.find_elements(
                 By.XPATH,
-                "//div[@aria-checked='true' and contains(@class,'Switch__content')]"
-                "/ancestor::div[contains(@class,'Switch__root')]"
-                "//input[@role='switch']"
+                "//span[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'content check')]"
+                "/ancestor::div[1]//div[contains(@class,'Switch__content')]"
             )
-        if checked_switches:
-            switch_input = checked_switches[0]
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", switch_input)
-            time.sleep(0.5)
-            driver.execute_script("arguments[0].click();", switch_input)
-            time.sleep(1)
-            log_fn("  Content Check Lite dimatikan.", "success")
-        else:
+            if not switch_divs:
+                switch_divs = driver.find_elements(
+                    By.XPATH,
+                    "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'content check')]"
+                    "/ancestor::div[position()<=5]//div[contains(@class,'Switch')]"
+                )
+            for sd in switch_divs:
+                cls = sd.get_attribute("class") or ""
+                aria = sd.get_attribute("aria-checked") or ""
+                parent = sd.find_elements(By.XPATH, "./ancestor::div[contains(@class,'Switch__root')][1]")
+                parent_cls = parent[0].get_attribute("class") if parent else ""
+                is_on = ("checked-true" in cls or "checked-true" in parent_cls
+                         or aria == "true")
+                log_fn(f"    Switch ditemukan: class={cls[:60]}, aria-checked={aria}, is_on={is_on}", "info")
+                if is_on:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sd)
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", sd)
+                    time.sleep(1)
+                    content_check_clicked = True
+                    log_fn("  ✓ Content Check Lite dimatikan (Strategy 1).", "success")
+                    break
+        except Exception as e1:
+            log_fn(f"    Strategy 1 gagal: {e1}", "warn")
+
+        # Strategy 2: Cari semua switch yang ON lalu cocokkan dengan teks 'content check'
+        if not content_check_clicked:
+            try:
+                all_on_switches = driver.find_elements(
+                    By.XPATH,
+                    "//div[contains(@class,'Switch__root--checked-true')]//div[contains(@class,'Switch__content')]"
+                    " | //div[@aria-checked='true' and contains(@class,'Switch')]"
+                )
+                for sw in all_on_switches:
+                    containers = sw.find_elements(
+                        By.XPATH,
+                        "./ancestor::div[position()<=5]"
+                    )
+                    for cont in containers:
+                        txt = (cont.text or "").lower()
+                        if "content check" in txt:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sw)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", sw)
+                            time.sleep(1)
+                            content_check_clicked = True
+                            log_fn("  ✓ Content Check Lite dimatikan (Strategy 2).", "success")
+                            break
+                    if content_check_clicked:
+                        break
+            except Exception as e2:
+                log_fn(f"    Strategy 2 gagal: {e2}", "warn")
+
+        # Strategy 3: Gunakan JavaScript untuk cari dan klik
+        if not content_check_clicked:
+            try:
+                result = driver.execute_script("""
+                    var spans = document.querySelectorAll('span, div, label, p');
+                    for (var i = 0; i < spans.length; i++) {
+                        var txt = (spans[i].textContent || '').toLowerCase().trim();
+                        if (txt.includes('content check')) {
+                            var parent = spans[i].closest('div[class*="jsx-"], div[class*="container"], div[class*="row"], div[class*="setting"]') || spans[i].parentElement;
+                            if (!parent) continue;
+                            var switchEl = parent.querySelector('div[class*="Switch__content"], div[class*="switch"], div[role="switch"], input[role="switch"]');
+                            if (!switchEl) {
+                                var siblings = parent.querySelectorAll('div[class*="Switch"]');
+                                if (siblings.length > 0) switchEl = siblings[0];
+                            }
+                            if (switchEl) {
+                                var cls = switchEl.className || '';
+                                var aria = switchEl.getAttribute('aria-checked') || '';
+                                var rootEl = switchEl.closest('div[class*="Switch__root"]');
+                                var rootCls = rootEl ? rootEl.className : '';
+                                if (cls.includes('checked-true') || rootCls.includes('checked-true') || aria === 'true') {
+                                    switchEl.scrollIntoView({block: 'center'});
+                                    switchEl.click();
+                                    return 'clicked';
+                                } else {
+                                    return 'already_off';
+                                }
+                            }
+                        }
+                    }
+                    return 'not_found';
+                """)
+                if result == 'clicked':
+                    time.sleep(1)
+                    content_check_clicked = True
+                    log_fn("  ✓ Content Check Lite dimatikan (Strategy 3 - JS).", "success")
+                elif result == 'already_off':
+                    content_check_clicked = True
+                    log_fn("  Content Check Lite sudah OFF (Strategy 3 - JS).", "info")
+                else:
+                    log_fn("  Content Check Lite tidak ditemukan (Strategy 3 - JS).", "info")
+            except Exception as e3:
+                log_fn(f"    Strategy 3 gagal: {e3}", "warn")
+
+        if not content_check_clicked:
             log_fn("  Content Check Lite sudah OFF atau tidak ditemukan.", "info")
     except Exception as e:
-        log_fn(f"  Warning Content Check Lite: {e}", "warn")
+        log_fn(f"  ⚠ Content Check Lite: {e}", "warn")
     
     # ── Schedule ──
     log_fn("  Mengatur schedule...", "info")
