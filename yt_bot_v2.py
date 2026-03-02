@@ -863,99 +863,144 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FULL AUTO UPLOAD (download from stok → split → upload TikTok)
+#  FULL AUTO UPLOAD — Persistent Folder + 20 Videos per Loop
 # ═══════════════════════════════════════════════════════════════
-def _full_auto_single_upload(cfg, log_fn, stop_evt, ud_num):
-    """Download 1 link from UD stok, split, upload all parts to TikTok using that UD."""
+
+# Tracks the current active download folder per UD: {ud_num: folder_path}
+_ud_current_folder = {}
+
+UPLOAD_BATCH_SIZE = 20  # max videos to upload per loop
+
+def _get_pending_videos(folder_path):
+    """Return sorted list of mp4 files still in the folder."""
+    if not folder_path or not os.path.isdir(folder_path):
+        return []
+    files = sorted(
+        [os.path.join(folder_path, f) for f in os.listdir(folder_path)
+         if f.lower().endswith(".mp4") and os.path.isfile(os.path.join(folder_path, f))]
+    )
+    return files
+
+def _download_and_split_to_final(ud_num, log_fn, stop_evt):
+    """
+    Download the first link in UD stok, split, and save all parts
+    directly into FINAL_DIR/<title>/. Returns the output folder path,
+    or None on failure. Does NOT remove the stok link yet.
+    """
     links = load_stok_per_ud(ud_num)
     if not links:
-        log_fn(f"❌ Stok UD {ud_num} kosong!", "error"); return False
+        log_fn(f"❌ [UD {ud_num}] Stok kosong, tidak ada yang didownload.", "error")
+        return None
 
     url = links[0]
     log_fn(f"📥 [UD {ud_num}] Downloading: {url[:60]}...", "info")
 
     job_temp = os.path.join(TEMP_DIR, f"auto_ud{ud_num}_{int(time.time())}")
-    job_out = os.path.join(TEMP_DIR, f"auto_ud{ud_num}_{int(time.time())}_out")
+
+    try:
+        filepath, title = download_video_sync(url, job_temp, log_fn)
+        log_fn(f"✓ [UD {ud_num}] Download selesai: {title[:40]}", "success")
+        if stop_evt.is_set(): return None
+
+        safe_title = sanitize_filename(title)
+        video_folder = os.path.join(FINAL_DIR, safe_title)
+        os.makedirs(video_folder, exist_ok=True)
+
+        logo = LOGO_PATH if os.path.exists(LOGO_PATH) else None
+        output_files = split_and_process_sync(filepath, video_folder, title, logo, log_fn)
+
+        if not output_files:
+            log_fn(f"❌ [UD {ud_num}] Split gagal, tidak ada part!", "error")
+            try: shutil.rmtree(video_folder)
+            except: pass
+            return None
+
+        log_fn(f"✓ [UD {ud_num}] Split selesai: {len(output_files)} parts → {video_folder}", "success")
+        return video_folder
+
+    except Exception as e:
+        log_fn(f"❌ [UD {ud_num}] Error download/split: {e}", "error")
+        return None
+    finally:
+        try:
+            if os.path.exists(job_temp): shutil.rmtree(job_temp)
+        except: pass
+
+def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
+    """
+    Upload up to UPLOAD_BATCH_SIZE videos from video_files list.
+    Videos are deleted *after* each successful upload.
+    Returns: (uploaded_count, schedules_used)
+    """
+    if not video_files:
+        return 0, 0
 
     userdata = os.path.join(APP_DIR, "user_data", str(ud_num))
     port = UD_PORT_MAP.get(ud_num, str(9222 + ud_num - 1))
 
+    ss = load_schedule_per_ud(ud_num)
+    hour = int(ss["jam"]); minute = int(ss["menit"])
+    date_str = ss["tanggal"]
+    interval = int(cfg.get("interval", "60"))
+    deskripsi = cfg.get("deskripsi", "")
+    hashtags = cfg.get("hashtags", [])
+
+    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=hour, minute=minute)
+    batch = video_files[:UPLOAD_BATCH_SIZE]
+    total = len(batch)
+
+    log_fn(f"📅 [UD {ud_num}] Schedule mulai: {start_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+    log_fn(f"🎬 [UD {ud_num}] Akan upload {total} video (dari {len(video_files)} sisa)...", "info")
+    if hashtags:
+        log_fn(f"🏷 [UD {ud_num}] Hashtags: {', '.join('#'+h for h in hashtags)}", "info")
+    log_fn(f"🌐 [UD {ud_num}] Membuka Chrome (port {port})...", "info")
+
+    chrome_proc = open_chrome_debug(userdata, port)
+    driver = connect_selenium(port)
+    log_fn(f"✓ [UD {ud_num}] Chrome terhubung!", "success")
+
+    uploaded = 0
     try:
-        filepath, title = download_video_sync(url, job_temp, log_fn)
-        log_fn(f"✓ Download selesai: {title[:40]}", "success")
-        if stop_evt.is_set(): return False
-
-        logo = LOGO_PATH if os.path.exists(LOGO_PATH) else None
-        output_files = split_and_process_sync(filepath, job_out, title, logo, log_fn)
-        if not output_files:
-            log_fn("❌ Tidak ada part yang berhasil!", "error"); return False
-        log_fn(f"✓ Split: {len(output_files)} parts", "success")
-        if stop_evt.is_set(): return False
-
-        # Read schedule from per-UD state
-        ss = load_schedule_per_ud(ud_num)
-        hour = int(ss["jam"]); minute = int(ss["menit"])
-        date_str = ss["tanggal"]
-        interval = int(cfg.get("interval", "60"))
-        deskripsi = cfg.get("deskripsi", "")
-        hashtags = cfg.get("hashtags", [])
-
-        start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=hour, minute=minute)
-        log_fn(f"📅 [UD {ud_num}] Schedule mulai: {start_dt.strftime('%Y-%m-%d %H:%M')}", "info")
-        if hashtags:
-            log_fn(f"🏷 [UD {ud_num}] Hashtags: {', '.join('#'+h for h in hashtags)}", "info")
-        log_fn(f"🌐 [UD {ud_num}] Membuka Chrome (port {port})...", "info")
-
-        chrome_proc = open_chrome_debug(userdata, port)
-        driver = connect_selenium(port)
-        log_fn(f"✓ [UD {ud_num}] Chrome terhubung!", "success")
-        uploaded = 0
-
-        try:
-            for idx, out_path in enumerate(output_files):
-                if stop_evt.is_set(): break
-                if not os.path.exists(out_path): continue
-                sched_dt = start_dt + timedelta(minutes=interval * idx)
-                log_fn(f"[UD {ud_num}] [{idx+1}/{len(output_files)}] Upload: {os.path.basename(out_path)}", "info")
-                log_fn(f"  Schedule: {sched_dt.strftime('%Y-%m-%d %H:%M')}", "info")
-                try:
-                    navigate_upload_page(driver, force=(idx > 0))
-                    time.sleep(3)
-                    do_upload_file(driver, os.path.normpath(out_path), log_fn)
-                    time.sleep(5)
-                    do_post_video(driver, deskripsi, "", "", log_fn, sched_dt, stop_evt,
-                                 add_sound=False, add_product=False, skip_switches=True,
-                                 hashtags=hashtags if hashtags else None)
-                    uploaded += 1
-                except Exception as e:
-                    log_fn(f"  ❌ Error: {e}", "error")
-                if idx < len(output_files)-1 and not stop_evt.is_set():
-                    log_fn("  Menunggu 10 detik...", "info"); time.sleep(10)
-        finally:
-            try: driver.quit()
-            except: pass
-            try: chrome_proc.terminate()
-            except: pass
-
-        if uploaded > 0:
-            last_sched = start_dt + timedelta(minutes=interval*(uploaded-1))
-            next_dt = last_sched + timedelta(minutes=interval)
-            save_schedule_per_ud(ud_num, next_dt.strftime("%Y-%m-%d"), f"{next_dt.hour:02d}", f"{next_dt.minute:02d}")
-            log_fn(f"💾 [UD {ud_num}] Next schedule: {next_dt.strftime('%Y-%m-%d %H:%M')}", "success")
-            remove_stok_per_ud(ud_num, url)
-            log_fn(f"🗑 [UD {ud_num}] Link dihapus dari stok", "success")
-
-        log_fn(f"🎉 [UD {ud_num}] Selesai! {uploaded}/{len(output_files)} parts uploaded", "success")
-        return True
-
-    except Exception as e:
-        log_fn(f"❌ [UD {ud_num}] Error: {e}", "error")
-        return False
-    finally:
-        for d in [job_temp, job_out]:
+        for idx, out_path in enumerate(batch):
+            if stop_evt.is_set(): break
+            if not os.path.exists(out_path):
+                log_fn(f"  ⚠️ File tidak ada, skip: {os.path.basename(out_path)}", "warn")
+                continue
+            sched_dt = start_dt + timedelta(minutes=interval * idx)
+            log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Upload: {os.path.basename(out_path)}", "info")
+            log_fn(f"  Schedule: {sched_dt.strftime('%Y-%m-%d %H:%M')}", "info")
             try:
-                if os.path.exists(d): shutil.rmtree(d)
-            except: pass
+                navigate_upload_page(driver, force=(idx > 0))
+                time.sleep(3)
+                do_upload_file(driver, os.path.normpath(out_path), log_fn)
+                time.sleep(5)
+                do_post_video(driver, deskripsi, "", "", log_fn, sched_dt, stop_evt,
+                              add_sound=False, add_product=False, skip_switches=True,
+                              hashtags=hashtags if hashtags else None)
+                # ✅ Hapus file setelah berhasil upload
+                try: os.remove(out_path)
+                except: pass
+                uploaded += 1
+                log_fn(f"  ✅ [{idx+1}/{total}] Upload sukses, file dihapus.", "success")
+            except Exception as e:
+                log_fn(f"  ❌ Error upload [{idx+1}]: {e}", "error")
+            if idx < total - 1 and not stop_evt.is_set():
+                log_fn("  ⏳ Menunggu 10 detik...", "info"); time.sleep(10)
+    finally:
+        try: driver.quit()
+        except: pass
+        try: chrome_proc.terminate()
+        except: pass
+
+    # Update schedule for next batch
+    if uploaded > 0:
+        last_sched = start_dt + timedelta(minutes=interval * (uploaded - 1))
+        next_dt = last_sched + timedelta(minutes=interval)
+        save_schedule_per_ud(ud_num, next_dt.strftime("%Y-%m-%d"), f"{next_dt.hour:02d}", f"{next_dt.minute:02d}")
+        log_fn(f"💾 [UD {ud_num}] Next schedule: {next_dt.strftime('%Y-%m-%d %H:%M')}", "success")
+
+    log_fn(f"🎉 [UD {ud_num}] Batch selesai! {uploaded}/{total} video terupload.", "success")
+    return uploaded, uploaded
 
 # ═══════════════════════════════════════════════════════════════
 #  CALLBACK HANDLER
@@ -1114,18 +1159,75 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         def _daemon():
             active = load_active_ud()
-            _send(f"🤖 <b>Full Auto dimulai!</b>\nActive UD: <b>{', '.join(str(x) for x in active)}</b>\nBot akan download dari stok masing-masing UD → split → upload TikTok.")
+            _send(
+                f"🤖 <b>Full Auto dimulai!</b>\n"
+                f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n"
+                f"Logika: Download stok → split → upload <b>{UPLOAD_BATCH_SIZE} video/loop</b>\n"
+                f"Loop berikutnya lanjutkan sisa video. Jika habis → hapus folder → download link berikutnya."
+            )
             while not stop_auto.is_set():
                 active = load_active_ud()
-                any_has_stok = False
+                any_work = False
 
                 for ud_num in active:
                     if stop_auto.is_set(): break
-                    links = load_stok_per_ud(ud_num)
-                    if not links:
-                        continue
-                    any_has_stok = True
 
+                    # ── Step 1: Cek apakah ada folder aktif dengan sisa video ──
+                    current_folder = _ud_current_folder.get(ud_num)
+                    pending = _get_pending_videos(current_folder)
+
+                    # Folder ada tapi sudah kosong → hapus & reset
+                    if current_folder and not pending:
+                        _send(
+                            f"🗑 <b>UD {ud_num}</b>: Semua video sudah terupload!\n"
+                            f"Menghapus folder: <code>{os.path.basename(current_folder)}</code>\n"
+                            f"Lanjut ke stok link berikutnya..."
+                        )
+                        try:
+                            if os.path.isdir(current_folder): shutil.rmtree(current_folder)
+                        except Exception as e:
+                            _send(f"⚠️ [UD {ud_num}] Gagal hapus folder: {e}")
+                        # Hapus link pertama dari stok (sudah selesai)
+                        links = load_stok_per_ud(ud_num)
+                        if links:
+                            remove_stok_per_ud(ud_num, links[0])
+                            _send(f"✅ [UD {ud_num}] Link stok pertama dihapus dari daftar.")
+                        _ud_current_folder.pop(ud_num, None)
+                        current_folder = None
+                        pending = []
+
+                    # ── Step 2: Jika tidak ada folder aktif → download link baru ──
+                    if not current_folder or not pending:
+                        links = load_stok_per_ud(ud_num)
+                        if not links:
+                            continue  # Stok habis, skip UD ini
+
+                        any_work = True
+                        log_buffers[uid] = []
+                        log_fn = make_log_fn(uid)
+                        _send(f"📥 <b>UD {ud_num}</b>: Mendownload link baru dari stok...\n<code>{links[0][:80]}</code>")
+
+                        new_folder = _download_and_split_to_final(ud_num, log_fn, stop_auto)
+                        buf_lines = log_buffers.get(uid, [])
+                        summary = "\n".join(buf_lines[-6:])
+
+                        if not new_folder or stop_auto.is_set():
+                            _send(f"❌ <b>UD {ud_num}</b>: Download gagal, coba loop berikutnya.\n{summary}")
+                            continue
+
+                        _ud_current_folder[ud_num] = new_folder
+                        pending = _get_pending_videos(new_folder)
+                        _send(
+                            f"✅ <b>UD {ud_num}</b>: Download & split selesai!\n"
+                            f"{len(pending)} video siap di-upload.\n{summary}"
+                        )
+
+                    if not pending or stop_auto.is_set():
+                        continue
+
+                    any_work = True
+
+                    # ── Step 3: Cek jadwal sebelum upload ──
                     state = load_schedule_per_ud(ud_num)
                     try:
                         trigger_dt = datetime.strptime(
@@ -1137,14 +1239,24 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     now = datetime.now()
                     wait_sec = (trigger_dt - now).total_seconds()
                     if wait_sec > 0:
-                        _send(f"⏳ <b>UD {ud_num}</b>: menunggu <code>{trigger_dt.strftime('%Y-%m-%d %H:%M')}</code> "
-                              f"({int(wait_sec//60)} menit lagi)...")
+                        _send(
+                            f"⏳ <b>UD {ud_num}</b>: Menunggu jadwal upload\n"
+                            f"<code>{trigger_dt.strftime('%Y-%m-%d %H:%M')}</code> ({int(wait_sec//60)} menit lagi)\n"
+                            f"Sisa video di folder: <b>{len(pending)}</b>"
+                        )
                         elapsed = 0
                         while elapsed < wait_sec and not stop_auto.is_set():
                             time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
                         if stop_auto.is_set(): break
 
-                    _send(f"🚀 <b>UD {ud_num}</b>: memulai download & upload...")
+                    # ── Step 4: Upload batch 20 video ──
+                    folder_name = os.path.basename(_ud_current_folder.get(ud_num, ""))
+                    _send(
+                        f"🚀 <b>UD {ud_num}</b>: Upload batch {UPLOAD_BATCH_SIZE} video\n"
+                        f"📁 Folder: <code>{folder_name}</code>\n"
+                        f"📊 Sisa video: <b>{len(pending)}</b>"
+                    )
+
                     lock = get_lock(uid)
                     if not lock.acquire(blocking=True, timeout=60):
                         _send("⚠️ Gagal acquire lock, skip..."); continue
@@ -1152,22 +1264,30 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     log_buffers[uid] = []
                     log_fn = make_log_fn(uid)
                     cfg = get_cfg(uid)
-                    inner_stop = threading.Event()
                     try:
-                        _full_auto_single_upload(cfg, log_fn, inner_stop, ud_num)
+                        uploaded, _ = _upload_batch(cfg, log_fn, stop_auto, ud_num, pending)
                     except Exception as e:
-                        _send(f"❌ [UD {ud_num}] Error: {e}")
+                        _send(f"❌ [UD {ud_num}] Error upload batch: {e}")
+                        uploaded = 0
                     finally:
                         lock.release()
 
                     buf_lines = log_buffers.get(uid, [])
                     summary = "\n".join(buf_lines[-8:])
-                    _send(f"🎉 <b>UD {ud_num}: selesai!</b>\n\n{summary}")
+
+                    sisa_setelah = len(_get_pending_videos(_ud_current_folder.get(ud_num, "")))
+                    _send(
+                        f"✅ <b>UD {ud_num}: Batch selesai!</b>\n"
+                        f"Upload: <b>{uploaded}</b> video\n"
+                        f"Sisa video di folder: <b>{sisa_setelah}</b>\n"
+                        f"{summary}"
+                    )
+
                     if stop_auto.is_set(): break
                     time.sleep(10)
 
-                if not any_has_stok and not stop_auto.is_set():
-                    _send("📦 Semua stok UD kosong. Menunggu 60 detik...")
+                if not any_work and not stop_auto.is_set():
+                    _send("📦 Semua stok UD kosong & tidak ada sisa video. Menunggu 60 detik...")
                     for _ in range(12):
                         if stop_auto.is_set(): break
                         time.sleep(5)

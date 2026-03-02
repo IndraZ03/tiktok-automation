@@ -1,0 +1,2 @@
+Buat video TikTok vertikal 9:16 durasi 10 detik dengan gaya marketing super kaget panik maksimal! menggunakan gambar yang saya beri. Semua narasi, teks overlay, dan voiceover HARUS 100% bahasa Indonesia. Mulai dengan HOOK kaget gila yang bikin orang berhenti scroll seperti "ASTAGAAA!!!" atau "WADUH INI GILA!!!". Jelaskan bahaya cuaca secara dramatis dan urgent banget dari description yang dikasih.
+WAJIB AKHIRI VIDEO DENGAN SUARA NARATOR PANIK + TEKS BESAR DI TENGAH LAYAR: "coba cek luar rumah sekarang hujan apa engga" selama 3 detik biar orang langsung panik cek jendela!!!
