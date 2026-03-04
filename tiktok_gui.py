@@ -117,7 +117,7 @@ def do_upload_file(driver, file_path, log):
 
 def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
                   schedule_dt, stop_event, add_sound=False, add_product=True,
-                  skip_switches=False, hashtags=None):
+                  skip_switches=False, hashtags=None, location=None):
     """
     Full posting flow: description, product, switches, sounds, schedule.
     schedule_dt: datetime object for when to schedule.
@@ -167,6 +167,47 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
             log(f"  ✓ #{tag} ditambahkan")
         log("✓ Semua hashtag ditambahkan")
         time.sleep(1)
+
+    # ── Location ──
+    if location:
+        log(f"📍 Mengisi lokasi: {location}...")
+        try:
+            # Cari input lokasi
+            loc_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+                (By.XPATH, "//input[@placeholder='Search locations' and @role='input']")))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", loc_input)
+            time.sleep(1)
+            loc_input.click()
+            time.sleep(0.5)
+            # Clear dan ketik lokasi
+            loc_input.send_keys(Keys.CONTROL + "a")
+            loc_input.send_keys(Keys.BACKSPACE)
+            time.sleep(0.3)
+            for ch in location:
+                loc_input.send_keys(ch)
+                time.sleep(0.08)
+            log(f"  Menunggu dropdown lokasi muncul...")
+            time.sleep(3)
+            # Klik opsi pertama di dropdown lokasi
+            try:
+                first_option = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                    (By.XPATH, "//div[@role='option'][1]")))
+                first_option.click()
+                log(f"✓ Lokasi dipilih: {location}", )
+            except:
+                # Fallback: cari option dengan class Select__item
+                try:
+                    first_opt2 = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                        (By.XPATH, "//div[contains(@class,'Select__item')][1]")))
+                    first_opt2.click()
+                    log(f"✓ Lokasi dipilih (fallback): {location}")
+                except Exception as e_loc2:
+                    log(f"⚠ Gagal memilih lokasi dari dropdown: {e_loc2}")
+            time.sleep(1)
+        except Exception as e_loc:
+            log(f"⚠ Gagal mengisi lokasi: {e_loc}")
+    else:
+        log("⏭ Lokasi dilewati (tidak diaktifkan)")
 
     # ── Add product ──
     if not add_product:
@@ -900,6 +941,15 @@ class TikTokSchedulerApp:
                                      activeforeground=FG, font=("Segoe UI", 9), cursor="hand2")
         cb_switches.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
 
+        row += 1
+        self.add_location_var = tk.BooleanVar(value=False)
+        cb_location = tk.Checkbutton(f, text="Tambahkan Lokasi", variable=self.add_location_var,
+                                     bg=BG_CARD, fg=FG, selectcolor=BG_INPUT, activebackground=BG_CARD,
+                                     activeforeground=FG, font=("Segoe UI", 9, "bold"), cursor="hand2")
+        cb_location.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        row += 1
+        self.location_entry = self._entry(f, "Lokasi:", "", row, 45)
+
     # ── Schedule Settings ──
     def _build_schedule_settings(self, f):
         row = 0
@@ -1103,6 +1153,8 @@ class TikTokSchedulerApp:
             add_sound = self.add_sound_var.get()
             add_product = self.add_product_var.get()
             skip_switches = self.skip_switches_var.get()
+            add_location = self.add_location_var.get()
+            location_text = self.location_entry.get().strip() if add_location else None
             descs_raw = self.desc_text.get("1.0", tk.END).strip()
             descs = [d.strip() for d in descs_raw.split("\n") if d.strip()]
             if not descs:
@@ -1181,7 +1233,8 @@ class TikTokSchedulerApp:
                     do_post_video(self.driver, desc, product_radio, product_title,
                                  self._log, current_dt, self.stop_event,
                                  add_sound=add_sound, add_product=add_product,
-                                 skip_switches=skip_switches, hashtags=hashtags)
+                                 skip_switches=skip_switches, hashtags=hashtags,
+                                 location=location_text)
 
                     # Mark as uploaded
                     mark_uploaded(folder_name, video_name, db)
