@@ -1,0 +1,18 @@
+[
+  {
+    "id": "yt_sched",
+    "name": "YT Bot Schedule",
+    "file": "C:\\tiktok_automation\\yt_schedule_state.json",
+    "range_hours": 40,
+    "multi": false,
+    "description": "YouTube bot auto-upload schedule"
+  },
+  {
+    "id": "tiktok_sched",
+    "name": "TikTok Bot Schedule",
+    "file": "C:\\tiktok_automation\\schedule_state.json",
+    "range_hours": 24,
+    "multi": false,
+    "description": "TikTok bot auto-upload schedule"
+  }
+]
