@@ -45,7 +45,7 @@ ALLOWED_USER_IDS = []   # kosong = semua user diperbolehkan
 
 APP_DIR         = r"C:\tiktok_automation"
 PROMPT_FILE     = os.path.join(APP_DIR, "prompt.md")
-PROMPT_IMAGE_DIR= os.path.join(APP_DIR, "prompt_image")
+PROMPT_IMAGE_DIR= os.path.join(APP_DIR, "bahan_forecast")
 OUTPUT_DIR      = os.path.join(APP_DIR, "bmkg_output")
 OVERLAY_DIR     = os.path.join(APP_DIR, "bmkg_overlay")
 WATERMARK_PATH  = os.path.join(APP_DIR, "speedu.png")
@@ -142,14 +142,19 @@ def load_prompt():
     return "Generate a weather alert video"
 
 def get_random_image():
-    if not os.path.exists(PROMPT_IMAGE_DIR):
+    """Pick a random image from bahan_forecast directory."""
+    if not os.path.isdir(PROMPT_IMAGE_DIR):
         return None
-    files = [f for f in os.listdir(PROMPT_IMAGE_DIR)
-             if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    if files:
-        import random
-        return os.path.join(PROMPT_IMAGE_DIR, random.choice(files))
-    return None
+    exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+    files = [os.path.join(PROMPT_IMAGE_DIR, f)
+             for f in os.listdir(PROMPT_IMAGE_DIR)
+             if f.lower().endswith(exts) and os.path.isfile(os.path.join(PROMPT_IMAGE_DIR, f))]
+    if not files:
+        return None
+    import random
+    chosen = random.choice(files)
+    logger.info(f"Random image dipilih: {os.path.basename(chosen)}")
+    return chosen
 
 def open_chrome_grok(user_data_dir, port):
     chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
