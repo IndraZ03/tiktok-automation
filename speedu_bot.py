@@ -646,6 +646,7 @@ def _task_overlay(cfg, log_fn, stop_evt):
 
 def _task_full_loop(cfg, log_fn, stop_evt):
     import psutil
+    loop_start_time = time.time()
     folder = cfg["folder"]
     if not folder or not os.path.isdir(folder):
         log_fn("Folder video tidak valid!", "error"); return
@@ -702,7 +703,9 @@ def _task_full_loop(cfg, log_fn, stop_evt):
     deskripsi = cfg.get("deskripsi", "")
     headless = cfg.get("headless", False)
 
-    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=hour, minute=minute)
+    # Schedule video pertama = 30 menit dari sekarang (setelah overlay selesai)
+    start_dt = datetime.now() + timedelta(minutes=30)
+    log_fn(f"📅 Schedule video pertama: {start_dt.strftime('%Y-%m-%d %H:%M')}", "info")
     log_fn(f"Membuka Chrome (port {port}, headless={headless})...", "info")
     chrome_proc = open_chrome_debug(userdata, port, headless)
     driver = connect_selenium(port)
@@ -805,6 +808,19 @@ def _task_full_loop(cfg, log_fn, stop_evt):
 
     log_fn(f"\n{'═'*40}", "success")
     log_fn(f"🎉 SELESAI! Pipeline {len(videos)} video. ({uploaded_count} berhasil di-schedule)", "success")
+
+    # Hitung dan tampilkan durasi total full loop
+    elapsed_sec = time.time() - loop_start_time
+    h = int(elapsed_sec // 3600)
+    m = int((elapsed_sec % 3600) // 60)
+    s = int(elapsed_sec % 60)
+    if h > 0:
+        duration_str = f"{h} jam {m} menit {s} detik"
+    elif m > 0:
+        duration_str = f"{m} menit {s} detik"
+    else:
+        duration_str = f"{s} detik"
+    log_fn(f"⏱ Waktu total full loop: {duration_str}", "info")
 
 
 # ═══════════════════════════════════════════════════════════════
