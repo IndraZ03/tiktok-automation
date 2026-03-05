@@ -175,8 +175,8 @@ def do_login_grok(driver, log_fn):
     log_fn("🔐 Login otomatis...")
     wait = WebDriverWait(driver, 15)
     try:
-        e = wait.until(EC.element_to_be_clickable((By.ID, "data.email")))
-        e.clear(); e.send_keys("oktavandigamer2@gmail.com")
+        # e = wait.until(EC.element_to_be_clickable((By.ID, "data.email")))
+        # e.clear(); e.send_keys("oktavandigamer2@gmail.com")
         p = wait.until(EC.element_to_be_clickable((By.ID, "data.password")))
         p.clear(); p.send_keys("oktavandi111111")
         wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))).click()
