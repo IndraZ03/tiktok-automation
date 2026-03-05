@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
-BOT_TOKEN = "8577651733:AAG69uuoImXQpe5qcEtMdlwgu3_6rQAvaBI"
+BOT_TOKEN = "7821951521:AAEUSgUhjYK4V8mptCCuqPyaCptST_pxMyU"
 ALLOWED_USER_IDS = []   # kosong = semua user diperbolehkan
 
 APP_DIR         = r"C:\tiktok_automation"
