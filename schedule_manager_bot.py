@@ -120,32 +120,36 @@ def parse_schedule_entry(entry):
 
 def load_schedules_from_file(filepath, multi=False):
     """
-    Returns list of (datetime, raw_dict) from a file.
-    multi=False: file is a single {tanggal, jam, menit} dict
-    multi=True: file is a dict-of-dicts keyed by slot id, or a list of dicts
+    Returns list of (datetime, raw_dict, slot_key) from a file.
+    Auto-detects whether the file is single or multi user-data format.
     """
     data = _read_json(filepath)
-    if data is None:
+    if not data:
         return []
 
     results = []
-    if multi:
-        if isinstance(data, dict):
+
+    # Auto-detect structure
+    if isinstance(data, dict):
+        # Check if it's a single schedule (has 'tanggal' at top level)
+        if "tanggal" in data:
+            dt = parse_schedule_entry(data)
+            if dt:
+                results.append((dt, data, "0"))
+        else:
+            # It's a dict containing per-user-data schedules
+            # e.g. {"1": {tanggal...}, "2": {tanggal...}}
             for key, val in data.items():
-                if isinstance(val, dict):
+                if isinstance(val, dict) and "tanggal" in val:
                     dt = parse_schedule_entry(val)
                     if dt:
-                        results.append((dt, val, key))
-        elif isinstance(data, list):
-            for i, val in enumerate(data):
-                if isinstance(val, dict):
-                    dt = parse_schedule_entry(val)
-                    if dt:
-                        results.append((dt, val, str(i)))
-    else:
-        dt = parse_schedule_entry(data)
-        if dt:
-            results.append((dt, data, "0"))
+                        results.append((dt, val, str(key)))
+    elif isinstance(data, list):
+        for i, val in enumerate(data):
+            if isinstance(val, dict) and "tanggal" in val:
+                dt = parse_schedule_entry(val)
+                if dt:
+                    results.append((dt, val, str(i)))
 
     return results
 
@@ -178,7 +182,7 @@ def check_conflict(new_dt, exclude_reg_id=None, exclude_slot=None):
     for dt, reg_id, slot_key, name in all_scheds:
         # Skip self
         if exclude_reg_id and exclude_slot is not None:
-            if reg_id == exclude_reg_id and slot_key == exclude_slot:
+            if reg_id == exclude_reg_id and str(slot_key) == str(exclude_slot):
                 continue
 
         existing_start = dt
@@ -187,8 +191,8 @@ def check_conflict(new_dt, exclude_reg_id=None, exclude_slot=None):
         # Overlap check
         if new_start < existing_end and new_end > existing_start:
             return True, (
-                f"⚠️ Konflik dengan <b>{name}</b>\n"
-                f"  Slot: {existing_start.strftime('%Y-%m-%d %H:%M')} — "
+                f"\u26a0\ufe0f Konflik dengan <b>{name}</b> (Slot: {slot_key})\n"
+                f"  Waktu: {existing_start.strftime('%Y-%m-%d %H:%M')} \u2014 "
                 f"{existing_end.strftime('%H:%M')}"
             )
 
@@ -205,15 +209,37 @@ def update_schedule_in_file(filepath, multi, slot_key, new_dt):
         "updated_at": now_str
     }
 
+    data = _read_json(filepath)
+    if data is None:
+        data = {}
+
+    # Auto-detect if we should use single or multi format
+    is_multi_format = False
+    if isinstance(data, dict):
+        if not data or ("tanggal" not in data and len(data) > 0) or str(slot_key) != "0":
+            is_multi_format = True
+    elif isinstance(data, list):
+        is_multi_format = True
+
+    # Enforce multi if registry says so
     if multi:
-        data = _read_json(filepath) or {}
+        is_multi_format = True
+
+    if is_multi_format:
         if isinstance(data, list):
-            idx = int(slot_key)
+            try:
+                idx = int(slot_key)
+            except ValueError:
+                idx = 0
             while len(data) <= idx:
                 data.append({})
             data[idx] = new_entry
         else:
-            data[slot_key] = new_entry
+            if not isinstance(data, dict) or "tanggal" in data:
+                # Upgrade path: single → multi dict
+                data = {str(slot_key): new_entry}
+            else:
+                data[str(slot_key)] = new_entry
         _write_json(filepath, data)
     else:
         _write_json(filepath, new_entry)
@@ -221,19 +247,26 @@ def update_schedule_in_file(filepath, multi, slot_key, new_dt):
 
 def delete_schedule_in_file(filepath, multi, slot_key):
     """Delete a specific schedule slot from a file."""
-    if not multi:
-        # Single file → clear it
-        _write_json(filepath, {})
+    data = _read_json(filepath)
+    if not data:
         return
 
-    data = _read_json(filepath) or {}
     if isinstance(data, list):
-        idx = int(slot_key)
-        if 0 <= idx < len(data):
-            data.pop(idx)
+        try:
+            idx = int(slot_key)
+            if 0 <= idx < len(data):
+                data.pop(idx)
+        except ValueError:
+            pass
+        _write_json(filepath, data)
     elif isinstance(data, dict):
-        data.pop(slot_key, None)
-    _write_json(filepath, data)
+        if "tanggal" in data:
+            # Single format → clear
+            _write_json(filepath, {})
+        else:
+            # Multi format → remove specific slot
+            data.pop(str(slot_key), None)
+            _write_json(filepath, data)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -358,7 +391,7 @@ def _build_list_view():
                     status = f" {time_until(dt)}"
 
                 text += (
-                    f"   {icon} <code>{format_dt(dt)}</code>—"
+                    f"   {icon} [{slot_key}] <code>{format_dt(dt)}</code>—"
                     f"<code>{end_dt.strftime('%H:%M')}</code>"
                     f"  {status}\n"
                 )
@@ -1102,7 +1135,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("📅 Schedule Manager Bot is running...")
+    print("Schedule Manager Bot is running...")
     app.run_polling()
 
 
