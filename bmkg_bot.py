@@ -159,7 +159,9 @@ def get_random_image():
 def open_chrome_grok(user_data_dir, port):
     chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
     proc = subprocess.Popen([chrome_path, f"--remote-debugging-port={port}",
-                             f"--user-data-dir={user_data_dir}"])
+                             f"--user-data-dir={user_data_dir}",
+                             "--no-first-run", "--no-default-browser-check",
+                             GROK_URL])
     time.sleep(5)
     return proc
 
@@ -191,12 +193,77 @@ def do_login_grok(driver, log_fn):
         log_fn(f"❌ Gagal login: {e}")
     return True
 
+def _navigate_to_grok(driver, log_fn, max_retries=3):
+    """Ensure the driver is on the GROK_URL page, handling session restore and tab issues.
+    Similar approach to grok_gui.py's setup_tabs method."""
+    for attempt in range(1, max_retries + 1):
+        # Check if current tab is already on the target URL
+        try:
+            current = driver.current_url
+            if "generate-grok" in current and "login" not in current:
+                log_fn("✅ Sudah di halaman Grok")
+                return True
+        except Exception:
+            pass
+
+        # Try navigating the current tab first
+        try:
+            log_fn(f"🌐 Navigasi ke Grok (attempt {attempt}/{max_retries})...")
+            driver.get(GROK_URL)
+            time.sleep(4)
+
+            # Check if we landed on the right page
+            current = driver.current_url
+            if "generate-grok" in current:
+                log_fn("✅ Navigasi berhasil!")
+                return True
+
+            # Handle login redirect
+            if "login" in current:
+                do_login_grok(driver, log_fn)
+                time.sleep(2)
+                current = driver.current_url
+                if "generate-grok" not in current:
+                    driver.get(GROK_URL)
+                    time.sleep(3)
+                if "generate-grok" in driver.current_url:
+                    log_fn("✅ Navigasi berhasil setelah login!")
+                    return True
+
+        except Exception as e:
+            log_fn(f"⚠️ Navigasi gagal: {e}")
+
+        # If navigation on current tab failed, try opening a new tab (like grok_gui.py does)
+        if attempt < max_retries:
+            try:
+                log_fn("🔄 Membuka tab baru untuk Grok...")
+                driver.switch_to.new_window('tab')
+                driver.get(GROK_URL)
+                time.sleep(4)
+
+                current = driver.current_url
+                if "login" in current:
+                    do_login_grok(driver, log_fn)
+                    time.sleep(2)
+                    if "generate-grok" not in driver.current_url:
+                        driver.get(GROK_URL)
+                        time.sleep(3)
+
+                if "generate-grok" in driver.current_url:
+                    log_fn("✅ Navigasi berhasil via tab baru!")
+                    return True
+            except Exception as e:
+                log_fn(f"⚠️ Tab baru gagal: {e}")
+
+    log_fn("❌ Gagal navigasi ke Grok setelah semua percobaan")
+    return False
+
 def generate_video_grok(log_fn, stop_event, output_dir):
     """Automate Grok video generation and download. Returns path or None."""
     os.makedirs(output_dir, exist_ok=True)
     prompt     = load_prompt()
     image_path = get_random_image()
-    grok_user_data = os.path.join(APP_DIR, "user_data", "grok")
+    grok_user_data = os.path.join(APP_DIR, "user_data", "1")
     grok_port      = "9230"
 
     log_fn("🌐 Membuka Chrome untuk Grok...")
@@ -207,14 +274,10 @@ def generate_video_grok(log_fn, stop_event, output_dir):
         driver.execute_cdp_cmd("Page.setDownloadBehavior",
                                {"behavior": "allow", "downloadPath": output_dir})
 
-        log_fn("🌐 Navigasi ke Grok...")
-        driver.get(GROK_URL)
-        time.sleep(3)
-
-        if "login" in driver.current_url:
-            do_login_grok(driver, log_fn)
-            if GROK_URL not in driver.current_url:
-                driver.get(GROK_URL); time.sleep(3)
+        # Robust navigation with retry and new-tab fallback (like grok_gui.py)
+        if not _navigate_to_grok(driver, log_fn):
+            log_fn("❌ Tidak bisa navigasi ke halaman Grok!")
+            return None
 
         if stop_event.is_set():
             return None
