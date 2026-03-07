@@ -8,7 +8,14 @@ Features:
 """
 import os, sys, re, time, shutil, asyncio, subprocess, logging, json, threading, textwrap
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# Timezone WITA (UTC+8)
+WITA = timezone(timedelta(hours=8))
+
+def now_wita():
+    """Return current datetime in WITA (UTC+8)."""
+    return datetime.now(WITA)
 
 import requests
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,6 +31,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -52,7 +61,8 @@ WATERMARK_PATH  = os.path.join(APP_DIR, "speedu.png")
 SETTINGS_FILE   = os.path.join(APP_DIR, "bmkg_settings.json")
 
 BMKG_RSS_URL    = "https://www.bmkg.go.id/alerts/nowcast/id/rss.xml"
-GROK_URL        = "https://vidabot.markasai.com/generate-grok"
+# GROK_URL        = "https://vidabot.markasai.com/generate-grok"  # OLD: vidabot
+GROK_URL        = "https://grok.com/imagine"  # NEW: grok.com langsung
 
 # Overlay settings
 FONT_NAME        = "Arial"
@@ -65,8 +75,8 @@ FULL_AUTO_INTERVAL_HOURS = 2        # Berjalan per 2 jam
 FULL_AUTO_WAIT_POLL_SEC  = 30       # Polling stop event setiap 30 detik saat menunggu interval
 
 # TikTok defaults
-DEFAULT_USER_DATA = os.path.join(APP_DIR, "user_data", "1")
-DEFAULT_PORT      = "9222"
+DEFAULT_USER_DATA = os.path.join(APP_DIR, "user_data", "7")
+DEFAULT_PORT      = "9228"
 
 # ═══════════════════════════════════════════════════════════════
 #  SETTINGS PERSISTENCE
@@ -74,12 +84,12 @@ DEFAULT_PORT      = "9222"
 DEFAULT_SETTINGS = {
     "user_data_dir": DEFAULT_USER_DATA,
     "debug_port": DEFAULT_PORT,
-    "deskripsi": "Peringatan Dini Cuaca BMKG 🌦️⚠️ #bmkg #cuaca #peringatandini #hujanlebat #fyp",
+    "deskripsi": "Warning warningg cuacaaaaaaaaa",
     "hashtags": ["bmkg", "cuaca", "peringatandini", "hujanlebat", "fyp", "viral"],
     "interval": "60",
-    "schedule_tanggal": datetime.now().strftime("%Y-%m-%d"),
-    "schedule_jam": f"{datetime.now().hour:02d}",
-    "schedule_menit": f"{datetime.now().minute:02d}",
+    "schedule_tanggal": now_wita().strftime("%Y-%m-%d"),
+    "schedule_jam": f"{now_wita().hour:02d}",
+    "schedule_menit": f"{now_wita().minute:02d}",
     "auto_interval_hours": FULL_AUTO_INTERVAL_HOURS,
 }
 
@@ -194,79 +204,52 @@ def do_login_grok(driver, log_fn):
     return True
 
 def _navigate_to_grok(driver, log_fn, max_retries=3):
-    """Ensure the driver is on the GROK_URL page, handling session restore and tab issues.
-    Similar approach to grok_gui.py's setup_tabs method."""
+    """Navigate to grok.com/imagine with retry logic."""
     for attempt in range(1, max_retries + 1):
-        # Check if current tab is already on the target URL
         try:
             current = driver.current_url
-            if "generate-grok" in current and "login" not in current:
-                log_fn("✅ Sudah di halaman Grok")
+            if "grok.com" in current and "imagine" in current:
+                log_fn("✅ Sudah di halaman Grok Imagine")
                 return True
-        except Exception:
+        except:
             pass
 
-        # Try navigating the current tab first
         try:
-            log_fn(f"🌐 Navigasi ke Grok (attempt {attempt}/{max_retries})...")
+            log_fn(f"🌐 Navigasi ke Grok Imagine (attempt {attempt}/{max_retries})...")
             driver.get(GROK_URL)
-            time.sleep(4)
-
-            # Check if we landed on the right page
+            time.sleep(5)
             current = driver.current_url
-            if "generate-grok" in current:
+            if "imagine" in current:
                 log_fn("✅ Navigasi berhasil!")
                 return True
-
-            # Handle login redirect
-            if "login" in current:
-                do_login_grok(driver, log_fn)
-                time.sleep(2)
-                current = driver.current_url
-                if "generate-grok" not in current:
-                    driver.get(GROK_URL)
-                    time.sleep(3)
-                if "generate-grok" in driver.current_url:
-                    log_fn("✅ Navigasi berhasil setelah login!")
-                    return True
-
         except Exception as e:
             log_fn(f"⚠️ Navigasi gagal: {e}")
 
-        # If navigation on current tab failed, try opening a new tab (like grok_gui.py does)
         if attempt < max_retries:
             try:
-                log_fn("🔄 Membuka tab baru untuk Grok...")
+                log_fn("🔄 Membuka tab baru...")
                 driver.switch_to.new_window('tab')
                 driver.get(GROK_URL)
-                time.sleep(4)
-
-                current = driver.current_url
-                if "login" in current:
-                    do_login_grok(driver, log_fn)
-                    time.sleep(2)
-                    if "generate-grok" not in driver.current_url:
-                        driver.get(GROK_URL)
-                        time.sleep(3)
-
-                if "generate-grok" in driver.current_url:
+                time.sleep(5)
+                if "imagine" in driver.current_url:
                     log_fn("✅ Navigasi berhasil via tab baru!")
                     return True
             except Exception as e:
                 log_fn(f"⚠️ Tab baru gagal: {e}")
 
-    log_fn("❌ Gagal navigasi ke Grok setelah semua percobaan")
+    log_fn("❌ Gagal navigasi ke Grok Imagine")
     return False
 
 def generate_video_grok(log_fn, stop_event, output_dir):
-    """Automate Grok video generation and download. Returns path or None."""
+    """Automate Grok Imagine video generation on grok.com/imagine. Returns path or None."""
+    import glob, shutil
     os.makedirs(output_dir, exist_ok=True)
     prompt     = load_prompt()
     image_path = get_random_image()
     grok_user_data = os.path.join(APP_DIR, "user_data", "1")
     grok_port      = "9230"
 
-    log_fn("🌐 Membuka Chrome untuk Grok...")
+    log_fn("🌐 Membuka Chrome untuk Grok Imagine...")
     chrome_proc = open_chrome_grok(grok_user_data, grok_port)
     driver = None
     try:
@@ -274,124 +257,396 @@ def generate_video_grok(log_fn, stop_event, output_dir):
         driver.execute_cdp_cmd("Page.setDownloadBehavior",
                                {"behavior": "allow", "downloadPath": output_dir})
 
-        # Robust navigation with retry and new-tab fallback (like grok_gui.py)
         if not _navigate_to_grok(driver, log_fn):
-            log_fn("❌ Tidak bisa navigasi ke halaman Grok!")
+            log_fn("❌ Tidak bisa navigasi ke Grok Imagine!")
             return None
 
         if stop_event.is_set():
             return None
 
-        wait = WebDriverWait(driver, 15)
+        # Maximize window agar semua elemen visible
+        try:
+            driver.maximize_window()
+        except:
+            pass
+
+        wait = WebDriverWait(driver, 20)
+        time.sleep(3)
+
+        # ── Step 1: Upload image ──
+        if image_path and os.path.exists(image_path):
+            log_fn(f"📷 Upload gambar: {os.path.basename(image_path)}")
+            abs_image = os.path.abspath(image_path)
+            image_uploaded = False
+
+            # Attempt B: Direct hidden file input (jika sudah ada di page)
+            if not image_uploaded:
+                try:
+                    log_fn("🔄 Fallback: cari hidden file input langsung...")
+                    file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                    if file_inputs:
+                        fi = file_inputs[-1]
+                        driver.execute_script(
+                            "arguments[0].style.display='block';"
+                            "arguments[0].style.visibility='visible';"
+                            "arguments[0].style.opacity='1';"
+                            "arguments[0].style.height='1px';"
+                            "arguments[0].style.width='1px';"
+                            "arguments[0].style.position='absolute';", fi)
+                        fi.send_keys(abs_image)
+                        image_uploaded = True
+                        log_fn("✅ Gambar dipilih via hidden file input!")
+                        time.sleep(3)
+                except Exception as e:
+                    log_fn(f"⚠️ Hidden file input gagal: {e}")
+
+            # Attempt C: Inject file input via JS
+            if not image_uploaded:
+                try:
+                    log_fn("🔄 Fallback: inject file input via JS...")
+                    driver.execute_script("""
+                        const input = document.createElement('input');
+                        input.type = 'file'; input.id = 'grok_bot_file_input';
+                        input.accept = 'image/*';
+                        input.style.cssText = 'position:absolute;top:0;left:0;z-index:99999;display:block;width:1px;height:1px;';
+                        document.body.appendChild(input);
+                    """)
+                    time.sleep(0.5)
+                    injected = driver.find_element(By.ID, "grok_bot_file_input")
+                    injected.send_keys(abs_image)
+                    image_uploaded = True
+                    log_fn("✅ Gambar dipilih via inject input!")
+                    time.sleep(3)
+                except Exception as e:
+                    log_fn(f"⚠️ Inject file input gagal: {e}")
+
+            if not image_uploaded:
+                log_fn("❌ Semua metode upload gambar gagal!")
+        else:
+            log_fn("⚠️ Tidak ada gambar, generate tanpa gambar")
+
+        # ── Step 2: Click Settings/Pengaturan → Buat Video ──
+        log_fn("⚙️ Klik tombol Settings...")
+        settings_opened = False
+
+        # Method A: JS click (paling reliable, tidak terpengaruh viewport)
+        try:
+            settings_btns = driver.find_elements(By.CSS_SELECTOR,
+                'button[aria-label="Settings"], button[aria-label="Pengaturan"]')
+            if settings_btns:
+                driver.execute_script("arguments[0].click();", settings_btns[0])
+                time.sleep(1.5)
+                menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
+                if menu_items:
+                    settings_opened = True
+                    log_fn("✅ Settings dropdown terbuka (JS click)")
+        except Exception as e:
+            log_fn(f"⚠️ JS click gagal: {e}")
+
+        # Method B: JS dispatch full pointer events (for Radix UI)
+        if not settings_opened:
+            try:
+                log_fn("🔄 Mencoba klik Settings via pointer events...")
+                driver.execute_script("""
+                    const btns = document.querySelectorAll('button');
+                    for (const btn of btns) {
+                        const label = btn.getAttribute('aria-label') || '';
+                        if (label === 'Settings' || label === 'Pengaturan') {
+                            btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+                            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                            btn.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, cancelable: true}));
+                            btn.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                            btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                time.sleep(1.5)
+                menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
+                if menu_items:
+                    settings_opened = True
+                    log_fn("✅ Settings dropdown terbuka (pointer events)")
+            except Exception as e:
+                log_fn(f"⚠️ Pointer events gagal: {e}")
+
+        # Method C: Focus + Enter key
+        if not settings_opened:
+            try:
+                log_fn("🔄 Mencoba klik Settings via focus+enter...")
+                settings_btns = driver.find_elements(By.CSS_SELECTOR,
+                    'button[aria-label="Settings"], button[aria-label="Pengaturan"]')
+                if settings_btns:
+                    settings_btns[0].send_keys(Keys.ENTER)
+                    time.sleep(1.5)
+                    menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
+                    if menu_items:
+                        settings_opened = True
+                        log_fn("✅ Settings dropdown terbuka (Enter key)")
+            except Exception as e:
+                log_fn(f"⚠️ Enter key gagal: {e}")
+
+        # Now select "Buat Video" / "Make Video"
+        if settings_opened:
+            log_fn("🎬 Memilih 'Buat Video'...")
+            try:
+                menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
+                clicked = False
+                for item in menu_items:
+                    txt = item.text or ""
+                    if "Buat Video" in txt or "Make Video" in txt or "Make video" in txt:
+                        ActionChains(driver).move_to_element(item).click().perform()
+                        clicked = True
+                        break
+
+                if not clicked:
+                    driver.execute_script("""
+                        const items = document.querySelectorAll('div[role="menuitem"]');
+                        for (const item of items) {
+                            const txt = item.textContent || '';
+                            if (txt.includes('Buat Video') || txt.includes('Make Video') || txt.includes('Make video')) {
+                                item.click(); return true;
+                            }
+                        }
+                        const spans = document.querySelectorAll('span.font-semibold');
+                        for (const span of spans) {
+                            const t = span.textContent.trim();
+                            if (t === 'Buat Video' || t === 'Make Video') {
+                                span.closest('div[role="menuitem"]')?.click() || span.parentElement.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    """)
+
+                time.sleep(1)
+                log_fn("✅ Mode 'Buat Video' dipilih!")
+            except Exception as e:
+                log_fn(f"⚠️ Gagal pilih Buat Video: {e}")
+        else:
+            log_fn("⚠️ Settings dropdown tidak terbuka, lanjut tanpa pilih mode")
+
+        if stop_event.is_set():
+            return None
+
+        # ── Step 2: Fill prompt ──
         log_fn("📝 Mengisi prompt...")
         try:
-            pa = wait.until(EC.element_to_be_clickable((By.ID, "promptInput")))
-            pa.clear()
-            driver.execute_script("arguments[0].value = arguments[1];", pa, prompt)
-            driver.execute_script(
-                "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pa)
+            editor = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
+            editor.click()
+            time.sleep(0.5)
+            editor.send_keys(Keys.CONTROL + "a")
+            time.sleep(0.2)
+            editor.send_keys(Keys.DELETE)
+            time.sleep(0.2)
+            driver.execute_script("""
+                const editor = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                if (editor) {
+                    editor.innerHTML = '<p>' + arguments[0] + '</p>';
+                    editor.dispatchEvent(new Event('input', {bubbles: true}));
+                }
+            """, prompt)
+            time.sleep(1)
+            log_fn(f"✅ Prompt diisi: {prompt[:60]}...")
         except Exception as e:
-            log_fn(f"❌ Gagal isi prompt: {e}"); return None
+            log_fn(f"❌ Gagal isi prompt: {e}")
+            return None
 
-        if image_path:
-            try:
-                log_fn(f"📷 Upload gambar: {os.path.basename(image_path)}")
-                driver.find_element(By.ID, "imageInput").send_keys(image_path)
-                time.sleep(1)
-            except Exception as e:
-                log_fn(f"⚠️ Gagal upload gambar: {e}")
+        if stop_event.is_set():
+            return None
 
+        # ── Step 4: Click Generate ──
+        log_fn("🚀 Klik Generate...")
         try:
-            btn = wait.until(EC.element_to_be_clickable((By.ID, "btnGenerate")))
-            btn.click(); log_fn("🚀 Generate diklik!")
+            gen_btn = None
+            for label in ['Buat video', 'Create video', 'Generate', 'Submit']:
+                try:
+                    gen_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, f'button[aria-label="{label}"]')))
+                    if gen_btn:
+                        break
+                except:
+                    continue
+            if not gen_btn:
+                try:
+                    gen_btn = driver.find_element(By.CSS_SELECTOR, 'button.group[type="button"]')
+                except:
+                    pass
+            if gen_btn:
+                gen_btn.click()
+                log_fn("✅ Generate diklik!")
+            else:
+                driver.execute_script("""
+                    const btn = document.querySelector('button[aria-label="Buat video"]')
+                              || document.querySelector('button[aria-label="Create video"]')
+                              || document.querySelector('button.group[type="button"]');
+                    if (btn) btn.click();
+                """)
+                log_fn("✅ Generate diklik via JS!")
+            time.sleep(3)
         except Exception as e:
-            log_fn(f"❌ Gagal klik Generate: {e}"); return None
+            log_fn(f"❌ Gagal klik Generate: {e}")
+            return None
 
-        log_fn("⏳ Menunggu video selesai (max 5 menit)...")
+        # ── Step 5: Track progress ──
+        log_fn("⏳ Menunggu video selesai (max 10 menit)...")
         start_time = time.time()
-        while time.time() - start_time < 300:
+        last_pct = ""
+        last_pct_num = 0
+        generation_started = False
+        while time.time() - start_time < 600:
             if stop_event.is_set():
                 return None
+
             try:
-                p = driver.find_element(By.ID, "progressPercent").text
-                pct_match = re.search(r'\d+', p)
-                if pct_match and int(pct_match.group()) > 0:
-                    log_fn(f"⏳ Progress: {pct_match.group()}%")
-            except: pass
+                pct_text = driver.execute_script("""
+                    const spans = document.querySelectorAll('span.tabular-nums');
+                    for (const s of spans) {
+                        const t = s.textContent.trim();
+                        if (t.includes('%')) return t;
+                    }
+                    const overlay = document.querySelector('div.flex.justify-center.items-center.gap-2');
+                    if (overlay) {
+                        const nums = overlay.querySelectorAll('span');
+                        for (const n of nums) {
+                            if (n.textContent.includes('%')) return n.textContent.trim();
+                        }
+                    }
+                    return '';
+                """)
+                if pct_text and pct_text != last_pct:
+                    log_fn(f"⏳ Progress: {pct_text}")
+                    last_pct = pct_text
+                    generation_started = True
+                    m = re.search(r'(\d+)', pct_text)
+                    if m:
+                        last_pct_num = int(m.group(1))
+            except:
+                pass
+
             try:
-                if "Video ready" in driver.find_element(By.ID, "progressLabel").text:
-                    break
-            except: pass
-            try:
-                if driver.find_element(By.ID, "btnDownload").is_displayed():
-                    break
-            except: pass
-            try:
-                fails = driver.find_elements(By.XPATH,
-                    "//div[contains(@class,'video-placeholder') and "
-                    ".//*[contains(text(),'Generation Failed')]]")
-                if fails:
-                    log_fn("❌ Generation Failed!"); return None
-            except: pass
-            time.sleep(3)
+                is_generating = driver.execute_script("""
+                    const spans = document.querySelectorAll('span');
+                    for (const s of spans) {
+                        const t = s.textContent;
+                        if (t.includes('Menghasilkan') || t.includes('Generating')) return true;
+                    }
+                    return false;
+                """)
+            except:
+                is_generating = False
+
+            if generation_started and not is_generating and last_pct_num > 0:
+                log_fn("✅ Generasi selesai!")
+                time.sleep(3)
+                break
+
+            time.sleep(1)
         else:
-            log_fn("❌ Timeout: video tidak selesai di-generate"); return None
+            log_fn("❌ Timeout: video tidak selesai dalam 10 menit")
+            return None
 
+        if stop_event.is_set():
+            return None
+
+        # ── Step 6: Download via click Download button ──
         log_fn("📥 Mengunduh video...")
+        filename = f"bmkg_{int(time.time())}.mp4"
+        save_path = os.path.join(output_dir, filename)
+        downloaded = False
+        dl_clicked = False
+
+        # Method A: Selenium click
         try:
-            dl_btn  = WebDriverWait(driver, 30).until(
-                EC.element_to_be_clickable((By.ID, "btnDownload")))
-            dl_url  = dl_btn.get_attribute("href")
-            filename  = f"bmkg_{int(time.time())}.mp4"
-            save_path = os.path.join(output_dir, filename)
+            dl_btns = driver.find_elements(By.CSS_SELECTOR,
+                'button[aria-label="Download"], button[aria-label="Unduh"]')
+            if dl_btns:
+                ActionChains(driver).move_to_element(dl_btns[0]).click().perform()
+                dl_clicked = True
+                log_fn("✅ Tombol Download diklik")
+        except:
+            pass
 
-            s  = requests.Session()
-            for c in driver.get_cookies():
-                s.cookies.set(c['name'], c['value'])
-            ua = driver.execute_script("return navigator.userAgent;")
-            s.headers.update({"User-Agent": ua, "Referer": "https://vidabot.markasai.com/"})
-
-            downloaded = False
+        # Method B: JS pointer events
+        if not dl_clicked:
             try:
-                r = s.get(dl_url, stream=True, timeout=30)
-                if 'video' in r.headers.get("Content-Type", ""):
-                    with open(save_path, 'wb') as f:
-                        for chunk in r.iter_content(8192): f.write(chunk)
-                    downloaded = True
-                    log_fn(f"✅ Video diunduh: {filename}")
-            except Exception as e:
-                log_fn(f"⚠️ Direct download gagal: {e}")
+                dl_clicked = driver.execute_script("""
+                    const btns = document.querySelectorAll('button');
+                    for (const btn of btns) {
+                        const label = btn.getAttribute('aria-label') || '';
+                        if (label === 'Download' || label === 'Unduh') {
+                            btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));
+                            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                            btn.dispatchEvent(new PointerEvent('pointerup', {bubbles:true}));
+                            btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                            btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+            except:
+                pass
 
-            if not downloaded:
-                log_fn("📥 Fallback download...")
-                main_tab = driver.current_window_handle
-                driver.execute_script(f"window.open('{dl_url}', '_blank');")
-                new_tab = [h for h in driver.window_handles if h != main_tab][-1]
-                driver.switch_to.window(new_tab)
-                try:
-                    vid = WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "video")))
-                    src = (vid.get_attribute("src") or
-                           vid.find_element(By.TAG_NAME, "source").get_attribute("src"))
-                    if src:
-                        r = s.get(src, stream=True)
-                        with open(save_path, 'wb') as f:
-                            for chunk in r.iter_content(8192): f.write(chunk)
+        # Method C: Enter key
+        if not dl_clicked:
+            try:
+                dl_btns = driver.find_elements(By.CSS_SELECTOR,
+                    'button[aria-label="Download"], button[aria-label="Unduh"]')
+                if dl_btns:
+                    dl_btns[0].send_keys(Keys.ENTER)
+                    dl_clicked = True
+            except:
+                pass
+
+        if not dl_clicked:
+            log_fn("❌ Tidak bisa klik tombol Download")
+            return None
+
+        # Wait for file to appear
+        log_fn("⏳ Menunggu file terdownload (max 30 detik)...")
+        downloads_folder = os.path.expanduser("~/Downloads")
+        for _ in range(30):
+            time.sleep(1)
+            # Check output_dir
+            try:
+                mp4s = glob.glob(os.path.join(output_dir, "*.mp4"))
+                new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
+                if new_files:
+                    newest = max(new_files, key=os.path.getmtime)
+                    crdowns = glob.glob(os.path.join(output_dir, "*.crdownload"))
+                    if not crdowns:
+                        if newest != save_path:
+                            shutil.move(newest, save_path)
                         downloaded = True
-                        log_fn(f"✅ Video diunduh (fallback): {filename}")
-                except Exception as e:
-                    log_fn(f"❌ Fallback gagal: {e}")
-                driver.close()
-                driver.switch_to.window(main_tab)
+                        break
+            except:
+                pass
+            # Check Downloads folder
+            try:
+                mp4s = glob.glob(os.path.join(downloads_folder, "*.mp4"))
+                new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
+                if new_files:
+                    newest = max(new_files, key=os.path.getmtime)
+                    crdowns = glob.glob(os.path.join(downloads_folder, "*.crdownload"))
+                    if not crdowns:
+                        shutil.move(newest, save_path)
+                        downloaded = True
+                        break
+            except:
+                pass
 
-            if downloaded and os.path.exists(save_path):
-                if os.path.getsize(save_path) < 10240:
-                    log_fn("⚠️ File terlalu kecil, dihapus.")
-                    os.remove(save_path); return None
-                return save_path
-        except Exception as e:
-            log_fn(f"❌ Download error: {e}")
+        if downloaded and os.path.exists(save_path):
+            sz = os.path.getsize(save_path)
+            if sz < 10240:
+                log_fn("⚠️ File terlalu kecil, dihapus.")
+                os.remove(save_path)
+                return None
+            log_fn(f"✅ Video diunduh: {filename} ({sz/(1024*1024):.1f} MB)")
+            return save_path
 
+        log_fn("❌ Gagal mengunduh video")
         return None
     finally:
         try:
@@ -438,10 +693,15 @@ def seconds_to_ass_time(seconds):
     s = int(seconds % 60);    cs = int((seconds % 1) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
+CTA_TEXT = "coba komen tempat kamu mendung ga?"
+
 def generate_ass_subtitle(segments, video_duration=10):
     ref_w, ref_h  = 1080, 1920
     y_pos, x_pos  = int(ref_h * 0.55), ref_w // 2
-    dur_per_seg   = video_duration / len(segments) if segments else video_duration
+
+    # Alokasi waktu: description segments + 1 CTA segment di akhir
+    total_segments = len(segments) + 1  # +1 untuk CTA
+    dur_per_seg    = video_duration / total_segments if segments else video_duration
 
     ass = (
         f"[Script Info]\nTitle: BMKG Alert Overlay\nScriptType: v4.00+\n"
@@ -450,10 +710,11 @@ def generate_ass_subtitle(segments, video_duration=10):
         f"OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
         f"Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: BMKGAlert,{FONT_NAME},{FONT_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,"
-        f"&H80000000,1,0,0,0,100,100,0,0,3,3,10,5,30,30,30,1\n\n"
+        f"&H00000000,1,0,0,0,100,100,0,0,1,3,0,5,30,30,30,1\n\n"
         f"[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
 
+    # Description segments
     for idx, seg in enumerate(segments):
         start = seconds_to_ass_time(idx * dur_per_seg)
         end   = seconds_to_ass_time((idx + 1) * dur_per_seg)
@@ -461,6 +722,14 @@ def generate_ass_subtitle(segments, video_duration=10):
         body  = "\\N".join(lines)
         styled = f"{{\\fad({FADE_DURATION_MS},{FADE_DURATION_MS})\\pos({x_pos},{y_pos})}}{body}"
         ass += f"Dialogue: 0,{start},{end},BMKGAlert,,0,0,0,,{styled}\n"
+
+    # CTA segment terakhir
+    cta_start = seconds_to_ass_time(len(segments) * dur_per_seg)
+    cta_end   = seconds_to_ass_time(video_duration)
+    cta_lines = textwrap.wrap(CTA_TEXT, width=MAX_CHARS_PER_LINE)
+    cta_body  = "\\N".join(cta_lines)
+    cta_styled = f"{{\\fad({FADE_DURATION_MS},{FADE_DURATION_MS})\\pos({x_pos},{y_pos})}}{cta_body}"
+    ass += f"Dialogue: 0,{cta_start},{cta_end},BMKGAlert,,0,0,0,,{cta_styled}\n"
 
     return ass
 
@@ -485,21 +754,11 @@ def process_overlay(video_path, segments, output_path, log_fn):
         f.write(ass_content)
 
     ass_esc = ass_file.replace("\\", "/").replace(":", "\\:")
-    use_wm  = os.path.exists(WATERMARK_PATH)
 
-    if use_wm:
-        flt = (f"[0:v]ass='{ass_esc}'[texted];"
-               f"[1:v]scale=250:-1[wm];"
-               f"[texted][wm]overlay=(W-w)/2:25")
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", WATERMARK_PATH,
-               "-filter_complex", flt,
-               "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-               "-c:a", "copy", "-map", "0:a?", output_path]
-    else:
-        cmd = ["ffmpeg", "-y", "-i", video_path,
-               "-vf", f"ass='{ass_esc}'",
-               "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-               "-c:a", "copy", "-map", "0:a?", output_path]
+    cmd = ["ffmpeg", "-y", "-i", video_path,
+           "-vf", f"ass='{ass_esc}'",
+           "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+           "-c:a", "copy", "-map", "0:a?", output_path]
 
     log_fn("🎬 Memproses overlay...")
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -517,30 +776,39 @@ def process_overlay(video_path, segments, output_path, log_fn):
 # ═══════════════════════════════════════════════════════════════
 #  TIKTOK UPLOAD
 # ═══════════════════════════════════════════════════════════════
-def upload_to_tiktok(video_path, deskripsi, location, log_fn, stop_event, cfg):
+def upload_to_tiktok(video_path, deskripsi, location, log_fn, stop_event, cfg, is_manual=False):
     userdata = cfg.get("user_data_dir", DEFAULT_USER_DATA)
     port     = cfg.get("debug_port", DEFAULT_PORT)
     hashtags = cfg.get("hashtags", [])
-
-    ss_tanggal = cfg.get("schedule_tanggal", datetime.now().strftime("%Y-%m-%d"))
-    ss_jam     = int(cfg.get("schedule_jam", datetime.now().hour))
-    ss_menit   = int(cfg.get("schedule_menit", datetime.now().minute))
     interval   = int(cfg.get("interval", "60"))
 
-    schedule_dt = datetime.strptime(ss_tanggal, "%Y-%m-%d").replace(
-        hour=ss_jam, minute=ss_menit)
+    if is_manual:
+        # Manual Generate: schedule = sekarang + 2 menit (bulatkan ke 5 menit)
+        now = now_wita()
+        schedule_dt = now + timedelta(minutes=5)
+        schedule_dt = schedule_dt.replace(second=0, microsecond=0)
+        rounded_min = ((schedule_dt.minute + 4) // 5) * 5
+        log_fn(f"📅 Manual schedule: {schedule_dt.strftime('%Y-%m-%d %H:%M')} (now + 2 min)")
+    else:
+        # Full Auto: baca dari settings
+        ss_tanggal = cfg.get("schedule_tanggal", now_wita().strftime("%Y-%m-%d"))
+        ss_jam     = int(cfg.get("schedule_jam", now_wita().hour))
+        ss_menit   = int(cfg.get("schedule_menit", now_wita().minute))
 
-    MIN_FUTURE = 60
-    now        = datetime.now()
-    min_start  = now + timedelta(minutes=MIN_FUTURE)
-    if schedule_dt < min_start:
-        schedule_dt  = min_start.replace(second=0, microsecond=0)
-        rounded_min  = ((schedule_dt.minute + 4) // 5) * 5
-        if rounded_min >= 60:
-            schedule_dt = schedule_dt.replace(minute=0) + timedelta(hours=1)
-        else:
-            schedule_dt = schedule_dt.replace(minute=rounded_min)
-        log_fn(f"⚠️ Schedule digeser → {schedule_dt.strftime('%Y-%m-%d %H:%M')}")
+        schedule_dt = datetime.strptime(ss_tanggal, "%Y-%m-%d").replace(
+            hour=ss_jam, minute=ss_menit)
+
+        MIN_FUTURE = 2
+        now = now_wita()
+        min_start = now + timedelta(minutes=MIN_FUTURE)
+        if schedule_dt < min_start:
+            schedule_dt = min_start.replace(second=0, microsecond=0)
+            rounded_min = ((schedule_dt.minute + 4) // 5) * 5
+            if rounded_min >= 60:
+                schedule_dt = schedule_dt.replace(minute=0) + timedelta(hours=1)
+            else:
+                schedule_dt = schedule_dt.replace(minute=rounded_min)
+            log_fn(f"⚠️ Schedule digeser → {schedule_dt.strftime('%Y-%m-%d %H:%M')}")
 
     log_fn(f"📅 Schedule: {schedule_dt.strftime('%Y-%m-%d %H:%M')}")
     log_fn(f"📍 Lokasi: {location}")
@@ -550,8 +818,16 @@ def upload_to_tiktok(video_path, deskripsi, location, log_fn, stop_event, cfg):
     driver      = connect_selenium(port)
     log_fn("✅ Chrome terhubung!")
 
+    # Pastikan window aktif dan visible
+    try:
+        driver.maximize_window()
+        driver.switch_to.window(driver.current_window_handle)
+    except:
+        pass
+
     try:
         navigate_upload_page(driver, force=True)
+        log_fn("✅ Halaman upload TikTok dimuat")
         time.sleep(3)
         do_upload_file(driver, os.path.normpath(video_path), log_fn)
         time.sleep(5)
@@ -584,7 +860,7 @@ def upload_to_tiktok(video_path, deskripsi, location, log_fn, stop_event, cfg):
 # ═══════════════════════════════════════════════════════════════
 #  FULL PIPELINE
 # ═══════════════════════════════════════════════════════════════
-def run_full_pipeline(log_fn, stop_event, cfg):
+def run_full_pipeline(log_fn, stop_event, cfg, is_manual=False):
     """Steps: 1-Fetch BMKG 2-Grok 3-Overlay 4-TikTok"""
 
     log_fn("🌦️ [1/4] Mengambil data BMKG...", "info")
@@ -616,7 +892,7 @@ def run_full_pipeline(log_fn, stop_event, cfg):
     log_fn("📤 [4/4] Upload ke TikTok...", "info")
     deskripsi = cfg.get("deskripsi", DEFAULT_SETTINGS["deskripsi"])
     ok = upload_to_tiktok(overlay_out, deskripsi, alert['location'],
-                          log_fn, stop_event, cfg)
+                          log_fn, stop_event, cfg, is_manual=is_manual)
     if ok:
         log_fn("🎉 Pipeline selesai! Video berhasil diupload!", "success")
     else:
@@ -647,13 +923,13 @@ def _full_auto_daemon(uid, chat_id, bot, stop_event, main_loop):
 
     while not stop_event.is_set():
         run_count += 1
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_str = now_wita().strftime("%Y-%m-%d %H:%M")
         send(f"🌦️ <b>[Auto Run #{run_count}]</b>\n⏱ {now_str}\nMemulai pipeline...")
 
         log_lines = []
 
         def log_fn(msg, tag=None):
-            ts   = datetime.now().strftime("%H:%M:%S")
+            ts   = now_wita().strftime("%H:%M:%S")
             icon = {"success": "✅", "error": "❌", "warn": "⚠️", "info": "ℹ️"}.get(tag, "▪️")
             log_lines.append(f"[{ts}] {icon} {msg}")
 
@@ -676,7 +952,7 @@ def _full_auto_daemon(uid, chat_id, bot, stop_event, main_loop):
             break
 
         # Wait for next cycle, checking stop_event every FULL_AUTO_WAIT_POLL_SEC seconds
-        next_run = datetime.now() + timedelta(hours=auto_interval_hours)
+        next_run = now_wita() + timedelta(hours=auto_interval_hours)
         send(
             f"⏳ <b>Full Auto</b>: Selesai run #{run_count}.\n"
             f"Run #{run_count+1} akan dimulai: <code>{next_run.strftime('%Y-%m-%d %H:%M')}</code>"
@@ -907,6 +1183,62 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+async def cmd_testoverlay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Test overlay only: ambil data BMKG, pilih video random dari bmkg_output, overlay, kirim hasil."""
+    uid = update.effective_user.id
+    if not is_allowed(uid): return
+
+    import glob, random
+
+    await update.message.reply_text("🧪 <b>Test Overlay dimulai...</b>", parse_mode=ParseMode.HTML)
+
+    # 1. Fetch BMKG
+    alert = fetch_bmkg_alert()
+    if not alert:
+        await update.message.reply_text("❌ Gagal ambil data BMKG!")
+        return
+
+    await update.message.reply_text(
+        f"📋 <b>{escape_html(alert['title'])}</b>\n📝 {escape_html(alert['description'][:300])}",
+        parse_mode=ParseMode.HTML)
+
+    # 2. Pilih video random dari bmkg_output
+    mp4s = glob.glob(os.path.join(OUTPUT_DIR, "*.mp4"))
+    if not mp4s:
+        await update.message.reply_text("❌ Tidak ada video di bmkg_output! Generate dulu via /generate.")
+        return
+
+    src_video = random.choice(mp4s)
+    await update.message.reply_text(f"🎬 Video sumber: <code>{os.path.basename(src_video)}</code>", parse_mode=ParseMode.HTML)
+
+    # 3. Overlay
+    segments = split_description_to_segments(alert['description'])
+    overlay_out = os.path.join(OVERLAY_DIR, f"test_overlay_{int(time.time())}.mp4")
+    os.makedirs(OVERLAY_DIR, exist_ok=True)
+
+    log_lines = []
+    def log_fn(msg, tag=None):
+        log_lines.append(msg)
+
+    ok = process_overlay(src_video, segments, overlay_out, log_fn)
+
+    if not ok:
+        log_text = "\n".join(log_lines[-10:])
+        await update.message.reply_text(f"❌ Overlay gagal!\n<pre>{escape_html(log_text)}</pre>", parse_mode=ParseMode.HTML)
+        return
+
+    # 4. Kirim video hasil ke Telegram
+    sz = os.path.getsize(overlay_out)
+    await update.message.reply_text(
+        f"✅ Overlay selesai! ({sz/(1024*1024):.1f} MB)\n📤 Mengirim video...",
+        parse_mode=ParseMode.HTML)
+
+    try:
+        with open(overlay_out, "rb") as vf:
+            await update.message.reply_video(video=vf, caption=f"🧪 Test Overlay\n📋 {alert['title'][:100]}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Gagal kirim video: {e}")
+
 # ═══════════════════════════════════════════════════════════════
 #  PIPELINE RUNNER HELPERS
 # ═══════════════════════════════════════════════════════════════
@@ -949,13 +1281,13 @@ async def _start_pipeline(chat_id, uid, bot):
         except: pass
 
     def log_fn(msg, tag=None):
-        ts   = datetime.now().strftime("%H:%M:%S")
+        ts   = now_wita().strftime("%H:%M:%S")
         icon = {"success": "✅", "error": "❌", "warn": "⚠️", "info": "ℹ️"}.get(tag, "▪️")
         log_lines.append(f"<code>[{ts}]</code> {icon} {msg}")
 
     def thread_fn():
         try:
-            run_full_pipeline(log_fn, stop_evt, bot_settings)
+            run_full_pipeline(log_fn, stop_evt, bot_settings, is_manual=True)
         except Exception as e:
             log_fn(f"Pipeline error: {e}", "error")
         finally:
@@ -1107,6 +1439,7 @@ def main():
     app.add_handler(CommandHandler("bmkg",     cmd_bmkg))
     app.add_handler(CommandHandler("set",      cmd_set))
     app.add_handler(CommandHandler("help",     cmd_help))
+    app.add_handler(CommandHandler("testoverlay", cmd_testoverlay))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("🌦️ BMKG Video Generator Bot (Full Auto + Manual) is running...")
