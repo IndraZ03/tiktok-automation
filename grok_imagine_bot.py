@@ -33,6 +33,7 @@ ALLOWED_USER_IDS = []  # Kosong = semua user boleh
 APP_DIR        = r"C:\tiktok_automation"
 BAHAN_DIR      = os.path.join(APP_DIR, "bahan")
 OUTPUT_DIR     = os.path.join(APP_DIR, "grok_output")
+MERGED_DIR     = os.path.join(APP_DIR, "grok_output_merged")
 PROMPTS_FILE   = os.path.join(APP_DIR, "grok_prompts.json")
 SETTINGS_FILE  = os.path.join(APP_DIR, "grok_imagine_settings.json")
 
@@ -44,7 +45,7 @@ DEFAULT_PORT   = "9245"
 #  BOT SETTINGS PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
 def load_bot_settings() -> dict:
-    defaults = {"user_data_dir": DEFAULT_USER_DATA, "port": DEFAULT_PORT}
+    defaults = {"user_data_dir": DEFAULT_USER_DATA, "port": DEFAULT_PORT, "merge_duration": 20}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -110,6 +111,77 @@ def is_allowed(uid):
 
 def escape_html(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  VIDEO MERGE (FFmpeg concat)
+# ═══════════════════════════════════════════════════════════════
+def merge_video_pair(vid1: str, vid2: str, output_dir: str, log_fn=None) -> str | None:
+    """
+    Gabungkan 2 video menjadi 1 menggunakan FFmpeg concat demuxer.
+    Returns path to merged video or None on failure.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Tentukan nomor output berikutnya
+    existing = glob.glob(os.path.join(output_dir, "*.mp4"))
+    existing_nums = []
+    for f in existing:
+        m = re.fullmatch(r'(\d+)\.mp4', os.path.basename(f))
+        if m:
+            existing_nums.append(int(m.group(1)))
+    next_num = (max(existing_nums) + 1) if existing_nums else 1
+
+    out_name = f"{next_num}.mp4"
+    out_path = os.path.join(output_dir, out_name)
+
+    # Buat file daftar (concat demuxer)
+    list_file = os.path.join(output_dir, f"_merge_list_{next_num}.txt")
+    try:
+        with open(list_file, "w", encoding="utf-8") as lf:
+            lf.write(f"file '{vid1}'\n")
+            lf.write(f"file '{vid2}'\n")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_file,
+            "-c", "copy",
+            out_path
+        ]
+        if log_fn:
+            log_fn(
+                f"🎬 Merge: {os.path.basename(vid1)} + {os.path.basename(vid2)} → {out_name}"
+            )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            if log_fn:
+                sz = os.path.getsize(out_path) / (1024 * 1024)
+                log_fn(f"✅ Merged: {out_name} ({sz:.1f} MB)")
+            return out_path
+        else:
+            if log_fn:
+                log_fn(f"❌ Merge gagal: {result.stderr[-200:] if result.stderr else 'unknown'}")
+            return None
+    except FileNotFoundError:
+        if log_fn:
+            log_fn("❌ FFmpeg tidak ditemukan! Pastikan ffmpeg ada di PATH.")
+        return None
+    except subprocess.TimeoutExpired:
+        if log_fn:
+            log_fn("⚠️ FFmpeg merge timeout (120s)")
+        return None
+    except Exception as e:
+        if log_fn:
+            log_fn(f"❌ Error merge: {str(e)[:100]}")
+        return None
+    finally:
+        if os.path.exists(list_file):
+            try:
+                os.remove(list_file)
+            except:
+                pass
 
 # ═══════════════════════════════════════════════════════════════
 #  STATE
@@ -1144,16 +1216,24 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     use_multi = (not infinite and count >= 10)
     mode_label = "Multi-Tab" if use_multi else "Single-Tab"
 
+    merge_mode_str = "🎬 Mode: <b>Gabung 2 video (20 dtk)</b>" if merge_enabled else "🎬 Mode: <b>Tanpa gabung (10 dtk)</b>"
     send(
         f"🚀 <b>Generasi dimulai! ({mode_label})</b>\n\n"
         f"📁 Folder: <code>{escape_html(folder_name)}</code> ({len(images)} gambar)\n"
         f"📝 Prompt: <code>{escape_html(prompt_name)}</code>\n"
-        f"🎯 Target: <b>{target}</b> video\n\n"
+        f"🎯 Target: <b>{target}</b> video\n"
+        f"{merge_mode_str}\n\n"
         f"Gunakan /stop untuk menghentikan."
     )
 
     generated = 0
     failed = 0
+    merged_count = 0
+
+    # Merge settings
+    merge_dur = bot_settings.get("merge_duration", 20)
+    merge_enabled = (merge_dur == 20)
+    merge_buffer = []  # buffer of video paths waiting to be merged
 
     # ═════════════════════════════════════════════════
     #  MULTI-TAB MODE (count >= 10)
@@ -1325,7 +1405,25 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                                     tab_status[i] = "done"
                                     sz = os.path.getsize(video_path) / (1024*1024)
                                     log_fn(f"[Tab {i+1}] 📦 {sz:.1f} MB ({generated}/{target})")
-                                    send_video_tg(video_path)
+
+                                    if merge_enabled:
+                                        merge_buffer.append(video_path)
+                                        if len(merge_buffer) >= 2:
+                                            vid_a, vid_b = merge_buffer.pop(0), merge_buffer.pop(0)
+                                            merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
+                                            if merged_path:
+                                                merged_count += 1
+                                                send_video_tg(merged_path)
+                                                log_fn(f"🎬 Merged #{merged_count} dikirim ke Telegram")
+                                            else:
+                                                log_fn(f"⚠️ Merge gagal, kirim video terpisah")
+                                                send_video_tg(vid_a)
+                                                send_video_tg(vid_b)
+                                        else:
+                                            log_fn(f"⏳ Buffer merge: {len(merge_buffer)}/2")
+                                    else:
+                                        send_video_tg(video_path)
+
                                     # Update download timestamp so next tabs don't conflict
                                     tab_start_time = time.time()
                                 else:
@@ -1457,8 +1555,26 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                 send(
                     f"✅ <b>[Video {idx}] Berhasil!</b> ({generated}/{target})"
                 )
-                # Send video to Telegram
-                send_video_tg(video_path)
+
+                if merge_enabled:
+                    merge_buffer.append(video_path)
+                    if len(merge_buffer) >= 2:
+                        vid_a, vid_b = merge_buffer.pop(0), merge_buffer.pop(0)
+                        send(f"🎬 Menggabungkan 2 video...")
+                        merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
+                        if merged_path:
+                            merged_count += 1
+                            send(f"✅ Merged #{merged_count} berhasil!")
+                            send_video_tg(merged_path)
+                        else:
+                            send(f"⚠️ Merge gagal, kirim video terpisah")
+                            send_video_tg(vid_a)
+                            send_video_tg(vid_b)
+                    else:
+                        send(f"⏳ Buffer merge: {len(merge_buffer)}/2 (menunggu video berikutnya)")
+                else:
+                    # Send video to Telegram immediately
+                    send_video_tg(video_path)
                 time.sleep(3)
             else:
                 failed += 1
@@ -1476,11 +1592,20 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                         break
                     time.sleep(1)
 
+    # Handle remaining buffer (if odd number or stopped mid-way)
+    if merge_enabled and merge_buffer:
+        send(f"🎬 Sisa {len(merge_buffer)} video di buffer, dikirim tanpa merge")
+        for vp in merge_buffer:
+            if os.path.exists(vp):
+                send_video_tg(vp)
+        merge_buffer.clear()
+
     # Final summary
+    merge_info = f"\n🎬 Merged: <b>{merged_count}</b> video" if merge_enabled else ""
     send(
         f"🏁 <b>Generasi selesai!</b>\n\n"
         f"✅ Berhasil: <b>{generated}</b>\n"
-        f"❌ Gagal: <b>{failed}</b>\n"
+        f"❌ Gagal: <b>{failed}</b>{merge_info}\n"
         f"📁 Folder: <code>{escape_html(folder_name)}</code>"
     )
     active_gen_tasks.pop(uid, None)
@@ -1512,6 +1637,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     status = "🟢 <b>Sedang generate</b>" if is_running else "⚫ <b>Idle</b>"
 
     cfg = bot_settings
+    merge_dur = cfg.get("merge_duration", 20)
+    merge_label = f"🎬 20 dtk (gabung 2 video)" if merge_dur == 20 else "🎬 10 dtk (tanpa gabung)"
     text = (
         "🎬 <b>Grok Imagine Video Generator</b>\n\n"
         f"{status}\n\n"
@@ -1519,12 +1646,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📝 Prompt tersimpan: <b>{len(prompts)}</b>\n"
         f"🔌 Port: <code>{cfg.get('port', DEFAULT_PORT)}</code>\n"
         f"📂 User Data: <code>{cfg.get('user_data_dir', DEFAULT_USER_DATA)}</code>\n"
-        f"📂 Output: <code>{OUTPUT_DIR}</code>\n\n"
+        f"📂 Output: <code>{OUTPUT_DIR}</code>\n"
+        f"📂 Merged: <code>{MERGED_DIR}</code>\n"
+        f"{merge_label}\n\n"
         "<b>Command:</b>\n"
         "<code>/generate [folder] [jumlah] [prompt]</code>\n"
         "<code>/stop</code> — hentikan generasi\n"
         "<code>/set port 9245</code> — ubah port Chrome\n"
-        "<code>/set userdata 1</code> — ubah user data dir\n\n"
+        "<code>/set userdata 1</code> — ubah user data dir\n"
+        "<code>/set merge 10|20</code> — durasi output video\n\n"
         "Gunakan tombol di bawah untuk kelola bahan & prompt."
     )
     await update.message.reply_text(text, reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
@@ -1599,6 +1729,18 @@ async def cmd_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML)
         return
 
+    # Validate even count when merge is enabled
+    merge_dur = bot_settings.get("merge_duration", 20)
+    if merge_dur == 20 and count > 0 and count % 2 != 0:
+        await update.message.reply_text(
+            "⚠️ <b>Jumlah harus genap!</b>\n\n"
+            f"Mode merge aktif (20 dtk = gabung 2 video).\n"
+            f"Jumlah <code>{count}</code> tidak genap.\n\n"
+            f"Gunakan jumlah genap (misal: 2, 4, 6, 10, 20)\n"
+            f"atau nonaktifkan merge: <code>/set merge 10</code>",
+            parse_mode=ParseMode.HTML)
+        return
+
     # Start generation
     stop_evt = threading.Event()
     main_loop = asyncio.get_event_loop()
@@ -1642,6 +1784,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/stop — Hentikan generasi\n"
         "/set port [port] — Ubah port Chrome\n"
         "/set userdata [nomor] — Ubah user data dir\n"
+        "/set merge 10|20 — Durasi output (10=tanpa gabung, 20=gabung 2)\n"
         "/help — Panduan ini\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "📁 <b>Folder Bahan</b>: Kelola subfolder gambar di\n"
@@ -1665,13 +1808,18 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.strip().split(None, 2)
     if len(args) < 3:
         cfg = bot_settings
+        merge_dur = cfg.get("merge_duration", 20)
+        merge_label = "🎬 20 dtk (gabung 2 video)" if merge_dur == 20 else "🎬 10 dtk (tanpa gabung)"
         await update.message.reply_text(
             "⚙️ <b>Settings</b>\n\n"
             f"🔌 Port: <code>{cfg.get('port', DEFAULT_PORT)}</code>\n"
-            f"📂 User Data: <code>{cfg.get('user_data_dir', DEFAULT_USER_DATA)}</code>\n\n"
+            f"📂 User Data: <code>{cfg.get('user_data_dir', DEFAULT_USER_DATA)}</code>\n"
+            f"{merge_label}\n\n"
             "<b>Format:</b>\n"
             "<code>/set port 9245</code>\n"
-            "<code>/set userdata 1</code>",
+            "<code>/set userdata 1</code>\n"
+            "<code>/set merge 20</code> — gabung 2 video (default)\n"
+            "<code>/set merge 10</code> — tanpa gabung",
             parse_mode=ParseMode.HTML)
         return
 
@@ -1689,8 +1837,29 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_bot_settings(cfg)
         await update.message.reply_text(
             f"✅ User Data: <code>user_data/{val}</code>", parse_mode=ParseMode.HTML)
+    elif sub == "merge":
+        if val in ("10", "20"):
+            cfg["merge_duration"] = int(val)
+            save_bot_settings(cfg)
+            if int(val) == 20:
+                await update.message.reply_text(
+                    "✅ Merge: <b>🎬 20 detik</b>\n"
+                    "Setiap 2 video akan digabung menjadi 1 video ~20 detik.\n"
+                    "Jumlah generate harus genap.",
+                    parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(
+                    "✅ Merge: <b>🎬 10 detik</b>\n"
+                    "Video dikirim langsung tanpa digabung.",
+                    parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(
+                "❌ Format salah! Gunakan:\n"
+                "<code>/set merge 20</code> — gabung 2 video\n"
+                "<code>/set merge 10</code> — tanpa gabung",
+                parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text("❌ Sub-command tidak dikenal. Gunakan: port, userdata")
+        await update.message.reply_text("❌ Sub-command tidak dikenal. Gunakan: port, userdata, merge")
 
 
 # ═══════════════════════════════════════════════════════════════

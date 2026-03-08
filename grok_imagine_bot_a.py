@@ -35,6 +35,7 @@ BAHAN_DIR      = os.path.join(APP_DIR, "bahan")
 OUTPUT_DIR     = os.path.join(APP_DIR, "grok_output")
 PROMPTS_FILE   = os.path.join(APP_DIR, "grok_prompts.json")
 SETTINGS_FILE  = os.path.join(APP_DIR, "grok_imagine_settings.json")
+TIKTOK_MP3_DIR = os.path.join(APP_DIR, "TikTok_MP3")
 
 GROK_URL       = "https://grok.com/imagine"
 DEFAULT_USER_DATA = os.path.join(APP_DIR, "user_data", "1")
@@ -44,7 +45,7 @@ DEFAULT_PORT   = "9245"
 #  BOT SETTINGS PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
 def load_bot_settings() -> dict:
-    defaults = {"user_data_dir": DEFAULT_USER_DATA, "port": DEFAULT_PORT}
+    defaults = {"user_data_dir": DEFAULT_USER_DATA, "port": DEFAULT_PORT, "tiktok_sound": True}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -110,6 +111,91 @@ def is_allowed(uid):
 
 def escape_html(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  TIKTOK SOUND REPLACEMENT (FFmpeg)
+# ═══════════════════════════════════════════════════════════════
+def get_random_tiktok_mp3() -> str | None:
+    """Pick a random MP3 from TikTok_MP3 folder."""
+    if not os.path.isdir(TIKTOK_MP3_DIR):
+        return None
+    mp3s = [f for f in os.listdir(TIKTOK_MP3_DIR) if f.lower().endswith('.mp3')]
+    if not mp3s:
+        return None
+    return os.path.join(TIKTOK_MP3_DIR, random.choice(mp3s))
+
+
+def replace_video_sound(video_path: str, log_fn=None) -> str | None:
+    """
+    Mute original video audio and replace with random TikTok MP3.
+    Returns the path to the new video (replaces original), or None on failure.
+    """
+    mp3_path = get_random_tiktok_mp3()
+    if not mp3_path:
+        if log_fn:
+            log_fn("⚠️ Tidak ada file MP3 di folder TikTok_MP3")
+        return None
+
+    mp3_name = os.path.basename(mp3_path)
+    if log_fn:
+        log_fn(f"🎵 Mengganti sound dengan: {mp3_name[:50]}")
+
+    # Output to temp file, then replace original
+    dir_name = os.path.dirname(video_path)
+    base_name = os.path.basename(video_path)
+    temp_path = os.path.join(dir_name, f"_temp_sound_{base_name}")
+
+    try:
+        # FFmpeg: take video from input, mute original audio, overlay MP3
+        # -shortest ensures output length matches the shorter of video/audio
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,     # input video
+            "-i", mp3_path,       # input audio (MP3)
+            "-c:v", "copy",       # copy video codec (no re-encode)
+            "-map", "0:v:0",      # take video from first input
+            "-map", "1:a:0",      # take audio from second input (MP3)
+            "-shortest",          # cut to shortest stream
+            temp_path
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            if log_fn:
+                log_fn(f"⚠️ FFmpeg error: {result.stderr[:100]}")
+            # Cleanup temp
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
+
+        # Replace original with the new file
+        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+            os.remove(video_path)
+            shutil.move(temp_path, video_path)
+            if log_fn:
+                log_fn(f"✅ Sound diganti! ({mp3_name[:40]})")
+            return video_path
+        else:
+            if log_fn:
+                log_fn("⚠️ File output FFmpeg kosong")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
+
+    except subprocess.TimeoutExpired:
+        if log_fn:
+            log_fn("⚠️ FFmpeg timeout (120s)")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
+    except Exception as e:
+        if log_fn:
+            log_fn(f"⚠️ Error ganti sound: {str(e)[:80]}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
 
 # ═══════════════════════════════════════════════════════════════
 #  STATE
@@ -1321,6 +1407,10 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                                 video_path = download_tab_video(
                                     driver, OUTPUT_DIR, log_fn, i, tab_start_time)
                                 if video_path and os.path.exists(video_path):
+                                    # Replace sound if tiktok_sound is enabled
+                                    if bot_settings.get("tiktok_sound", True):
+                                        log_fn(f"[Tab {i+1}] 🎵 Mengganti sound video...")
+                                        replace_video_sound(video_path, log_fn)
                                     generated += 1
                                     tab_status[i] = "done"
                                     sz = os.path.getsize(video_path) / (1024*1024)
@@ -1453,6 +1543,10 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                 break
 
             if video_path and os.path.exists(video_path):
+                # Replace sound if tiktok_sound is enabled
+                if bot_settings.get("tiktok_sound", True):
+                    send(f"🎵 Mengganti sound video #{idx}...")
+                    replace_video_sound(video_path, log_fn)
                 generated += 1
                 send(
                     f"✅ <b>[Video {idx}] Berhasil!</b> ({generated}/{target})"
@@ -1512,6 +1606,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     status = "🟢 <b>Sedang generate</b>" if is_running else "⚫ <b>Idle</b>"
 
     cfg = bot_settings
+    sound_status = "🔊 ON" if cfg.get("tiktok_sound", True) else "🔇 OFF"
+    mp3_count = len([f for f in os.listdir(TIKTOK_MP3_DIR) if f.lower().endswith('.mp3')]) if os.path.isdir(TIKTOK_MP3_DIR) else 0
     text = (
         "🎬 <b>Grok Imagine Video Generator</b>\n\n"
         f"{status}\n\n"
@@ -1519,12 +1615,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📝 Prompt tersimpan: <b>{len(prompts)}</b>\n"
         f"🔌 Port: <code>{cfg.get('port', DEFAULT_PORT)}</code>\n"
         f"📂 User Data: <code>{cfg.get('user_data_dir', DEFAULT_USER_DATA)}</code>\n"
-        f"📂 Output: <code>{OUTPUT_DIR}</code>\n\n"
+        f"📂 Output: <code>{OUTPUT_DIR}</code>\n"
+        f"🎵 TikTok Sound: <b>{sound_status}</b> ({mp3_count} MP3)\n\n"
         "<b>Command:</b>\n"
         "<code>/generate [folder] [jumlah] [prompt]</code>\n"
         "<code>/stop</code> — hentikan generasi\n"
         "<code>/set port 9245</code> — ubah port Chrome\n"
-        "<code>/set userdata 1</code> — ubah user data dir\n\n"
+        "<code>/set userdata 1</code> — ubah user data dir\n"
+        "<code>/set sound on|off</code> — ganti sound TikTok\n\n"
         "Gunakan tombol di bawah untuk kelola bahan & prompt."
     )
     await update.message.reply_text(text, reply_markup=main_menu_kb(uid), parse_mode=ParseMode.HTML)
@@ -1642,6 +1740,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/stop — Hentikan generasi\n"
         "/set port [port] — Ubah port Chrome\n"
         "/set userdata [nomor] — Ubah user data dir\n"
+        "/set sound on|off — Toggle TikTok sound\n"
         "/help — Panduan ini\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "📁 <b>Folder Bahan</b>: Kelola subfolder gambar di\n"
@@ -1665,13 +1764,17 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.strip().split(None, 2)
     if len(args) < 3:
         cfg = bot_settings
+        sound_status = "🔊 ON" if cfg.get("tiktok_sound", True) else "🔇 OFF"
+        mp3_count = len([f for f in os.listdir(TIKTOK_MP3_DIR) if f.lower().endswith('.mp3')]) if os.path.isdir(TIKTOK_MP3_DIR) else 0
         await update.message.reply_text(
             "⚙️ <b>Settings</b>\n\n"
             f"🔌 Port: <code>{cfg.get('port', DEFAULT_PORT)}</code>\n"
-            f"📂 User Data: <code>{cfg.get('user_data_dir', DEFAULT_USER_DATA)}</code>\n\n"
+            f"📂 User Data: <code>{cfg.get('user_data_dir', DEFAULT_USER_DATA)}</code>\n"
+            f"🎵 TikTok Sound: <b>{sound_status}</b> ({mp3_count} MP3)\n\n"
             "<b>Format:</b>\n"
             "<code>/set port 9245</code>\n"
-            "<code>/set userdata 1</code>",
+            "<code>/set userdata 1</code>\n"
+            "<code>/set sound on</code> atau <code>/set sound off</code>",
             parse_mode=ParseMode.HTML)
         return
 
@@ -1689,8 +1792,27 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_bot_settings(cfg)
         await update.message.reply_text(
             f"✅ User Data: <code>user_data/{val}</code>", parse_mode=ParseMode.HTML)
+    elif sub == "sound":
+        if val.lower() in ("on", "1", "true", "ya", "yes"):
+            cfg["tiktok_sound"] = True
+            save_bot_settings(cfg)
+            await update.message.reply_text(
+                "✅ TikTok Sound: <b>🔊 ON</b>\n"
+                "Video akan diganti soundnya dengan MP3 random dari TikTok_MP3.",
+                parse_mode=ParseMode.HTML)
+        elif val.lower() in ("off", "0", "false", "tidak", "no"):
+            cfg["tiktok_sound"] = False
+            save_bot_settings(cfg)
+            await update.message.reply_text(
+                "✅ TikTok Sound: <b>🔇 OFF</b>\n"
+                "Video akan tetap menggunakan sound asli.",
+                parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(
+                "❌ Format salah! Gunakan: <code>/set sound on</code> atau <code>/set sound off</code>",
+                parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text("❌ Sub-command tidak dikenal. Gunakan: port, userdata")
+        await update.message.reply_text("❌ Sub-command tidak dikenal. Gunakan: port, userdata, sound")
 
 
 # ═══════════════════════════════════════════════════════════════
