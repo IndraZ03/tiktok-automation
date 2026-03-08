@@ -1216,6 +1216,11 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     use_multi = (not infinite and count >= 10)
     mode_label = "Multi-Tab" if use_multi else "Single-Tab"
 
+    # Merge settings
+    merge_dur = bot_settings.get("merge_duration", 20)
+    merge_enabled = (merge_dur == 20)
+    merge_buffer = []  # buffer of video paths waiting to be merged
+
     merge_mode_str = "🎬 Mode: <b>Gabung 2 video (20 dtk)</b>" if merge_enabled else "🎬 Mode: <b>Tanpa gabung (10 dtk)</b>"
     send(
         f"🚀 <b>Generasi dimulai! ({mode_label})</b>\n\n"
@@ -1229,11 +1234,6 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     generated = 0
     failed = 0
     merged_count = 0
-
-    # Merge settings
-    merge_dur = bot_settings.get("merge_duration", 20)
-    merge_enabled = (merge_dur == 20)
-    merge_buffer = []  # buffer of video paths waiting to be merged
 
     # ═════════════════════════════════════════════════
     #  MULTI-TAB MODE (count >= 10)
