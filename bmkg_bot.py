@@ -74,7 +74,7 @@ FADE_DURATION_MS = 500
 MAX_CHARS_PER_LINE = 22
 
 # Full Auto
-FULL_AUTO_INTERVAL_HOURS = 2        # Berjalan per 2 jam
+FULL_AUTO_INTERVAL_HOURS = 2        # Berjalan per 2 jam 2
 FULL_AUTO_WAIT_POLL_SEC  = 30       # Polling stop event setiap 30 detik saat menunggu interval
 
 # TikTok defaults

@@ -221,50 +221,137 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
             image_uploaded = False
             abs_image = os.path.abspath(image_path)
 
-            # --- Attempt B: Directly find any file input on page ---
-            if not image_uploaded:
+            def _count_uploaded_images(drv):
+                """Count currently uploaded/preview images on page."""
                 try:
-                    log_fn("🔄 Fallback: cari hidden file input langsung...")
+                    return drv.execute_script("""
+                        let count = 0;
+                        // Count preview images from grok assets
+                        const imgs = document.querySelectorAll('img[src*="assets.grok.com"]');
+                        count += imgs.length;
+                        // Count any blob preview images
+                        const blobs = document.querySelectorAll('img[src^="blob:"]');
+                        count += blobs.length;
+                        // Count preview containers with images
+                        const groups = document.querySelectorAll('div.group.relative img');
+                        count += groups.length;
+                        return count;
+                    """)
+                except:
+                    return 0
+
+            # Count images BEFORE upload attempt
+            images_before = _count_uploaded_images(driver)
+            log_fn(f"📊 Jumlah gambar sebelum upload: {images_before}")
+
+            def _verify_image_uploaded(drv, before_count, timeout=8):
+                """Check if a NEW image appeared after upload."""
+                for _ in range(timeout * 2):
+                    try:
+                        after_count = _count_uploaded_images(drv)
+                        if after_count > before_count:
+                            return True
+                        # Also check if the page state changed to show image
+                        has_preview = drv.execute_script("""
+                            // Check if there's an image preview container visible
+                            const group = document.querySelector('div.group.relative');
+                            if (group) {
+                                const rect = group.getBoundingClientRect();
+                                if (rect.width > 50 && rect.height > 50) return true;
+                            }
+                            return false;
+                        """)
+                        if has_preview:
+                            return True
+                    except:
+                        pass
+                    time.sleep(0.5)
+                return False
+
+            # Retry loop: up to 3 attempts
+            for upload_attempt in range(1, 4):
+                if image_uploaded:
+                    break
+                if upload_attempt > 1:
+                    log_fn(f"🔄 Upload ulang gambar (attempt {upload_attempt}/3)...")
+                    time.sleep(2)
+
+                # --- Method A: Find ALL file inputs and try each one ---
+                try:
                     file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
                     if file_inputs:
-                        fi = file_inputs[-1]
-                        driver.execute_script(
-                            "arguments[0].style.display='block';"
-                            "arguments[0].style.visibility='visible';"
-                            "arguments[0].style.opacity='1';"
-                            "arguments[0].style.height='1px';"
-                            "arguments[0].style.width='1px';"
-                            "arguments[0].style.position='absolute';", fi)
-                        fi.send_keys(abs_image)
-                        image_uploaded = True
-                        log_fn("✅ Gambar dipilih via hidden file input!")
-                        time.sleep(3)
+                        log_fn(f"🔍 Ditemukan {len(file_inputs)} file input, mencoba masing-masing...")
+                        for idx, fi in enumerate(file_inputs):
+                            try:
+                                driver.execute_script(
+                                    "arguments[0].style.display='block';"
+                                    "arguments[0].style.visibility='visible';"
+                                    "arguments[0].style.opacity='1';"
+                                    "arguments[0].style.height='1px';"
+                                    "arguments[0].style.width='1px';"
+                                    "arguments[0].style.position='absolute';", fi)
+                                fi.send_keys(abs_image)
+                                log_fn(f"📤 Sent file ke input[{idx}], verifikasi...")
+                                time.sleep(3)
+                                if _verify_image_uploaded(driver, images_before):
+                                    image_uploaded = True
+                                    log_fn("✅ Gambar berhasil diupload dan terverifikasi!")
+                                    break
+                                else:
+                                    log_fn(f"⚠️ Input[{idx}] tidak menghasilkan preview, coba berikutnya...")
+                            except Exception as e:
+                                log_fn(f"⚠️ Input[{idx}] gagal: {e}")
+                    else:
+                        log_fn("⚠️ Tidak ditemukan file input di halaman")
                 except Exception as e:
-                    log_fn(f"⚠️ Hidden file input gagal: {e}")
+                    log_fn(f"⚠️ Pencarian file input gagal: {e}")
 
-            # --- Attempt C: Inject file input via JS ---
-            if not image_uploaded:
+                if image_uploaded:
+                    break
+
+                # --- Method B: Inject fresh file input via JS ---
                 try:
                     log_fn("🔄 Fallback: inject file input via JS...")
-                    driver.execute_script("""
+                    inject_id = f"grok_bot_file_input_{upload_attempt}"
+                    driver.execute_script(f"""
+                        // Remove old injected input if exists
+                        const old = document.getElementById('{inject_id}');
+                        if (old) old.remove();
                         const input = document.createElement('input');
                         input.type = 'file';
-                        input.id = 'grok_bot_file_input';
+                        input.id = '{inject_id}';
                         input.accept = 'image/*';
                         input.style.cssText = 'position:absolute;top:0;left:0;z-index:99999;display:block;width:1px;height:1px;';
                         document.body.appendChild(input);
                     """)
                     time.sleep(0.5)
-                    injected_input = driver.find_element(By.ID, "grok_bot_file_input")
+                    injected_input = driver.find_element(By.ID, inject_id)
                     injected_input.send_keys(abs_image)
-                    log_fn("✅ Gambar dipilih via injected input!")
-                    image_uploaded = True
+                    log_fn("📤 Sent file ke injected input, verifikasi...")
                     time.sleep(3)
+                    if _verify_image_uploaded(driver, images_before):
+                        image_uploaded = True
+                        log_fn("✅ Gambar berhasil diupload via inject dan terverifikasi!")
+                    else:
+                        log_fn("⚠️ Injected input tidak menghasilkan preview")
                 except Exception as e:
                     log_fn(f"⚠️ Inject file input gagal: {e}")
 
+                # --- Method C: Reload page and retry ---
+                if not image_uploaded and upload_attempt < 3:
+                    log_fn("🔄 Reload halaman untuk retry upload...")
+                    try:
+                        driver.refresh()
+                        time.sleep(5)
+                        if not navigate_to_grok(driver, log_fn):
+                            log_fn("❌ Gagal navigasi ulang setelah refresh")
+                            continue
+                        time.sleep(3)
+                    except Exception as e:
+                        log_fn(f"⚠️ Refresh gagal: {e}")
+
             if not image_uploaded:
-                log_fn("❌ Semua metode upload gambar gagal!")
+                log_fn("❌ Semua metode upload gambar gagal setelah 3 attempt!")
         else:
             log_fn("⚠️ Tidak ada gambar, generate tanpa gambar")
 
@@ -378,34 +465,89 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
         if stop_event.is_set():
             return None
 
-         # ── Step 2: Type the prompt ──
+        # ── Step 2: Type the prompt ──
         log_fn("📝 Mengisi prompt...")
+        prompt_filled = False
+
+        # Method A: Scroll to editor → click → type
         try:
-            # Find the ProseMirror contenteditable div
-            editor = wait.until(EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
-            editor.click()
-            time.sleep(0.5)
+            editor = driver.execute_script("""
+                const ed = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                if (ed) {
+                    ed.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    return ed;
+                }
+                return null;
+            """)
+            if editor:
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].focus();", editor)
+                time.sleep(0.3)
+                editor.click()
+                time.sleep(0.3)
+                editor.send_keys(Keys.CONTROL + "a")
+                time.sleep(0.2)
+                editor.send_keys(Keys.DELETE)
+                time.sleep(0.2)
+                driver.execute_script("""
+                    const editor = arguments[0];
+                    editor.innerHTML = '<p>' + arguments[1] + '</p>';
+                    editor.dispatchEvent(new Event('input', {bubbles: true}));
+                    editor.dispatchEvent(new Event('change', {bubbles: true}));
+                """, editor, prompt_text)
+                time.sleep(1)
+                prompt_filled = True
+                log_fn(f"✅ Prompt diisi: {prompt_text[:60]}...")
+        except Exception as e:
+            log_fn(f"⚠️ Prompt method A gagal: {e}")
 
-            # Clear existing content and type new prompt
-            editor.send_keys(Keys.CONTROL + "a")
-            time.sleep(0.2)
-            editor.send_keys(Keys.DELETE)
-            time.sleep(0.2)
-
-            # Use JavaScript to set the content for reliability
-            driver.execute_script("""
-                const editor = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
-                if (editor) {
+        # Method B: Pure JS (no Selenium interaction needed)
+        if not prompt_filled:
+            try:
+                log_fn("🔄 Fallback: isi prompt via pure JS...")
+                result = driver.execute_script("""
+                    const editor = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                    if (!editor) return 'not_found';
+                    editor.scrollIntoView({block: 'center'});
+                    editor.focus();
                     editor.innerHTML = '<p>' + arguments[0] + '</p>';
                     editor.dispatchEvent(new Event('input', {bubbles: true}));
-                }
-            """, prompt_text)
-            time.sleep(1)
-            log_fn(f"✅ Prompt diisi: {prompt_text[:60]}...")
-        except Exception as e:
-            log_fn(f"❌ Gagal isi prompt: {e}")
-            return None
+                    editor.dispatchEvent(new Event('change', {bubbles: true}));
+                    // Also try dispatching keyup to trigger React state update
+                    editor.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
+                    return 'ok';
+                """, prompt_text)
+                if result == 'ok':
+                    prompt_filled = True
+                    time.sleep(1)
+                    log_fn(f"✅ Prompt diisi via JS: {prompt_text[:60]}...")
+                else:
+                    log_fn("⚠️ Editor tidak ditemukan di DOM")
+            except Exception as e:
+                log_fn(f"⚠️ Prompt method B gagal: {e}")
+
+        # Method C: Wait longer and retry with WebDriverWait
+        if not prompt_filled:
+            try:
+                log_fn("🔄 Menunggu editor muncul (max 20s)...")
+                editor = WebDriverWait(driver, 20).until(EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", editor)
+                time.sleep(1)
+                editor.click()
+                time.sleep(0.5)
+                editor.send_keys(Keys.CONTROL + "a")
+                editor.send_keys(Keys.DELETE)
+                time.sleep(0.3)
+                for chunk in [prompt_text[i:i+50] for i in range(0, len(prompt_text), 50)]:
+                    editor.send_keys(chunk)
+                    time.sleep(0.1)
+                prompt_filled = True
+                time.sleep(1)
+                log_fn(f"✅ Prompt diisi via typing: {prompt_text[:60]}...")
+            except Exception as e:
+                log_fn(f"❌ Semua metode prompt gagal: {e}")
+                return None
 
         if stop_event.is_set():
             return None
