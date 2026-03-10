@@ -75,11 +75,46 @@ def mark_uploaded(folder_name, video_name, db):
 # ═══════════════════════════════════════════════════════════════
 # CORE AUTOMATION (adapted from upload.py)
 # ═══════════════════════════════════════════════════════════════
+def kill_chrome_on_port(port):
+    """Kill any Chrome process using the specified debug port."""
+    try:
+        result = subprocess.run(
+            ['netstat', '-ano'], capture_output=True, text=True, timeout=10)
+        for line in result.stdout.splitlines():
+            if f':{port}' in line and 'LISTENING' in line:
+                parts = line.strip().split()
+                pid = parts[-1]
+                if pid.isdigit():
+                    subprocess.run(['taskkill', '/PID', pid, '/F', '/T'],
+                                   capture_output=True, timeout=10)
+    except:
+        pass
+    # Also kill any chrome.exe using the same user-data-dir
+    try:
+        subprocess.run(['taskkill', '/IM', 'chrome.exe', '/F'],
+                       capture_output=True, timeout=10)
+    except:
+        pass
+    time.sleep(2)
+
 def open_chrome_debug(user_data_dir, port):
+    # Kill zombie Chrome from previous session
+    kill_chrome_on_port(port)
+
     chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    cmd = [chrome_path, f"--remote-debugging-port={port}", f"--user-data-dir={user_data_dir}"]
+    cmd = [
+        chrome_path,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-infobars",
+        "--disable-features=InfiniteSessionRestore",
+        "https://www.tiktok.com/tiktokstudio/upload",
+    ]
     proc = subprocess.Popen(cmd)
-    time.sleep(5)
+    time.sleep(7)
     return proc
 
 def connect_selenium(port):
@@ -87,6 +122,29 @@ def connect_selenium(port):
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
     svc = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=svc, options=opts)
+
+    # Dismiss any "Restore pages" dialog
+    time.sleep(2)
+    try:
+        # Chrome restore bar has a button with text containing 'Restore'
+        restore_btns = driver.find_elements(By.XPATH,
+            "//button[contains(text(),'Restore') or contains(text(),'restore')]")
+        if restore_btns:
+            restore_btns[0].click()
+            time.sleep(2)
+    except:
+        pass
+
+    # Verify we're on an actual page, not about:blank or chrome error
+    try:
+        current = driver.current_url
+        if not current or current in ('about:blank', 'chrome://newtab/', 'data:,'):
+            driver.get("https://www.tiktok.com/tiktokstudio/upload")
+            time.sleep(5)
+    except:
+        driver.get("https://www.tiktok.com/tiktokstudio/upload")
+        time.sleep(5)
+
     return driver
 
 def navigate_upload_page(driver, force=False):
@@ -1284,21 +1342,27 @@ class TikTokSchedulerApp:
 
     def _finish(self):
         self.running = False
-        # Close Chrome by PID
+        # Close Chrome properly
         if self.chrome_proc:
             self._log(f"Menutup Chrome (PID: {self.chrome_proc.pid})...", "info")
             try:
                 if self.driver:
-
                     self.driver.quit()
                     time.sleep(2)
             except:
                 pass
             try:
                 self.chrome_proc.terminate()
-                self._log("✓ Chrome ditutup.", "success")
+                self.chrome_proc.wait(timeout=5)
             except:
                 pass
+            # Force kill jika masih hidup
+            try:
+                subprocess.run(['taskkill', '/PID', str(self.chrome_proc.pid), '/F', '/T'],
+                               capture_output=True, timeout=10)
+            except:
+                pass
+            self._log("✓ Chrome ditutup.", "success")
             self.chrome_proc = None
             self.driver = None
 
