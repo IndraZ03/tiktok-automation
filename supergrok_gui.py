@@ -619,30 +619,17 @@ class AutomationEngine:
             self.log("Selenium tidak terinstall!", "ERROR")
             return
 
-        cfg        = self.cfg
-        n_tabs     = cfg["n_tabs"]
-        n_cycles   = cfg["n_cycles"]
-        prompts    = cfg["prompts"]
-        output_dir = cfg["output_dir"]
-        merged_dir = cfg.get("merged_dir", MERGED_DIR)
+        cfg          = self.cfg
+        n_tabs       = cfg["n_tabs"]
+        n_cycles     = cfg["n_cycles"]
+        prompts      = cfg["prompts"]
+        output_dir   = cfg["output_dir"]
+        merged_dir   = cfg.get("merged_dir", MERGED_DIR)
         bahan_folder = cfg.get("bahan_folder", "")
-        alt_img    = cfg.get("alternate_image", True)
-        use_all    = cfg.get("use_image_all", True)
+        alt_img      = cfg.get("alternate_image", True)
+        use_all      = cfg.get("use_image_all", True)
 
         os.makedirs(output_dir, exist_ok=True)
-
-        # Build tab config
-        tab_config = []
-        for i in range(n_tabs):
-            p = prompts[i % len(prompts)]
-            if alt_img:
-                use_img = (i % 2 == 0)
-            else:
-                use_img = use_all
-            img = None
-            if use_img and bahan_folder:
-                img = get_random_bahan_image(bahan_folder)
-            tab_config.append((p, img))
 
         self.open_chrome()
         if self._stop.is_set(): return
@@ -651,19 +638,6 @@ class AutomationEngine:
         if not driver: return
         self.driver = driver
 
-        # Open tabs
-        self.log(f"Menyiapkan {n_tabs} tab di grok.com/imagine...")
-        while len(driver.window_handles) < n_tabs:
-            try:
-                driver.switch_to.new_window('tab')
-                driver.get(GROK_URL)
-                time.sleep(4)
-            except: break
-            if self._stop.is_set(): break
-
-        handles = list(driver.window_handles[:n_tabs])
-        self.log(f"Total tab tersedia: {len(handles)}")
-
         for cycle in range(n_cycles):
             if self._stop.is_set(): break
             self.log(f"\n=== SIKLUS {cycle+1}/{n_cycles} ===")
@@ -671,34 +645,184 @@ class AutomationEngine:
 
             downloaded_in_cycle = []
 
-            for i in range(min(n_tabs, len(handles))):
-                if self._stop.is_set(): break
-                handle = handles[i]
-                try:
-                    driver.switch_to.window(handle)
-                except Exception as e:
-                    self.log(f"Tab {i+1}: handle tidak valid – {e}", "WARN")
-                    self.set_tab_status(i, 0, "error")
-                    continue
+            # ── Phase 1: Buka tab satu per satu, klik Generate, lanjut ──
+            self.log(f"[Phase 1] Membuka {n_tabs} tab & klik Generate...")
+            tab_handles   = []   # window handle per tab
+            tab_status    = {}   # idx -> "generating" | "done" | "failed"
+            tab_progress  = {}   # idx -> int pct
+            tab_start_time = time.time()
 
-                prompt_text, image_path = tab_config[i]
-                # Rotate image each cycle
-                if cfg.get("alternate_image", True):
+            for i in range(n_tabs):
+                if self._stop.is_set(): break
+
+                # Tentukan prompt & gambar
+                prompt_text = prompts[i % len(prompts)]
+                if alt_img:
                     use_img = (i % 2 == 0)
                 else:
-                    use_img = cfg.get("use_image_all", True)
+                    use_img = use_all
+                image_path = None
                 if use_img and bahan_folder:
                     image_path = get_random_bahan_image(bahan_folder)
 
-                ok = self.setup_tab(driver, image_path, prompt_text, i)
-                if not ok:
-                    self.log(f"Tab {i+1}: Setup gagal, skip", "WARN")
-                    self.set_tab_status(i, 0, "error")
-                    continue
+                # Buka tab baru (tab pertama gunakan tab yang ada)
+                if i == 0:
+                    # Pakai tab yang sudah ada atau tab pertama
+                    if driver.window_handles:
+                        driver.switch_to.window(driver.window_handles[0])
+                    driver.get(GROK_URL)
+                    time.sleep(3)
+                else:
+                    try:
+                        driver.switch_to.new_window('tab')
+                        driver.get(GROK_URL)
+                        time.sleep(3)
+                    except Exception as e:
+                        self.log(f"Tab {i+1}: Gagal buka tab baru – {e}", "WARN")
+                        tab_status[i] = "failed"
+                        tab_progress[i] = 0
+                        continue
 
-                result = self.wait_and_download(driver, i, output_dir)
-                if result:
-                    downloaded_in_cycle.append(result)
+                handle = driver.current_window_handle
+                tab_handles.append(handle)
+
+                self.log(f"[Tab {i+1}] 🌐 Halaman dimuat, setup & generate...")
+
+                ok = self.setup_tab(driver, image_path, prompt_text, i)
+                if ok:
+                    tab_status[i]   = "generating"
+                    tab_progress[i] = 0
+                    self.log(f"[Tab {i+1}] ✅ Generate diklik, lanjut ke tab berikutnya")
+                else:
+                    tab_status[i]   = "failed"
+                    tab_progress[i] = 0
+                    self.log(f"[Tab {i+1}] ❌ Setup gagal, skip", "WARN")
+
+                time.sleep(1)  # jeda kecil sebelum tab berikutnya
+
+            if self._stop.is_set(): break
+
+            actual_tabs = len(tab_handles)
+            self.log(f"[Phase 1 selesai] {actual_tabs} tab generate berjalan.")
+
+            # ── Phase 2: Round-Robin monitoring semua tab ──
+            self.log("[Phase 2] Monitoring progress semua tab (round-robin)...")
+            timeout_start = time.time()
+            MAX_TIMEOUT   = 600  # 10 menit per siklus
+
+            while not self._stop.is_set():
+                # Cek apakah masih ada tab yang generate
+                active = [i for i, s in tab_status.items() if s == "generating"]
+                if not active:
+                    self.log("✅ Semua tab selesai di siklus ini!")
+                    break
+
+                if time.time() - timeout_start > MAX_TIMEOUT:
+                    self.log("⏰ Timeout 10 menit, tandai sisa tab sebagai gagal", "WARN")
+                    for i in active:
+                        tab_status[i] = "failed"
+                        self.set_tab_status(i, 0, "error")
+                    break
+
+                for i in active:
+                    if self._stop.is_set(): break
+
+                    # Jika handle sudah tidak valid (tab ketutup), skip
+                    if i >= len(tab_handles):
+                        tab_status[i] = "failed"
+                        continue
+
+                    try:
+                        driver.switch_to.window(tab_handles[i])
+                    except Exception as e:
+                        self.log(f"[Tab {i+1}] Handle tidak valid: {e}", "WARN")
+                        tab_status[i] = "failed"
+                        self.set_tab_status(i, 0, "error")
+                        continue
+
+                    # Baca progress
+                    try:
+                        pct_text = driver.execute_script("""
+                            const spans = document.querySelectorAll('span.tabular-nums');
+                            for (const s of spans) {
+                                const t = s.textContent.trim();
+                                if (t.includes('%')) return t;
+                            }
+                            const ov = document.querySelector('div.flex.justify-center.items-center.gap-2');
+                            if (ov) {
+                                for (const n of ov.querySelectorAll('span'))
+                                    if (n.textContent.includes('%')) return n.textContent.trim();
+                            }
+                            return '';
+                        """)
+                        if pct_text:
+                            m = re.search(r'(\d+)', pct_text)
+                            if m:
+                                new_pct = int(m.group(1))
+                                if new_pct != tab_progress.get(i, 0):
+                                    tab_progress[i] = new_pct
+                                    self.set_tab_status(i, new_pct, "waiting")
+                                    # Tampilkan summary progress
+                                    parts = []
+                                    for ti in range(actual_tabs):
+                                        s = tab_status.get(ti, "?")
+                                        p = tab_progress.get(ti, 0)
+                                        if s == "done":    parts.append(f"T{ti+1}:✅")
+                                        elif s == "failed": parts.append(f"T{ti+1}:❌")
+                                        else:              parts.append(f"T{ti+1}:{p}%")
+                                    self.log(f"📊 {' | '.join(parts)}")
+                    except: pass
+
+                    # Cek status (done/generating/idle)
+                    try:
+                        is_generating = driver.execute_script("""
+                            const spans = document.querySelectorAll('span');
+                            for (const s of spans) {
+                                const t = s.textContent;
+                                if (t.includes('Menghasilkan') || t.includes('Generating')) return true;
+                            }
+                            return false;
+                        """)
+                    except: is_generating = False
+
+                    try:
+                        dl_btns = driver.find_elements(By.CSS_SELECTOR,
+                            'button[aria-label="Download"], button[aria-label="Unduh"]')
+                        has_download = bool(dl_btns)
+                    except: has_download = False
+
+                    generation_started = tab_progress.get(i, 0) > 0
+
+                    if (has_download and not is_generating) or \
+                       (generation_started and not is_generating and tab_progress.get(i, 0) > 0):
+                        # Video selesai, langsung download
+                        self.log(f"[Tab {i+1}] ✅ Video selesai! Mengunduh...")
+                        self.set_tab_status(i, 100, "downloading")
+                        video_path = self.wait_and_download(driver, i, output_dir)
+                        if video_path:
+                            downloaded_in_cycle.append(video_path)
+                            tab_status[i] = "done"
+                            self.set_tab_status(i, 100, "success")
+                        else:
+                            tab_status[i] = "failed"
+                            self.set_tab_status(i, 0, "error")
+                        # Update timestamp agar tab berikutnya tidak konflik file
+                        tab_start_time = time.time()
+
+                time.sleep(3)  # tunggu sebelum ronde berikutnya
+
+            # ── Phase 3: Tutup tab ekstra untuk siklus berikutnya ──
+            if cycle < n_cycles - 1 and not self._stop.is_set():
+                self.log("[Phase 3] Menutup tab ekstra, siap siklus berikutnya...")
+                all_handles = driver.window_handles
+                for h in all_handles[1:]:
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except: pass
+                if driver.window_handles:
+                    driver.switch_to.window(driver.window_handles[0])
+                time.sleep(2)
 
             self.log(f"Siklus {cycle+1} selesai. Download: {len(downloaded_in_cycle)} video.")
 
