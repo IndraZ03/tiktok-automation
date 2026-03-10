@@ -1276,7 +1276,9 @@ class TikTokSchedulerApp:
             self._log(f"Menutup Chrome (PID: {self.chrome_proc.pid})...", "info")
             try:
                 if self.driver:
+
                     self.driver.quit()
+                    time.sleep(2)
             except:
                 pass
             try:
