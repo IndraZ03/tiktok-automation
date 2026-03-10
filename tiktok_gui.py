@@ -708,15 +708,17 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
     # ── Post / Schedule button ──
     log("Klik tombol Schedule...")
     time.sleep(2)
-    
+
     # Specifically target the button that contains text 'Schedule' (not 'Save Draft')
     # The Schedule button has: data-e2e="post_video_button", type-primary, text='Schedule'
+    schedule_clicked = False
     try:
         sch_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
             (By.XPATH, "//button[@data-e2e='post_video_button' and .//div[contains(text(),'Schedule')]]")))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sch_btn)
         time.sleep(1)
         driver.execute_script("arguments[0].click();", sch_btn)
+        schedule_clicked = True
         log("✓ Tombol Schedule diklik")
     except Exception as e_sch:
         log(f"⚠ Selector utama gagal: {e_sch}, mencoba fallback...")
@@ -727,6 +729,7 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sch_btn2)
             time.sleep(1)
             driver.execute_script("arguments[0].click();", sch_btn2)
+            schedule_clicked = True
             log("✓ Tombol Schedule diklik (fallback)")
         except:
             # Last resort: find all buttons, pick the one with text Schedule
@@ -735,19 +738,29 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
                 try:
                     if b.text.strip() == "Schedule" and b.is_displayed():
                         driver.execute_script("arguments[0].click();", b)
+                        schedule_clicked = True
                         log("✓ Tombol Schedule diklik (text match)")
                         break
                 except:
                     continue
 
-    # Confirm popup
-    try:
-        cb = WebDriverWait(driver, 7).until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[.//div[text()='Schedule' or text()='Confirm']]")))
-        driver.execute_script("arguments[0].click();", cb)
-        log("✓ Konfirmasi diklik")
-    except:
-        pass
+    # Tunggu sebentar agar halaman bereaksi (popup muncul atau langsung terkirim)
+    time.sleep(3)
+
+    # Confirm popup — HANYA cari di dalam dialog/modal, agar tidak klik ulang
+    # tombol Schedule yang sama
+    if schedule_clicked:
+        try:
+            # Cek apakah ada dialog/modal konfirmasi
+            confirm_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                (By.XPATH,
+                 "//div[contains(@class,'modal') or contains(@class,'Modal') or contains(@class,'dialog') or contains(@class,'Dialog') or @role='dialog']"
+                 "//button[.//div[text()='Schedule' or text()='Confirm']]")))
+            driver.execute_script("arguments[0].click();", confirm_btn)
+            log("✓ Konfirmasi popup diklik")
+        except:
+            # Tidak ada popup konfirmasi, mungkin langsung terjadwal
+            log("ℹ Tidak ada popup konfirmasi (langsung terjadwal)")
 
     log("✓ Video berhasil di-schedule!")
     time.sleep(3)
