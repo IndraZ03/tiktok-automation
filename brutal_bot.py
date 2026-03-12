@@ -909,7 +909,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             active_gen_task.pop(uid, None)
         t = threading.Thread(target=_gen, daemon=True)
         active_gen_task[uid] = {"stop": stop_evt, "thread": t}; t.start()
-        await q.edit_message_text(f"<b>Generate dimulai!</b>\nTarget: {needed} video raw -> {needed//2} video 20 detik",
+        await q.edit_message_text(f"<b>Generate dimulai!</b>\nTarget: {needed*2} video raw -> {needed} video 20 detik",
                                   parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "stop_gen":
