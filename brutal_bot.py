@@ -655,7 +655,9 @@ def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event):
                 time.sleep(3)
                 do_upload_file(driver, os.path.normpath(path), log_fn)
                 time.sleep(5)
-                do_post_video(driver, deskripsi, "", "", log_fn, sched_dt, stop_event,
+                # Tambah nomor urut [1], [2], dst di depan deskripsi
+                deskripsi_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
+                do_post_video(driver, deskripsi_with_num, "", "", log_fn, sched_dt, stop_event,
                               add_sound=False, add_product=False, skip_switches=True,
                               hashtags=hashtags if hashtags else None)
                 try: os.remove(path)
