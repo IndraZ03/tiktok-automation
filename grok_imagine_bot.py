@@ -256,11 +256,11 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
                              user_data_dir=None, port=None):
     """
     Automate one video generation on grok.com/imagine:
-    1. Click Attach button → Animate Image → select file
+    1. Upload image via file input (with reload-retry on failure)
     2. Type prompt text
     3. Click generate button
     4. Track progress percentage
-    5. Download the result video
+    5. Download the result video (multiple methods)
     Returns: path to downloaded video or None
     """
     import requests as req_lib
@@ -284,219 +284,304 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
         if stop_event.is_set():
             return None
 
-        wait = WebDriverWait(driver, 20)
         time.sleep(3)
 
-        # ── Step 1: Upload image for Animate Image ──
-        if image_path and os.path.exists(image_path):
-            log_fn(f"📷 Mengunggah gambar: {os.path.basename(image_path)}")
-            image_uploaded = False
-            abs_image = os.path.abspath(image_path)
+        # ─────────────────────────────────────────────────────────
+        # UPLOAD + PROMPT: outer retry loop (reload on full failure)
+        # Each iteration: try upload → fill prompt → if both ok, break
+        # ─────────────────────────────────────────────────────────
+        image_uploaded = False
+        prompt_filled  = False
+        abs_image = os.path.abspath(image_path) if (image_path and os.path.exists(image_path)) else None
 
-            def _count_uploaded_images(drv):
-                """Count currently uploaded/preview images on page."""
+        def _count_uploaded_images(drv):
+            try:
+                return drv.execute_script("""
+                    let c = 0;
+                    c += document.querySelectorAll('img[src*="assets.grok.com"]').length;
+                    c += document.querySelectorAll('img[src^="blob:"]').length;
+                    c += document.querySelectorAll('div.group.relative img').length;
+                    return c;
+                """)
+            except:
+                return 0
+
+        def _verify_image_uploaded(drv, before_count, timeout=10):
+            for _ in range(timeout * 2):
                 try:
-                    return drv.execute_script("""
-                        let count = 0;
-                        // Count preview images from grok assets
-                        const imgs = document.querySelectorAll('img[src*="assets.grok.com"]');
-                        count += imgs.length;
-                        // Count any blob preview images
-                        const blobs = document.querySelectorAll('img[src^="blob:"]');
-                        count += blobs.length;
-                        // Count preview containers with images
-                        const groups = document.querySelectorAll('div.group.relative img');
-                        count += groups.length;
-                        return count;
+                    if _count_uploaded_images(drv) > before_count:
+                        return True
+                    has_preview = drv.execute_script("""
+                        const g = document.querySelector('div.group.relative');
+                        if (g) { const r = g.getBoundingClientRect();
+                            if (r.width > 50 && r.height > 50) return true; }
+                        return false;
                     """)
+                    if has_preview:
+                        return True
                 except:
-                    return 0
+                    pass
+                time.sleep(0.5)
+            return False
 
-            # Count images BEFORE upload attempt
-            images_before = _count_uploaded_images(driver)
-            log_fn(f"📊 Jumlah gambar sebelum upload: {images_before}")
+        def _try_upload_image(drv, a_img, before_count):
+            """Try all upload methods. Returns True if verified uploaded."""
+            # Method A: find existing file inputs
+            try:
+                inputs = drv.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                if inputs:
+                    log_fn(f"🔍 {len(inputs)} file input ditemukan")
+                    for idx2, fi in enumerate(inputs):
+                        try:
+                            drv.execute_script(
+                                "arguments[0].style.cssText='display:block!important;"
+                                "visibility:visible!important;opacity:1!important;"
+                                "position:absolute;top:0;left:0;width:1px;height:1px;';", fi)
+                            fi.send_keys(a_img)
+                            log_fn(f"📤 Sent ke input[{idx2}], verifikasi...")
+                            time.sleep(3)
+                            if _verify_image_uploaded(drv, before_count):
+                                log_fn("✅ Upload + verifikasi berhasil (Method A)!")
+                                return True
+                            log_fn(f"⚠️ Input[{idx2}] tidak ada preview")
+                        except Exception as ex:
+                            log_fn(f"⚠️ Input[{idx2}] err: {ex}")
+            except Exception as ex:
+                log_fn(f"⚠️ Method A err: {ex}")
 
-            def _verify_image_uploaded(drv, before_count, timeout=8):
-                """Check if a NEW image appeared after upload."""
-                for _ in range(timeout * 2):
-                    try:
-                        after_count = _count_uploaded_images(drv)
-                        if after_count > before_count:
-                            return True
-                        # Also check if the page state changed to show image
-                        has_preview = drv.execute_script("""
-                            // Check if there's an image preview container visible
-                            const group = document.querySelector('div.group.relative');
-                            if (group) {
-                                const rect = group.getBoundingClientRect();
-                                if (rect.width > 50 && rect.height > 50) return true;
-                            }
-                            return false;
-                        """)
-                        if has_preview:
-                            return True
-                    except:
-                        pass
-                    time.sleep(0.5)
-                return False
+            # Method B: inject new file input
+            try:
+                log_fn("🔄 Method B: inject file input...")
+                iid = f"_gbf_{int(time.time())}"
+                drv.execute_script(f"""
+                    let o = document.getElementById('{iid}'); if(o) o.remove();
+                    const inp = document.createElement('input');
+                    inp.type='file'; inp.id='{iid}'; inp.accept='image/*';
+                    inp.style.cssText='position:absolute;top:0;left:0;z-index:99999;"
+                                      "display:block;width:1px;height:1px;';
+                    document.body.appendChild(inp);
+                """)
+                time.sleep(0.5)
+                inj = drv.find_element(By.ID, iid)
+                inj.send_keys(a_img)
+                log_fn("📤 Sent ke injected input, verifikasi...")
+                time.sleep(3)
+                if _verify_image_uploaded(drv, before_count):
+                    log_fn("✅ Upload + verifikasi berhasil (Method B)!")
+                    return True
+                log_fn("⚠️ Injected input tidak ada preview")
+            except Exception as ex:
+                log_fn(f"⚠️ Method B err: {ex}")
 
-            # Retry loop: up to 3 attempts
-            for upload_attempt in range(1, 4):
-                if image_uploaded:
-                    break
-                if upload_attempt > 1:
-                    log_fn(f"🔄 Upload ulang gambar (attempt {upload_attempt}/3)...")
-                    time.sleep(2)
+            return False
 
-                # --- Method A: Find ALL file inputs and try each one ---
+        def _try_fill_prompt(drv, p_text):
+            """Try filling prompt. Returns True on success."""
+            # Method A: click + JS innerHTML
+            try:
+                ed = drv.execute_script("""
+                    const e = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                    if (e) { e.scrollIntoView({behavior:'smooth',block:'center'}); return e; }
+                    return null;
+                """)
+                if ed:
+                    time.sleep(0.4)
+                    drv.execute_script("arguments[0].focus();", ed)
+                    time.sleep(0.3)
+                    ed.click()
+                    time.sleep(0.3)
+                    ed.send_keys(Keys.CONTROL + "a")
+                    time.sleep(0.2)
+                    ed.send_keys(Keys.DELETE)
+                    time.sleep(0.2)
+                    drv.execute_script("""
+                        const e=arguments[0];
+                        e.innerHTML='<p>'+arguments[1]+'</p>';
+                        e.dispatchEvent(new Event('input',{bubbles:true}));
+                        e.dispatchEvent(new Event('change',{bubbles:true}));
+                        e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
+                    """, ed, p_text)
+                    time.sleep(1)
+                    # Verify prompt actually has text
+                    actual = drv.execute_script(
+                        "return document.querySelector('div.tiptap.ProseMirror[contenteditable=\"true\"]')?.textContent || '';")
+                    if actual.strip():
+                        log_fn(f"✅ Prompt diisi (Method A): {p_text[:60]}...")
+                        return True
+            except Exception as ex:
+                log_fn(f"⚠️ Prompt Method A: {ex}")
+
+            # Method B: pure JS
+            try:
+                log_fn("🔄 Prompt Method B: pure JS...")
+                r = drv.execute_script("""
+                    const e=document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                    if (!e) return 'not_found';
+                    e.scrollIntoView({block:'center'}); e.focus();
+                    e.innerHTML='<p>'+arguments[0]+'</p>';
+                    e.dispatchEvent(new Event('input',{bubbles:true}));
+                    e.dispatchEvent(new Event('change',{bubbles:true}));
+                    e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
+                    return 'ok';
+                """, p_text)
+                if r == 'ok':
+                    time.sleep(1)
+                    actual = drv.execute_script(
+                        "return document.querySelector('div.tiptap.ProseMirror[contenteditable=\"true\"]')?.textContent || '';")
+                    if actual.strip():
+                        log_fn(f"✅ Prompt diisi (Method B): {p_text[:60]}...")
+                        return True
+                else:
+                    log_fn("⚠️ Editor tidak ada di DOM")
+            except Exception as ex:
+                log_fn(f"⚠️ Prompt Method B: {ex}")
+
+            # Method C: WebDriverWait + typing
+            try:
+                log_fn("🔄 Prompt Method C: typing...")
+                ed = WebDriverWait(drv, 20).until(EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
+                drv.execute_script("arguments[0].scrollIntoView({block:'center'});", ed)
+                time.sleep(1)
+                ed.click()
+                time.sleep(0.5)
+                ed.send_keys(Keys.CONTROL + "a")
+                ed.send_keys(Keys.DELETE)
+                time.sleep(0.3)
+                for chunk in [p_text[i:i+50] for i in range(0, len(p_text), 50)]:
+                    ed.send_keys(chunk)
+                    time.sleep(0.1)
+                time.sleep(1)
+                actual = drv.execute_script(
+                    "return document.querySelector('div.tiptap.ProseMirror[contenteditable=\"true\"]')?.textContent || '';")
+                if actual.strip():
+                    log_fn(f"✅ Prompt diisi (Method C): {p_text[:60]}...")
+                    return True
+            except Exception as ex:
+                log_fn(f"⚠️ Prompt Method C: {ex}")
+
+            return False
+
+        # ── OUTER RETRY LOOP: upload + prompt (max 4 full attempts) ──
+        OUTER_MAX = 4
+        for outer_attempt in range(1, OUTER_MAX + 1):
+            if stop_event.is_set():
+                return None
+
+            if outer_attempt > 1:
+                log_fn(f"🔄 RELOAD halaman (outer attempt {outer_attempt}/{OUTER_MAX})...")
                 try:
-                    file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                    if file_inputs:
-                        log_fn(f"🔍 Ditemukan {len(file_inputs)} file input, mencoba masing-masing...")
-                        for idx, fi in enumerate(file_inputs):
-                            try:
-                                driver.execute_script(
-                                    "arguments[0].style.display='block';"
-                                    "arguments[0].style.visibility='visible';"
-                                    "arguments[0].style.opacity='1';"
-                                    "arguments[0].style.height='1px';"
-                                    "arguments[0].style.width='1px';"
-                                    "arguments[0].style.position='absolute';", fi)
-                                fi.send_keys(abs_image)
-                                log_fn(f"📤 Sent file ke input[{idx}], verifikasi...")
-                                time.sleep(3)
-                                if _verify_image_uploaded(driver, images_before):
-                                    image_uploaded = True
-                                    log_fn("✅ Gambar berhasil diupload dan terverifikasi!")
-                                    break
-                                else:
-                                    log_fn(f"⚠️ Input[{idx}] tidak menghasilkan preview, coba berikutnya...")
-                            except Exception as e:
-                                log_fn(f"⚠️ Input[{idx}] gagal: {e}")
-                    else:
-                        log_fn("⚠️ Tidak ditemukan file input di halaman")
-                except Exception as e:
-                    log_fn(f"⚠️ Pencarian file input gagal: {e}")
-
-                if image_uploaded:
-                    break
-
-                # --- Method B: Inject fresh file input via JS ---
-                try:
-                    log_fn("🔄 Fallback: inject file input via JS...")
-                    inject_id = f"grok_bot_file_input_{upload_attempt}"
-                    driver.execute_script(f"""
-                        // Remove old injected input if exists
-                        const old = document.getElementById('{inject_id}');
-                        if (old) old.remove();
-                        const input = document.createElement('input');
-                        input.type = 'file';
-                        input.id = '{inject_id}';
-                        input.accept = 'image/*';
-                        input.style.cssText = 'position:absolute;top:0;left:0;z-index:99999;display:block;width:1px;height:1px;';
-                        document.body.appendChild(input);
-                    """)
-                    time.sleep(0.5)
-                    injected_input = driver.find_element(By.ID, inject_id)
-                    injected_input.send_keys(abs_image)
-                    log_fn("📤 Sent file ke injected input, verifikasi...")
+                    driver.refresh()
+                    time.sleep(6)
+                    if not navigate_to_grok(driver, log_fn):
+                        log_fn("❌ Gagal navigasi ulang")
+                        continue
                     time.sleep(3)
-                    if _verify_image_uploaded(driver, images_before):
-                        image_uploaded = True
-                        log_fn("✅ Gambar berhasil diupload via inject dan terverifikasi!")
-                    else:
-                        log_fn("⚠️ Injected input tidak menghasilkan preview")
                 except Exception as e:
-                    log_fn(f"⚠️ Inject file input gagal: {e}")
+                    log_fn(f"⚠️ Reload gagal: {e}")
+                    continue
 
-                # --- Method C: Reload page and retry ---
-                if not image_uploaded and upload_attempt < 3:
-                    log_fn("🔄 Reload halaman untuk retry upload...")
-                    try:
-                        driver.refresh()
-                        time.sleep(5)
-                        if not navigate_to_grok(driver, log_fn):
-                            log_fn("❌ Gagal navigasi ulang setelah refresh")
-                            continue
+            image_uploaded = False
+            prompt_filled  = False
+            images_before = _count_uploaded_images(driver)
+
+            # ── Upload image ──
+            if abs_image:
+                log_fn(f"📷 Mengunggah gambar: {os.path.basename(abs_image)} (outer {outer_attempt})")
+                # Inner upload retry (2 sub-attempts before outer reload)
+                for inner in range(1, 3):
+                    if _try_upload_image(driver, abs_image, images_before):
+                        image_uploaded = True
+                        break
+                    if inner < 2:
+                        log_fn(f"⚠️ Inner upload attempt {inner} gagal, tunggu 3s...")
                         time.sleep(3)
-                    except Exception as e:
-                        log_fn(f"⚠️ Refresh gagal: {e}")
 
-            if not image_uploaded:
-                log_fn("❌ Semua metode upload gambar gagal setelah 3 attempt!")
-        else:
-            log_fn("⚠️ Tidak ada gambar, generate tanpa gambar")
+                if not image_uploaded:
+                    log_fn(f"❌ Upload gagal (outer {outer_attempt}), akan reload...")
+                    continue  # trigger outer reload
+            else:
+                log_fn("⚠️ Tidak ada gambar, generate tanpa gambar")
+                image_uploaded = True  # skip upload check
+
+            if stop_event.is_set():
+                return None
+
+            # ── Fill prompt (inside outer loop) ──
+            log_fn("📝 Mengisi prompt...")
+            prompt_filled = _try_fill_prompt(driver, prompt_text)
+
+            if not prompt_filled:
+                log_fn(f"❌ Prompt gagal diisi (outer {outer_attempt}), akan reload...")
+                continue  # trigger outer reload
+
+            # Both upload + prompt OK — break outer loop
+            log_fn("✅ Upload & prompt berhasil, lanjut ke settings...")
+            break  # exit outer retry loop
 
         if stop_event.is_set():
+            return None
+
+        # If prompt still not filled after all retries, abort
+        if not prompt_filled:
+            log_fn("❌ Prompt gagal diisi setelah semua attempt, abort!")
             return None
 
         # ── Step 3: Click Settings/Pengaturan → Buat Video ──
         log_fn("⚙️ Klik tombol Settings...")
         settings_opened = False
 
-        # Method A: Selenium native click (triggers React events properly)
+        # Method A: Selenium native click
         try:
             settings_btns = driver.find_elements(By.CSS_SELECTOR,
                 'button[aria-label="Settings"], button[aria-label="Pengaturan"]')
             if settings_btns:
                 ActionChains(driver).move_to_element(settings_btns[0]).click().perform()
                 time.sleep(1.5)
-                # Verify dropdown opened
-                menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
-                if menu_items:
+                if driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]'):
                     settings_opened = True
                     log_fn("✅ Settings dropdown terbuka (Selenium click)")
         except Exception as e:
             log_fn(f"⚠️ Selenium click gagal: {e}")
 
-        # Method B: JS dispatch full pointer events (for Radix UI)
+        # Method B: JS pointer events
         if not settings_opened:
             try:
-                log_fn("🔄 Mencoba klik Settings via pointer events...")
                 driver.execute_script("""
                     const btns = document.querySelectorAll('button');
                     for (const btn of btns) {
-                        const label = btn.getAttribute('aria-label') || '';
-                        if (label === 'Settings' || label === 'Pengaturan') {
-                            btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
-                            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                            btn.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, cancelable: true}));
-                            btn.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                            btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        const l = btn.getAttribute('aria-label') || '';
+                        if (l === 'Settings' || l === 'Pengaturan') {
+                            ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev =>
+                                btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev, {bubbles:true,cancelable:true})));
                             return true;
                         }
-                    }
-                    return false;
+                    } return false;
                 """)
                 time.sleep(1.5)
-                menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
-                if menu_items:
+                if driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]'):
                     settings_opened = True
                     log_fn("✅ Settings dropdown terbuka (pointer events)")
             except Exception as e:
                 log_fn(f"⚠️ Pointer events gagal: {e}")
 
-        # Method C: Focus + Enter key
+        # Method C: Enter key
         if not settings_opened:
             try:
-                log_fn("🔄 Mencoba klik Settings via focus+enter...")
-                settings_btns = driver.find_elements(By.CSS_SELECTOR,
+                sb = driver.find_elements(By.CSS_SELECTOR,
                     'button[aria-label="Settings"], button[aria-label="Pengaturan"]')
-                if settings_btns:
-                    settings_btns[0].send_keys(Keys.ENTER)
+                if sb:
+                    sb[0].send_keys(Keys.ENTER)
                     time.sleep(1.5)
-                    menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
-                    if menu_items:
+                    if driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]'):
                         settings_opened = True
                         log_fn("✅ Settings dropdown terbuka (Enter key)")
             except Exception as e:
                 log_fn(f"⚠️ Enter key gagal: {e}")
 
-        # Now select "Buat Video" / "Make Video"
         if settings_opened:
             log_fn("🎬 Memilih 'Buat Video'...")
             try:
-                # Method 1: Selenium click on menu item
                 menu_items = driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]')
                 clicked = False
                 for item in menu_items:
@@ -505,121 +590,28 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
                         ActionChains(driver).move_to_element(item).click().perform()
                         clicked = True
                         break
-
                 if not clicked:
-                    # Method 2: JS click on menu item
                     driver.execute_script("""
                         const items = document.querySelectorAll('div[role="menuitem"]');
                         for (const item of items) {
-                            const txt = item.textContent || '';
-                            if (txt.includes('Buat Video') || txt.includes('Make Video') || txt.includes('Make video')) {
-                                item.click(); return true;
-                            }
+                            const t = item.textContent || '';
+                            if (t.includes('Buat Video') || t.includes('Make Video') || t.includes('Make video')) {
+                                item.click(); return true; }
                         }
                         const spans = document.querySelectorAll('span.font-semibold');
-                        for (const span of spans) {
-                            const t = span.textContent.trim();
+                        for (const s of spans) {
+                            const t = s.textContent.trim();
                             if (t === 'Buat Video' || t === 'Make Video') {
-                                span.closest('div[role="menuitem"]')?.click() || span.parentElement.click();
-                                return true;
-                            }
-                        }
-                        return false;
+                                (s.closest('div[role="menuitem"]') || s.parentElement).click();
+                                return true; }
+                        } return false;
                     """)
-
                 time.sleep(1)
                 log_fn("✅ Mode 'Buat Video' dipilih!")
             except Exception as e:
                 log_fn(f"⚠️ Gagal pilih Buat Video: {e}")
         else:
             log_fn("⚠️ Settings dropdown tidak terbuka, lanjut tanpa pilih mode")
-
-        if stop_event.is_set():
-            return None
-
-        # ── Step 2: Type the prompt ──
-        log_fn("📝 Mengisi prompt...")
-        prompt_filled = False
-
-        # Method A: Scroll to editor → click → type
-        try:
-            editor = driver.execute_script("""
-                const ed = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
-                if (ed) {
-                    ed.scrollIntoView({behavior: 'smooth', block: 'center'});
-                    return ed;
-                }
-                return null;
-            """)
-            if editor:
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].focus();", editor)
-                time.sleep(0.3)
-                editor.click()
-                time.sleep(0.3)
-                editor.send_keys(Keys.CONTROL + "a")
-                time.sleep(0.2)
-                editor.send_keys(Keys.DELETE)
-                time.sleep(0.2)
-                driver.execute_script("""
-                    const editor = arguments[0];
-                    editor.innerHTML = '<p>' + arguments[1] + '</p>';
-                    editor.dispatchEvent(new Event('input', {bubbles: true}));
-                    editor.dispatchEvent(new Event('change', {bubbles: true}));
-                """, editor, prompt_text)
-                time.sleep(1)
-                prompt_filled = True
-                log_fn(f"✅ Prompt diisi: {prompt_text[:60]}...")
-        except Exception as e:
-            log_fn(f"⚠️ Prompt method A gagal: {e}")
-
-        # Method B: Pure JS (no Selenium interaction needed)
-        if not prompt_filled:
-            try:
-                log_fn("🔄 Fallback: isi prompt via pure JS...")
-                result = driver.execute_script("""
-                    const editor = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
-                    if (!editor) return 'not_found';
-                    editor.scrollIntoView({block: 'center'});
-                    editor.focus();
-                    editor.innerHTML = '<p>' + arguments[0] + '</p>';
-                    editor.dispatchEvent(new Event('input', {bubbles: true}));
-                    editor.dispatchEvent(new Event('change', {bubbles: true}));
-                    // Also try dispatching keyup to trigger React state update
-                    editor.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
-                    return 'ok';
-                """, prompt_text)
-                if result == 'ok':
-                    prompt_filled = True
-                    time.sleep(1)
-                    log_fn(f"✅ Prompt diisi via JS: {prompt_text[:60]}...")
-                else:
-                    log_fn("⚠️ Editor tidak ditemukan di DOM")
-            except Exception as e:
-                log_fn(f"⚠️ Prompt method B gagal: {e}")
-
-        # Method C: Wait longer and retry with WebDriverWait
-        if not prompt_filled:
-            try:
-                log_fn("🔄 Menunggu editor muncul (max 20s)...")
-                editor = WebDriverWait(driver, 20).until(EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", editor)
-                time.sleep(1)
-                editor.click()
-                time.sleep(0.5)
-                editor.send_keys(Keys.CONTROL + "a")
-                editor.send_keys(Keys.DELETE)
-                time.sleep(0.3)
-                for chunk in [prompt_text[i:i+50] for i in range(0, len(prompt_text), 50)]:
-                    editor.send_keys(chunk)
-                    time.sleep(0.1)
-                prompt_filled = True
-                time.sleep(1)
-                log_fn(f"✅ Prompt diisi via typing: {prompt_text[:60]}...")
-            except Exception as e:
-                log_fn(f"❌ Semua metode prompt gagal: {e}")
-                return None
 
         if stop_event.is_set():
             return None
@@ -734,101 +726,167 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
         filename = f"grok_{int(time.time())}.mp4"
         save_path = os.path.join(output_dir, filename)
         downloaded = False
+        downloads_folder = os.path.expanduser("~/Downloads")
 
-        # Click the Download button
-        dl_clicked = False
-
-        # Method A: Selenium click
+        # ── Sub-step: dismiss/hide textarea that blocks Download button ──
         try:
-            dl_btns = driver.find_elements(By.CSS_SELECTOR,
-                'button[aria-label="Download"], button[aria-label="Unduh"]')
-            if dl_btns:
-                ActionChains(driver).move_to_element(dl_btns[0]).click().perform()
-                dl_clicked = True
-                log_fn("✅ Tombol Download diklik (Selenium)")
+            driver.execute_script("""
+                // Hide the tiptap ProseMirror editor div so it doesn't block Download button
+                const editors = document.querySelectorAll('div[contenteditable="true"]');
+                editors.forEach(e => { e.style.pointerEvents = 'none'; e.style.zIndex = '-1'; });
+                // Also hide its parent wrappers if they cover the button
+                const wrappers = document.querySelectorAll('.tiptap, .ProseMirror');
+                wrappers.forEach(w => { w.style.pointerEvents = 'none'; w.style.zIndex = '-1'; });
+            """)
+            time.sleep(0.5)
+            log_fn("🧹 Editor div disembunyikan (agar tidak tutup Download button)")
         except Exception as e:
-            log_fn(f"⚠️ Selenium click Download gagal: {e}")
+            log_fn(f"⚠️ Gagal sembunyikan editor: {e}")
 
-        # Method B: JS pointer events
-        if not dl_clicked:
+        # ── Method 0: Extract video URL from DOM and download with requests ──
+        video_url = None
+        try:
+            video_url = driver.execute_script("""
+                // Try video element src
+                const videos = document.querySelectorAll('video');
+                for (const v of videos) {
+                    if (v.src && (v.src.startsWith('http') || v.src.startsWith('blob'))) return v.src;
+                    const src = v.querySelector('source');
+                    if (src && src.src) return src.src;
+                }
+                // Try anchor download links
+                const links = document.querySelectorAll('a[download], a[href*=".mp4"]');
+                for (const a of links) { if (a.href) return a.href; }
+                return null;
+            """)
+        except Exception as e:
+            log_fn(f"⚠️ Extract video URL gagal: {e}")
+
+        if video_url and video_url.startswith('http') and not video_url.startswith('blob'):
+            log_fn(f"🔗 URL video ditemukan, download via requests...")
             try:
-                dl_clicked = driver.execute_script("""
-                    const btns = document.querySelectorAll('button');
-                    for (const btn of btns) {
-                        const label = btn.getAttribute('aria-label') || '';
-                        if (label === 'Download' || label === 'Unduh') {
-                            btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));
-                            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-                            btn.dispatchEvent(new PointerEvent('pointerup', {bubbles:true}));
-                            btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-                            btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
-                            return true;
-                        }
-                    }
-                    return false;
-                """)
-                if dl_clicked:
-                    log_fn("✅ Tombol Download diklik (pointer events)")
+                cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+                headers = {'User-Agent': driver.execute_script('return navigator.userAgent;'),
+                           'Referer': GROK_URL}
+                resp = req_lib.get(video_url, cookies=cookies, headers=headers,
+                                   stream=True, timeout=120)
+                if resp.status_code == 200:
+                    with open(save_path, 'wb') as vf:
+                        for chunk in resp.iter_content(65536):
+                            if chunk:
+                                vf.write(chunk)
+                    if os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
+                        downloaded = True
+                        sz = os.path.getsize(save_path)/(1024*1024)
+                        log_fn(f"✅ Video didownload via requests ({sz:.1f} MB)")
+                    else:
+                        log_fn("⚠️ File dari requests terlalu kecil/kosong")
+                else:
+                    log_fn(f"⚠️ requests status {resp.status_code}")
             except Exception as e:
-                log_fn(f"⚠️ JS click Download gagal: {e}")
+                log_fn(f"⚠️ Download via requests gagal: {e}")
 
-        # Method C: Enter key
-        if not dl_clicked:
+        if not downloaded:
+            # ── Method A: Selenium scroll + click Download button ──
+            dl_clicked = False
             try:
                 dl_btns = driver.find_elements(By.CSS_SELECTOR,
                     'button[aria-label="Download"], button[aria-label="Unduh"]')
                 if dl_btns:
-                    dl_btns[0].send_keys(Keys.ENTER)
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", dl_btns[0])
+                    time.sleep(0.5)
+                    ActionChains(driver).move_to_element(dl_btns[0]).click().perform()
                     dl_clicked = True
-                    log_fn("✅ Tombol Download diklik (Enter key)")
+                    log_fn("✅ Tombol Download diklik (Selenium + scroll)")
             except Exception as e:
-                log_fn(f"⚠️ Enter key Download gagal: {e}")
+                log_fn(f"⚠️ Selenium click Download gagal: {e}")
 
-        if not dl_clicked:
-            log_fn("❌ Tidak bisa klik tombol Download")
-
-        # Wait for file to appear in output_dir or Downloads folder
-        if dl_clicked:
-            log_fn("⏳ Menunggu file terdownload (max 30 detik)...")
-            downloads_folder = os.path.expanduser("~/Downloads")
-            for wait_sec in range(30):
-                time.sleep(1)
-
-                # Check output_dir for new mp4
+            # ── Method B: JS pointer events on Download button ──
+            if not dl_clicked:
                 try:
-                    mp4s = glob.glob(os.path.join(output_dir, "*.mp4"))
-                    new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
-                    if new_files:
-                        newest = max(new_files, key=os.path.getmtime)
-                        crdowns = glob.glob(os.path.join(output_dir, "*.crdownload"))
-                        if not crdowns:
-                            if newest != save_path:
+                    dl_clicked = driver.execute_script("""
+                        const btns = document.querySelectorAll('button');
+                        for (const btn of btns) {
+                            const l = btn.getAttribute('aria-label') || '';
+                            if (l === 'Download' || l === 'Unduh') {
+                                btn.scrollIntoView({block:'center'});
+                                ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev =>
+                                    btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
+                                return true;
+                            }
+                        } return false;
+                    """)
+                    if dl_clicked:
+                        log_fn("✅ Tombol Download diklik (JS pointer events)")
+                except Exception as e:
+                    log_fn(f"⚠️ JS pointer events Download gagal: {e}")
+
+            # ── Method C: Enter key on Download button ──
+            if not dl_clicked:
+                try:
+                    dl_btns = driver.find_elements(By.CSS_SELECTOR,
+                        'button[aria-label="Download"], button[aria-label="Unduh"]')
+                    if dl_btns:
+                        dl_btns[0].send_keys(Keys.ENTER)
+                        dl_clicked = True
+                        log_fn("✅ Tombol Download diklik (Enter key)")
+                except Exception as e:
+                    log_fn(f"⚠️ Enter key Download gagal: {e}")
+
+            # ── Method D: Direct JS click (bypass overlay) ──
+            if not dl_clicked:
+                try:
+                    dl_clicked = driver.execute_script("""
+                        const sel = ['button[aria-label="Download"]','button[aria-label="Unduh"]',
+                                     'a[download]','a[href*=".mp4"]'];
+                        for (const s of sel) {
+                            const el = document.querySelector(s);
+                            if (el) { el.click(); return true; }
+                        } return false;
+                    """)
+                    if dl_clicked:
+                        log_fn("✅ Tombol Download diklik (Method D JS direct click)")
+                except Exception as e:
+                    log_fn(f"⚠️ Method D gagal: {e}")
+
+            if not dl_clicked:
+                log_fn("❌ Tidak bisa klik tombol Download")
+            else:
+                # Wait for file to appear
+                log_fn("⏳ Menunggu file terdownload (max 60 detik)...")
+                for wait_sec in range(60):
+                    time.sleep(1)
+                    # Check output_dir
+                    try:
+                        mp4s = glob.glob(os.path.join(output_dir, "*.mp4"))
+                        new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
+                        if new_files:
+                            newest = max(new_files, key=os.path.getmtime)
+                            if not glob.glob(os.path.join(output_dir, "*.crdownload")):
+                                if newest != save_path:
+                                    shutil.move(newest, save_path)
+                                downloaded = True
+                                log_fn(f"✅ Video diunduh ke output: {filename}")
+                                break
+                    except:
+                        pass
+                    # Check Downloads folder
+                    try:
+                        mp4s = glob.glob(os.path.join(downloads_folder, "*.mp4"))
+                        new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
+                        if new_files:
+                            newest = max(new_files, key=os.path.getmtime)
+                            if not glob.glob(os.path.join(downloads_folder, "*.crdownload")):
                                 shutil.move(newest, save_path)
-                            downloaded = True
-                            log_fn(f"✅ Video diunduh ke output: {filename}")
-                            break
-                except:
-                    pass
+                                downloaded = True
+                                log_fn(f"✅ Video diunduh dari Downloads: {filename}")
+                                break
+                    except:
+                        pass
+                if not downloaded:
+                    log_fn("⚠️ File tidak muncul setelah 60 detik via button click")
 
-                # Check Downloads folder
-                try:
-                    mp4s = glob.glob(os.path.join(downloads_folder, "*.mp4"))
-                    new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
-                    if new_files:
-                        newest = max(new_files, key=os.path.getmtime)
-                        crdowns = glob.glob(os.path.join(downloads_folder, "*.crdownload"))
-                        if not crdowns:
-                            shutil.move(newest, save_path)
-                            downloaded = True
-                            log_fn(f"✅ Video diunduh dari Downloads: {filename}")
-                            break
-                except:
-                    pass
-
-            if not downloaded:
-                log_fn("⚠️ File tidak muncul setelah 30 detik")
-
-        if downloaded and os.path.exists(save_path):
+        if downloaded and os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
             sz = os.path.getsize(save_path) / (1024 * 1024)
             log_fn(f"📦 Ukuran video: {sz:.1f} MB")
             return save_path
@@ -855,60 +913,150 @@ def generate_one_video_grok(image_path, prompt_text, log_fn, stop_event, output_
 def setup_tab_grok(driver, image_path, prompt_text, log_fn, tab_idx):
     """
     On the CURRENTLY active tab, do:
-      1. Upload image (Attach → Animate Image OR fallback file input)
+      1. Upload image with verification (reload tab if failed)
       2. Click Settings → Buat Video
-      3. Fill prompt
+      3. Fill prompt with verification
       4. Click Generate
     Returns True if generate was clicked successfully.
     """
-    wait = WebDriverWait(driver, 20)
     prefix = f"[Tab {tab_idx+1}]"
 
-    # ── Upload image ──
+    def _count_imgs(drv):
+        try:
+            return drv.execute_script("""
+                let c=0;
+                c+=document.querySelectorAll('img[src*="assets.grok.com"]').length;
+                c+=document.querySelectorAll('img[src^="blob:"]').length;
+                c+=document.querySelectorAll('div.group.relative img').length;
+                return c;
+            """)
+        except: return 0
+
+    def _verify_uploaded(drv, before, timeout=10):
+        for _ in range(timeout*2):
+            try:
+                if _count_imgs(drv) > before: return True
+                has = drv.execute_script("""
+                    const g=document.querySelector('div.group.relative');
+                    if(g){const r=g.getBoundingClientRect();if(r.width>50&&r.height>50)return true;}
+                    return false;
+                """)
+                if has: return True
+            except: pass
+            time.sleep(0.5)
+        return False
+
+    def _upload(drv, abs_img, before):
+        # Method A: existing file inputs
+        try:
+            inputs = drv.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            for fi in inputs:
+                try:
+                    drv.execute_script(
+                        "arguments[0].style.cssText='display:block!important;"
+                        "visibility:visible!important;opacity:1!important;"
+                        "position:absolute;top:0;left:0;width:1px;height:1px;';", fi)
+                    fi.send_keys(abs_img)
+                    time.sleep(3)
+                    if _verify_uploaded(drv, before):
+                        return True
+                except: pass
+        except: pass
+        # Method B: inject
+        try:
+            iid = f"_tbf_{int(time.time())}"
+            drv.execute_script(f"""
+                let o=document.getElementById('{iid}');if(o)o.remove();
+                const i=document.createElement('input');i.type='file';
+                i.id='{iid}';i.accept='image/*';
+                i.style.cssText='position:absolute;top:0;left:0;z-index:99999;display:block;width:1px;height:1px;';
+                document.body.appendChild(i);
+            """)
+            time.sleep(0.5)
+            drv.find_element(By.ID, iid).send_keys(abs_img)
+            time.sleep(3)
+            if _verify_uploaded(drv, before): return True
+        except: pass
+        return False
+
+    def _fill_prompt(drv, p_text):
+        # Method A
+        try:
+            ed = drv.execute_script("""
+                const e=document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                if(e){e.scrollIntoView({block:'center'});return e;} return null;
+            """)
+            if ed:
+                drv.execute_script("arguments[0].focus();", ed)
+                time.sleep(0.3); ed.click(); time.sleep(0.3)
+                ed.send_keys(Keys.CONTROL+"a"); time.sleep(0.2); ed.send_keys(Keys.DELETE); time.sleep(0.2)
+                drv.execute_script("""
+                    const e=arguments[0];
+                    e.innerHTML='<p>'+arguments[1]+'</p>';
+                    e.dispatchEvent(new Event('input',{bubbles:true}));
+                    e.dispatchEvent(new Event('change',{bubbles:true}));
+                    e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
+                """, ed, p_text)
+                time.sleep(1)
+                actual = drv.execute_script(
+                    "return document.querySelector('div.tiptap.ProseMirror[contenteditable=\"true\"]')?.textContent||'';")
+                if actual.strip(): return True
+        except: pass
+        # Method B: pure JS
+        try:
+            r = drv.execute_script("""
+                const e=document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
+                if(!e)return 'nf';
+                e.focus();e.innerHTML='<p>'+arguments[0]+'</p>';
+                e.dispatchEvent(new Event('input',{bubbles:true}));
+                e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
+                return 'ok';
+            """, p_text)
+            time.sleep(1)
+            if r == 'ok':
+                actual = drv.execute_script(
+                    "return document.querySelector('div.tiptap.ProseMirror[contenteditable=\"true\"]')?.textContent||'';")
+                if actual.strip(): return True
+        except: pass
+        # Method C: typing
+        try:
+            ed = WebDriverWait(drv, 20).until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
+            drv.execute_script("arguments[0].scrollIntoView({block:'center'});", ed)
+            time.sleep(1); ed.click(); time.sleep(0.5)
+            ed.send_keys(Keys.CONTROL+"a"); ed.send_keys(Keys.DELETE); time.sleep(0.3)
+            for chunk in [p_text[i:i+50] for i in range(0, len(p_text), 50)]:
+                ed.send_keys(chunk); time.sleep(0.1)
+            time.sleep(1)
+            actual = drv.execute_script(
+                "return document.querySelector('div.tiptap.ProseMirror[contenteditable=\"true\"]')?.textContent||'';")
+            if actual.strip(): return True
+        except: pass
+        return False
+
+    # ── Upload image with reload-retry (up to 3 outer attempts) ──
+    image_uploaded = True
     if image_path and os.path.exists(image_path):
-        log_fn(f"{prefix} 📷 Upload: {os.path.basename(image_path)}")
         abs_image = os.path.abspath(image_path)
         image_uploaded = False
-
-        # Attempt B: Direct hidden file input
-        if not image_uploaded:
-            try:
-                file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                if file_inputs:
-                    fi = file_inputs[-1]
-                    driver.execute_script(
-                        "arguments[0].style.display='block';"
-                        "arguments[0].style.visibility='visible';"
-                        "arguments[0].style.opacity='1';"
-                        "arguments[0].style.height='1px';"
-                        "arguments[0].style.width='1px';"
-                        "arguments[0].style.position='absolute';", fi)
-                    fi.send_keys(abs_image)
-                    image_uploaded = True
-                    time.sleep(2)
-            except:
-                pass
-
-        # Attempt C: Inject file input
-        if not image_uploaded:
-            try:
-                driver.execute_script("""
-                    const input = document.createElement('input');
-                    input.type = 'file'; input.id = 'grok_bot_file_input';
-                    input.accept = 'image/*';
-                    input.style.cssText = 'position:absolute;top:0;left:0;z-index:99999;display:block;width:1px;height:1px;';
-                    document.body.appendChild(input);
-                """)
-                time.sleep(0.5)
-                injected = driver.find_element(By.ID, "grok_bot_file_input")
-                injected.send_keys(abs_image)
+        for outer in range(1, 4):
+            if outer > 1:
+                log_fn(f"{prefix} 🔄 Reload untuk upload ulang (attempt {outer}/3)...")
+                try:
+                    driver.get(GROK_URL)
+                    time.sleep(5)
+                except Exception as e:
+                    log_fn(f"{prefix} ⚠️ Reload gagal: {e}")
+                    continue
+            before = _count_imgs(driver)
+            log_fn(f"{prefix} 📷 Upload: {os.path.basename(abs_image)} (attempt {outer})")
+            if _upload(driver, abs_image, before):
                 image_uploaded = True
-                time.sleep(2)
-            except:
-                pass
-
+                log_fn(f"{prefix} ✅ Upload berhasil!")
+                break
+            log_fn(f"{prefix} ⚠️ Upload attempt {outer} gagal")
         if not image_uploaded:
-            log_fn(f"{prefix} ⚠️ Upload gambar gagal")
+            log_fn(f"{prefix} ❌ Upload gambar gagal setelah 3 attempt")
 
     # ── Settings → Buat Video ──
     settings_opened = False
@@ -920,32 +1068,24 @@ def setup_tab_grok(driver, image_path, prompt_text, log_fn, tab_idx):
             ).click().perform()
         )),
         ("JS pointer", lambda: driver.execute_script("""
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                const label = btn.getAttribute('aria-label') || '';
-                if (label === 'Settings' || label === 'Pengaturan') {
-                    btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));
-                    btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-                    btn.dispatchEvent(new PointerEvent('pointerup', {bubbles:true}));
-                    btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-                    btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
-                    return true;
-                }
-            }
+            for(const btn of document.querySelectorAll('button')){
+                const l=btn.getAttribute('aria-label')||'';
+                if(l==='Settings'||l==='Pengaturan'){
+                    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
+                        btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
+                    return true;}}
             return false;
         """)),
-        ("Enter key", lambda: driver.find_elements(By.CSS_SELECTOR,
+        ("Enter", lambda: driver.find_elements(By.CSS_SELECTOR,
             'button[aria-label="Settings"], button[aria-label="Pengaturan"]')[0].send_keys(Keys.ENTER)),
     ]:
-        if settings_opened:
-            break
+        if settings_opened: break
         try:
             method_fn()
             time.sleep(1.5)
             if driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]'):
                 settings_opened = True
-        except:
-            pass
+        except: pass
 
     if settings_opened:
         try:
@@ -956,29 +1096,26 @@ def setup_tab_grok(driver, image_path, prompt_text, log_fn, tab_idx):
                     ActionChains(driver).move_to_element(item).click().perform()
                     break
             time.sleep(1)
-        except:
-            pass
+        except: pass
 
-    # ── Fill prompt ──
-    try:
-        editor = wait.until(EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
-        editor.click()
-        time.sleep(0.3)
-        editor.send_keys(Keys.CONTROL + "a")
-        time.sleep(0.2)
-        editor.send_keys(Keys.DELETE)
-        time.sleep(0.2)
-        driver.execute_script("""
-            const editor = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
-            if (editor) {
-                editor.innerHTML = '<p>' + arguments[0] + '</p>';
-                editor.dispatchEvent(new Event('input', {bubbles: true}));
-            }
-        """, prompt_text)
-        time.sleep(0.5)
-    except Exception as e:
-        log_fn(f"{prefix} ❌ Gagal isi prompt: {e}")
+    # ── Fill prompt with verification and reload-retry ──
+    prompt_filled = False
+    for outer in range(1, 4):
+        if outer > 1:
+            log_fn(f"{prefix} 🔄 Reload untuk isi prompt ulang (attempt {outer}/3)...")
+            try:
+                driver.get(GROK_URL)
+                time.sleep(5)
+            except:
+                continue
+        if _fill_prompt(driver, prompt_text):
+            prompt_filled = True
+            log_fn(f"{prefix} ✅ Prompt diisi!")
+            break
+        log_fn(f"{prefix} ⚠️ Prompt attempt {outer} gagal")
+
+    if not prompt_filled:
+        log_fn(f"{prefix} ❌ Gagal isi prompt setelah 3 attempt")
         return False
 
     # ── Click Generate ──
@@ -988,15 +1125,11 @@ def setup_tab_grok(driver, image_path, prompt_text, log_fn, tab_idx):
             try:
                 gen_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
                     (By.CSS_SELECTOR, f'button[aria-label="{label}"]')))
-                if gen_btn:
-                    break
-            except:
-                continue
+                if gen_btn: break
+            except: continue
         if not gen_btn:
-            try:
-                gen_btn = driver.find_element(By.CSS_SELECTOR, 'button.group[type="button"]')
-            except:
-                pass
+            try: gen_btn = driver.find_element(By.CSS_SELECTOR, 'button.group[type="button"]')
+            except: pass
         if gen_btn:
             gen_btn.click()
         else:
@@ -1081,44 +1214,87 @@ def check_tab_progress(driver):
 
 def download_tab_video(driver, output_dir, log_fn, tab_idx, start_time):
     """
-    Click the Download button on the currently active tab and wait for file.
+    Download video from the currently active tab.
     Returns path to downloaded video or None.
     """
+    import requests as req_lib
     prefix = f"[Tab {tab_idx+1}]"
     filename = f"grok_{int(time.time())}_{tab_idx}.mp4"
     save_path = os.path.join(output_dir, filename)
-    dl_clicked = False
+    downloads_folder = os.path.expanduser("~/Downloads")
 
-    # Method A: Selenium click
+    # ── Dismiss editor overlay so it doesn't block the Download button ──
+    try:
+        driver.execute_script("""
+            document.querySelectorAll('div[contenteditable="true"]').forEach(e=>{
+                e.style.pointerEvents='none'; e.style.zIndex='-1'; });
+            document.querySelectorAll('.tiptap,.ProseMirror').forEach(w=>{
+                w.style.pointerEvents='none'; w.style.zIndex='-1'; });
+        """)
+        time.sleep(0.5)
+    except: pass
+
+    # ── Method 0: Extract video URL + download via requests ──
+    video_url = None
+    try:
+        video_url = driver.execute_script("""
+            for(const v of document.querySelectorAll('video')){
+                if(v.src&&(v.src.startsWith('http')||v.src.startsWith('blob')))return v.src;
+                const s=v.querySelector('source');if(s&&s.src)return s.src;
+            }
+            for(const a of document.querySelectorAll('a[download],a[href*=".mp4"]')){
+                if(a.href)return a.href;
+            }
+            return null;
+        """)
+    except: pass
+
+    if video_url and video_url.startswith('http') and not video_url.startswith('blob'):
+        log_fn(f"{prefix} 🔗 URL video, download via requests...")
+        try:
+            cookies = {c['name']:c['value'] for c in driver.get_cookies()}
+            headers = {'User-Agent': driver.execute_script('return navigator.userAgent;'), 'Referer': GROK_URL}
+            resp = req_lib.get(video_url, cookies=cookies, headers=headers, stream=True, timeout=120)
+            if resp.status_code == 200:
+                with open(save_path, 'wb') as vf:
+                    for chunk in resp.iter_content(65536):
+                        if chunk: vf.write(chunk)
+                if os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
+                    sz = os.path.getsize(save_path)/(1024*1024)
+                    log_fn(f"{prefix} ✅ Video via requests ({sz:.1f} MB)")
+                    return save_path
+        except Exception as e:
+            log_fn(f"{prefix} ⚠️ requests gagal: {e}")
+
+    # ── Button click methods ──
+    dl_clicked = False
+    # Method A: Selenium scroll + click
     try:
         dl_btns = driver.find_elements(By.CSS_SELECTOR,
             'button[aria-label="Download"], button[aria-label="Unduh"]')
         if dl_btns:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", dl_btns[0])
+            time.sleep(0.5)
             ActionChains(driver).move_to_element(dl_btns[0]).click().perform()
             dl_clicked = True
-    except:
-        pass
+            log_fn(f"{prefix} ✅ Download diklik (Selenium)")
+    except: pass
 
     # Method B: JS pointer events
     if not dl_clicked:
         try:
             dl_clicked = driver.execute_script("""
-                const btns = document.querySelectorAll('button');
-                for (const btn of btns) {
-                    const label = btn.getAttribute('aria-label') || '';
-                    if (label === 'Download' || label === 'Unduh') {
-                        btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));
-                        btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-                        btn.dispatchEvent(new PointerEvent('pointerup', {bubbles:true}));
-                        btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-                        btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
-                        return true;
-                    }
-                }
-                return false;
+                for(const btn of document.querySelectorAll('button')){
+                    const l=btn.getAttribute('aria-label')||'';
+                    if(l==='Download'||l==='Unduh'){
+                        btn.scrollIntoView({block:'center'});
+                        ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
+                            btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
+                        return true;}
+                } return false;
             """)
-        except:
-            pass
+            if dl_clicked: log_fn(f"{prefix} ✅ Download diklik (JS pointer)")
+        except: pass
 
     # Method C: Enter key
     if not dl_clicked:
@@ -1128,16 +1304,27 @@ def download_tab_video(driver, output_dir, log_fn, tab_idx, start_time):
             if dl_btns:
                 dl_btns[0].send_keys(Keys.ENTER)
                 dl_clicked = True
-        except:
-            pass
+                log_fn(f"{prefix} ✅ Download diklik (Enter)")
+        except: pass
+
+    # Method D: direct JS click any matching element
+    if not dl_clicked:
+        try:
+            dl_clicked = driver.execute_script("""
+                const sel=['button[aria-label="Download"]','button[aria-label="Unduh"]',
+                           'a[download]','a[href*=".mp4"]'];
+                for(const s of sel){const el=document.querySelector(s);if(el){el.click();return true;}}
+                return false;
+            """)
+            if dl_clicked: log_fn(f"{prefix} ✅ Download diklik (Method D)")
+        except: pass
 
     if not dl_clicked:
         log_fn(f"{prefix} ❌ Tidak bisa klik tombol Download")
         return None
 
-    log_fn(f"{prefix} ⏳ Menunggu file terdownload...")
-    downloads_folder = os.path.expanduser("~/Downloads")
-    for _ in range(30):
+    log_fn(f"{prefix} ⏳ Menunggu file terdownload (max 60 detik)...")
+    for _ in range(60):
         time.sleep(1)
         # Check output_dir
         try:
@@ -1145,29 +1332,24 @@ def download_tab_video(driver, output_dir, log_fn, tab_idx, start_time):
             new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
             if new_files:
                 newest = max(new_files, key=os.path.getmtime)
-                crdowns = glob.glob(os.path.join(output_dir, "*.crdownload"))
-                if not crdowns:
-                    if newest != save_path:
-                        shutil.move(newest, save_path)
+                if not glob.glob(os.path.join(output_dir, "*.crdownload")):
+                    if newest != save_path: shutil.move(newest, save_path)
                     log_fn(f"{prefix} ✅ Video diunduh: {filename}")
                     return save_path
-        except:
-            pass
+        except: pass
         # Check Downloads folder
         try:
             mp4s = glob.glob(os.path.join(downloads_folder, "*.mp4"))
             new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
             if new_files:
                 newest = max(new_files, key=os.path.getmtime)
-                crdowns = glob.glob(os.path.join(downloads_folder, "*.crdownload"))
-                if not crdowns:
+                if not glob.glob(os.path.join(downloads_folder, "*.crdownload")):
                     shutil.move(newest, save_path)
-                    log_fn(f"{prefix} ✅ Video diunduh: {filename}")
+                    log_fn(f"{prefix} ✅ Video diunduh dari Downloads: {filename}")
                     return save_path
-        except:
-            pass
+        except: pass
 
-    log_fn(f"{prefix} ❌ Timeout download 30 detik")
+    log_fn(f"{prefix} ❌ Timeout download 60 detik")
     return None
 
 
@@ -1192,6 +1374,12 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                                          caption=f"🎬 Video dari folder <b>{escape_html(folder_name)}</b>",
                                          parse_mode=ParseMode.HTML,
                                          supports_streaming=True)
+                # Hapus file setelah berhasil dikirim
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception as del_e:
+                    pass
             except Exception as e:
                 pass
         asyncio.run_coroutine_threadsafe(_send(), main_loop)
@@ -1413,16 +1601,21 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                                             merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
                                             if merged_path:
                                                 merged_count += 1
-                                                send_video_tg(merged_path)
+                                                send_video_tg(merged_path)  # hapus merged setelah kirim
+                                                # Hapus source videos
+                                                for _vp in (vid_a, vid_b):
+                                                    try:
+                                                        if os.path.exists(_vp): os.remove(_vp)
+                                                    except: pass
                                                 log_fn(f"🎬 Merged #{merged_count} dikirim ke Telegram")
                                             else:
                                                 log_fn(f"⚠️ Merge gagal, kirim video terpisah")
-                                                send_video_tg(vid_a)
-                                                send_video_tg(vid_b)
+                                                send_video_tg(vid_a)  # hapus vid_a setelah kirim
+                                                send_video_tg(vid_b)  # hapus vid_b setelah kirim
                                         else:
                                             log_fn(f"⏳ Buffer merge: {len(merge_buffer)}/2")
                                     else:
-                                        send_video_tg(video_path)
+                                        send_video_tg(video_path)  # hapus setelah kirim
 
                                     # Update download timestamp so next tabs don't conflict
                                     tab_start_time = time.time()
@@ -1565,15 +1758,20 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                         if merged_path:
                             merged_count += 1
                             send(f"✅ Merged #{merged_count} berhasil!")
-                            send_video_tg(merged_path)
+                            send_video_tg(merged_path)  # hapus merged setelah kirim
+                            # Hapus source videos
+                            for _vp in (vid_a, vid_b):
+                                try:
+                                    if os.path.exists(_vp): os.remove(_vp)
+                                except: pass
                         else:
                             send(f"⚠️ Merge gagal, kirim video terpisah")
-                            send_video_tg(vid_a)
-                            send_video_tg(vid_b)
+                            send_video_tg(vid_a)  # hapus vid_a setelah kirim
+                            send_video_tg(vid_b)  # hapus vid_b setelah kirim
                     else:
                         send(f"⏳ Buffer merge: {len(merge_buffer)}/2 (menunggu video berikutnya)")
                 else:
-                    # Send video to Telegram immediately
+                    # Send video to Telegram immediately, hapus setelah kirim
                     send_video_tg(video_path)
                 time.sleep(3)
             else:
