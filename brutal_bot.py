@@ -544,9 +544,9 @@ BRUTAL_RAW_DIR = os.path.join(APP_DIR, "brutal_stok_raw")
 def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
     os.makedirs(BRUTAL_STOK_DIR, exist_ok=True)
     os.makedirs(BRUTAL_RAW_DIR, exist_ok=True)
-    if needed % 2 != 0: needed += 1
-    target = needed
-    log_fn(f"Target generate: {target} raw -> {target//2} video 20 detik")
+    # needed = jumlah video final yang dibutuhkan, raw harus 2x lipat (2 raw = 1 merged)
+    target = needed * 2
+    log_fn(f"Target generate: {target} raw -> {needed} video 20 detik")
     generated_raw = []; failed = 0
 
     chrome_proc = open_chrome_grok(BRUTAL_UD, BRUTAL_PORT)
