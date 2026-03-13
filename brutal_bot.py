@@ -930,27 +930,27 @@ def main_menu_kb(uid=None):
 
 def status_text():
     s = load_settings(); stok = count_stok(); sched = load_schedule()
-    prod_status = "\u2705 ON" if s.get('add_product', True) else "\u274c OFF"
-    sound_status = "\u2705 ON" if s.get('add_sound', True) else "\u274c OFF"
+    prod_status = "ON" if s.get('add_product', True) else "OFF"
+    sound_status = "ON" if s.get('add_sound', True) else "OFF"
     # Schedule progress
     sched_done = len([x for x in sched if x.get("status") == "done"])
     sched_remaining = len([x for x in sched if x.get("status") not in ("done", "skipped")])
     sched_info = f"{len(sched)} slot"
     if sched_done > 0:
-        sched_info += f" (\u2705 {sched_done} selesai, \u23f3 {sched_remaining} sisa)"
+        sched_info += f" ({sched_done} selesai, {sched_remaining} sisa)"
     # Raw leftover
     raw_count = len(glob.glob(os.path.join(BRUTAL_RAW_DIR, "*.mp4"))) if os.path.isdir(BRUTAL_RAW_DIR) else 0
-    raw_info = f"\n\u26a0\ufe0f Raw sisa: <b>{raw_count}</b> (akan auto-merge saat generate)" if raw_count > 0 else ""
+    raw_info = f"\nRaw sisa: <b>{raw_count}</b> (akan auto-merge saat generate)" if raw_count > 0 else ""
     return (f"<b>Brutal Bot</b>\n\n"
             f"Stok: <b>{stok}/{MAX_STOK}</b> video\n"
             f"Prompt: <code>{escape_html(s.get('prompt_name','(kosong)'))}</code>\n"
             f"Folder: <code>{escape_html(s.get('folder_name','(kosong)'))}</code>\n"
             f"Deskripsi: <code>{escape_html(s.get('deskripsi','(kosong)')[:50])}</code>\n"
             f"Hashtags: <code>{escape_html(', '.join('#'+h for h in s.get('hashtags',[])) or '(kosong)')}</code>\n"
-            f"\n<b>\ud83d\uded2 Produk:</b> {prod_status}\n"
+            f"\n<b>Produk:</b> {prod_status}\n"
             f"  Nama: <code>{escape_html(s.get('nama_produk_radio','(kosong)')[:50])}</code>\n"
             f"  Judul: <code>{escape_html(s.get('nama_produk_input','(kosong)')[:50])}</code>\n"
-            f"<b>\ud83c\udfb5 Sound:</b> {sound_status}\n"
+            f"<b>Sound:</b> {sound_status}\n"
             f"\nSchedule: <b>{sched_info}</b>{raw_info}\n"
             f"Generate jam: <b>{GENERATE_HOUR:02d}:00</b> | Schedule mulai: <b>{SCHEDULE_START_HOUR:02d}:00</b>")
 
