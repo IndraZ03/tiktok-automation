@@ -14,6 +14,7 @@ import threading
 import logging
 import time
 import random
+import subprocess
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -32,7 +33,7 @@ from sgv_config import (
     get_bahan_folder_path, ensure_bahan_dir,
 )
 import sgv_config
-from sgv_selenium import generate_one_video_grok, merge_video_pair
+from sgv_selenium import generate_one_video_grok, generate_two_videos_multitab_grok, merge_video_pair
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +357,28 @@ async def gen_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 #  GENERATION THREAD
 # ═══════════════════════════════════════════════════════════════
+
+def compress_video_if_needed(video_path, max_size_mb, log_fn):
+    """Bypass Telegram 50MB file limit by compressing it."""
+    try:
+        size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            log_fn(f"⚠️ Ukuran video ({size_mb:.1f} MB) melebihi limit. Mengompresi video ke 720p...")
+            out_path = video_path.replace(".mp4", "_compressed.mp4")
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vf", "scale=-2:720", "-c:v", "libx264", "-crf", "28", "-preset", "fast",
+                "-c:a", "aac", "-b:a", "128k", out_path
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            if os.path.exists(out_path):
+                new_size_mb = os.path.getsize(out_path) / (1024 * 1024)
+                log_fn(f"✅ Video dikompresi: {size_mb:.1f} MB -> {new_size_mb:.1f} MB")
+                return out_path, video_path  # Kembalikan file hasil, beserta original untuk dibersihkan
+    except Exception as e:
+        log_fn(f"❌ Kompresi gagal: {e}")
+    return video_path, None
+
 def _run_generation(uid, chat_id, bot, main_loop, prompt_text, image_path,
                     duration, stop_event, progress_msg_id):
     """Run video generation in background thread."""
@@ -395,18 +418,18 @@ def _run_generation(uid, chat_id, bot, main_loop, prompt_text, image_path,
         logger.info(msg)
 
     output_dir = sgv_config.VIDEO_DIR
+    files_to_delete = []
 
     try:
         if duration == 20:
-            # Generate 2 videos and merge
-            log_fn("🎬 Mode 20 detik: generate 2 video + merge...")
+            # Generate 2 videos and merge (Multitab)
+            log_fn("🎬 Mode 20 detik: generate 2 video MULTITAB + merge...")
 
-            # Video 1
             update_progress(0)
-            def progress_v1(pct):
-                update_progress(int(pct * 0.45))  # 0-45% for video 1
+            def progress_multi(pct):
+                update_progress(int(pct * 0.90))  # 0-90% for generation
 
-            vid1 = generate_one_video_grok(
+            vid1, vid2 = generate_two_videos_multitab_grok(
                 image_path=image_path,
                 prompt_text=prompt_text,
                 log_fn=log_fn,
@@ -414,38 +437,20 @@ def _run_generation(uid, chat_id, bot, main_loop, prompt_text, image_path,
                 output_dir=output_dir,
                 user_data_dir=sgv_config.USER_DATA_CHROME,
                 port=sgv_config.DEFAULT_PORT,
-                progress_callback=progress_v1
+                progress_callback=progress_multi
             )
 
-            if not vid1 or stop_event.is_set():
+            if vid1 and os.path.exists(vid1): files_to_delete.append(vid1)
+            if vid2 and os.path.exists(vid2): files_to_delete.append(vid2)
+
+            if not vid1 or not vid2 or stop_event.is_set():
                 if not stop_event.is_set():
-                    send("❌ <b>Gagal generate video 1</b>")
-                active_gen_tasks.pop(uid, None)
-                return
-
-            # Video 2
-            def progress_v2(pct):
-                update_progress(45 + int(pct * 0.45))  # 45-90% for video 2
-
-            vid2 = generate_one_video_grok(
-                image_path=image_path,
-                prompt_text=prompt_text,
-                log_fn=log_fn,
-                stop_event=stop_event,
-                output_dir=output_dir,
-                user_data_dir=sgv_config.USER_DATA_CHROME,
-                port=sgv_config.DEFAULT_PORT,
-                progress_callback=progress_v2
-            )
-
-            if not vid2 or stop_event.is_set():
-                if not stop_event.is_set():
-                    send("❌ <b>Gagal generate video 2</b>")
-                # Clean up video 1
-                try:
-                    os.remove(vid1)
-                except:
-                    pass
+                    send("❌ <b>Gagal generate video (salah satu/keduanya gagal)</b>")
+                # Hapus file mentah jika proses dihentikan atau gagal
+                for f in files_to_delete:
+                    try:
+                        if os.path.exists(f): os.remove(f)
+                    except: pass
                 active_gen_tasks.pop(uid, None)
                 return
 
@@ -454,22 +459,17 @@ def _run_generation(uid, chat_id, bot, main_loop, prompt_text, image_path,
             log_fn("🎬 Merging 2 video...")
             merged = merge_video_pair(vid1, vid2, output_dir, log_fn)
 
-            # Clean up originals
-            try:
-                os.remove(vid1)
-            except:
-                pass
-            try:
-                os.remove(vid2)
-            except:
-                pass
-
             if not merged:
                 send("❌ <b>Gagal merge video</b>")
+                for f in files_to_delete:
+                    try:
+                        if os.path.exists(f): os.remove(f)
+                    except: pass
                 active_gen_tasks.pop(uid, None)
                 return
 
             final_video = merged
+            files_to_delete.append(final_video)
             update_progress(100)
 
         else:
@@ -493,6 +493,14 @@ def _run_generation(uid, chat_id, bot, main_loop, prompt_text, image_path,
                     send("❌ <b>Gagal generate video</b>")
                 active_gen_tasks.pop(uid, None)
                 return
+
+        # Cek size dan kompresi jika over 45 MB (Telegram limit 50MB)
+        final_video, original_video = compress_video_if_needed(final_video, 45.0, log_fn)
+
+        if final_video not in files_to_delete:
+            files_to_delete.append(final_video)
+        if original_video and original_video not in files_to_delete:
+            files_to_delete.append(original_video)
 
         # Send video to Telegram (video only, no caption)
         async def _send_video():
@@ -526,13 +534,18 @@ def _run_generation(uid, chat_id, bot, main_loop, prompt_text, image_path,
                     parse_mode=ParseMode.HTML
                 )
 
-                # Delete video file after sending
-                try:
-                    if os.path.exists(final_video):
-                        os.remove(final_video)
-                        logger.info(f"🗑️ Video dihapus: {final_video}")
-                except Exception as del_e:
-                    logger.error(f"Gagal hapus video: {del_e}")
+                # Delete all accumulated video files after sending
+                deleted_files = 0
+                for f in set(files_to_delete):
+                    try:
+                        if os.path.exists(f):
+                            os.remove(f)
+                            deleted_files += 1
+                    except Exception as del_e:
+                        logger.error(f"Gagal hapus video {f}: {del_e}")
+                
+                if deleted_files > 0:
+                    logger.info(f"🗑️ {deleted_files} file video dibersihkan.")
 
             except Exception as e:
                 logger.error(f"Gagal kirim video: {e}")
