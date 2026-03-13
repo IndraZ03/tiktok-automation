@@ -299,6 +299,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📁 User Data Terpakai", callback_data="menu_userdata")],
         [InlineKeyboardButton("📋 Daftar User", callback_data="menu_list")],
         [InlineKeyboardButton("🔄 Kelola User Data", callback_data="menu_kelola_ud")],
+        [InlineKeyboardButton("📱 Nomor WA & Pesan", callback_data="menu_wa")],
     ]
 
     await update.message.reply_text(
@@ -313,6 +314,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu button presses."""
     query = update.callback_query
     await query.answer()
+
+    if query.data == "return_start":
+        await cmd_start(update, context)
+        return
 
     if query.data == "menu_ports":
         ports = get_used_ports()
@@ -362,6 +367,45 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "\n\n"
 
         await query.edit_message_text(text[:4096], parse_mode=ParseMode.HTML)
+        return
+
+    if query.data == "menu_wa":
+        db = load_db()
+        kembali = InlineKeyboardButton("🔙 Kembali", callback_data="return_start")
+        if not db:
+            await query.edit_message_text(
+                "📱 <b>Belum ada data nomor WA.</b>",
+                reply_markup=InlineKeyboardMarkup([[kembali]]),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        import urllib.parse
+        text = "📱 <b>DAFTAR NOMOR WA & KIRIM PESAN</b>\n\n"
+        keyboard = []
+        
+        pesan_template = "Terimakasih telah bergabung bersama kami di Ternak Cuan SuperGrok. berikut adalah link bot anda ..."
+        msg_encoded = urllib.parse.quote(pesan_template)
+
+        for nama, info in db.items():
+            no_wa = info.get("no_wa", "Tidak ada")
+            # Bersihkan spasi/karakter selain angka
+            clean_wa = "".join(filter(str.isdigit, no_wa))
+            if clean_wa.startswith("0"):
+                clean_wa = "62" + clean_wa[1:]
+                
+            text += f"👤 <b>{nama}</b> \n📞 <code>{no_wa}</code>\n\n"
+            
+            if clean_wa:
+                wa_link = f"https://wa.me/{clean_wa}?text={msg_encoded}"
+                keyboard.append([InlineKeyboardButton(f"💬 Kirim Pesan ke {nama}", url=wa_link)])
+
+        keyboard.append([kembali])
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     # For tambah/hapus/edit, we need to enter conversation, so just show instructions
@@ -484,6 +528,18 @@ async def hapus_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+    # Delete user data chrome foldernya
+    ud_chrome = user_info.get("user_data_chrome")
+    ud_del_msg = ""
+    if ud_chrome and os.path.exists(ud_chrome):
+        # Hanya bisa hapus jika ia di dalam folder APP_DIR dan bukan folder parent
+        if ud_chrome.startswith(APP_DIR) and ud_chrome != PARENT_USER_DATA:
+            try:
+                shutil.rmtree(ud_chrome, ignore_errors=True)
+                ud_del_msg = "\n🗑️ Folder user data chrome dihapus"
+            except Exception as e:
+                ud_del_msg = f"\n⚠️ Gagal hapus folder user data: {str(e)[:40]}"
+
     # Remove from database
     remove_user(nama)
 
@@ -491,7 +547,8 @@ async def hapus_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>User {escape_html(nama)} berhasil dihapus!</b>{kill_msg}\n\n"
         f"🗑️ Script dihapus\n"
         f"🗑️ Folder bahan/video/prompt dihapus\n"
-        f"🗑️ Data dari database dihapus",
+        f"🗑️ Data dari database dihapus"
+        f"{ud_del_msg}",
         parse_mode=ParseMode.HTML
     )
 
@@ -716,44 +773,18 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     add_user(nama_user, user_info)
 
-    # Auto-duplicate Default + Local State from parent (user_data/parent) to new user data
+    # Auto-duplicate SEMUA FILE & FOLDER from parent (user_data/parent) to new user data
     ud_chrome = pending["user_data_chrome"]
     dup_msg = ""
     if os.path.isdir(PARENT_USER_DATA) and ud_chrome != PARENT_USER_DATA:
-        os.makedirs(ud_chrome, exist_ok=True)
-        # Determine folder names for _copy_user_data
-        # Extract relative folder name if inside USER_DATA_BASE, else use full path copy
-        parent_name = os.path.basename(PARENT_USER_DATA)  # "parent"
-        dest_name = os.path.basename(ud_chrome)
-        # Check if dest is inside USER_DATA_BASE
-        if os.path.dirname(ud_chrome) == USER_DATA_BASE:
-            ok, copy_result = _copy_user_data(parent_name, dest_name, mode="duplicate")
-        else:
-            # Manual copy for paths outside USER_DATA_BASE
-            ok = False
-            copy_result = ""
-            src_def = os.path.join(PARENT_USER_DATA, "Default")
-            dst_def = os.path.join(ud_chrome, "Default")
-            src_ls = os.path.join(PARENT_USER_DATA, "Local State")
-            dst_ls = os.path.join(ud_chrome, "Local State")
-            parts = []
-            if os.path.isdir(src_def) and not os.path.isdir(dst_def):
-                try:
-                    shutil.copytree(src_def, dst_def)
-                    parts.append("✅ Default")
-                    ok = True
-                except Exception as e:
-                    parts.append(f"❌ Default: {str(e)[:60]}")
-            if os.path.isfile(src_ls) and not os.path.isfile(dst_ls):
-                try:
-                    shutil.copy2(src_ls, dst_ls)
-                    parts.append("✅ Local State")
-                    ok = True
-                except Exception as e:
-                    parts.append(f"❌ Local State: {str(e)[:60]}")
-            copy_result = "\n".join(parts) if parts else "ℹ️ Sudah ada"
-        dup_msg = f"\n\n📋 <b>Auto-Duplicate dari user_data/parent:</b>\n{escape_html(copy_result)}"
-        logger.info(f"Auto-dup {PARENT_USER_DATA} → {ud_chrome}: {copy_result}")
+        try:
+            shutil.copytree(PARENT_USER_DATA, ud_chrome, dirs_exist_ok=True)
+            copy_result = "✅ Semua file & folder dicopy"
+        except Exception as e:
+            copy_result = f"❌ Gagal copy: {str(e)[:60]}"
+            
+        dup_msg = f"\n\n📋 <b>Auto-Duplicate SEMUA file dari user_data/parent:</b>\n{escape_html(copy_result)}"
+        logger.info(f"Auto-dup full {PARENT_USER_DATA} → {ud_chrome}: {copy_result}")
 
     if query.data.startswith("confirm_run_"):
         # Run the bot
