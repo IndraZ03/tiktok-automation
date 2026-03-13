@@ -66,6 +66,10 @@ _DEFAULT_SETTINGS = {
     "folder_name": "",
     "deskripsi": "",
     "hashtags": [],
+    "nama_produk_radio": "",
+    "nama_produk_input": "beli sebelum promonya habis",
+    "add_product": True,
+    "add_sound": True,
 }
 
 def load_settings():
@@ -463,87 +467,179 @@ def download_tab_video(driver, output_dir, log_fn, tab_idx, start_time):
     prefix = f"[Tab {tab_idx+1}]"
     filename = f"brutal_{int(time.time())}_{tab_idx}.mp4"
     save_path = os.path.join(output_dir, filename)
-    dl_folder = os.path.expanduser("~/Downloads")
+    downloads_folder = os.path.expanduser("~/Downloads")
 
+    # ── Dismiss editor overlay so it doesn't block the Download button ──
     try:
         driver.execute_script("""
-            document.querySelectorAll('div[contenteditable="true"]').forEach(e=>{e.style.pointerEvents='none';e.style.zIndex='-1';});
-            document.querySelectorAll('.tiptap,.ProseMirror').forEach(w=>{w.style.pointerEvents='none';w.style.zIndex='-1';});""")
+            document.querySelectorAll('div[contenteditable="true"]').forEach(e=>{
+                e.style.pointerEvents='none'; e.style.zIndex='-1'; });
+            document.querySelectorAll('.tiptap,.ProseMirror').forEach(w=>{
+                w.style.pointerEvents='none'; w.style.zIndex='-1'; });
+        """)
         time.sleep(0.5)
     except: pass
 
+    # ── Method 0: Extract video URL + download via requests ──
     video_url = None
     try:
         video_url = driver.execute_script("""
             for(const v of document.querySelectorAll('video')){
-                if(v.src&&v.src.startsWith('http'))return v.src;
-                const s=v.querySelector('source');if(s&&s.src)return s.src;}
-            for(const a of document.querySelectorAll('a[download],a[href*=".mp4"]')){if(a.href)return a.href;}
-            return null;""")
+                if(v.src&&(v.src.startsWith('http')||v.src.startsWith('blob')))return v.src;
+                const s=v.querySelector('source');if(s&&s.src)return s.src;
+            }
+            for(const a of document.querySelectorAll('a[download],a[href*=".mp4"]')){
+                if(a.href)return a.href;
+            }
+            return null;
+        """)
     except: pass
 
     if video_url and video_url.startswith('http') and not video_url.startswith('blob'):
+        log_fn(f"{prefix} 🔗 URL video, download via requests...")
         try:
             cookies = {c['name']:c['value'] for c in driver.get_cookies()}
             headers = {'User-Agent': driver.execute_script('return navigator.userAgent;'), 'Referer': GROK_URL}
             resp = req_lib.get(video_url, cookies=cookies, headers=headers, stream=True, timeout=120)
             if resp.status_code == 200:
-                with open(save_path,'wb') as vf:
+                with open(save_path, 'wb') as vf:
                     for chunk in resp.iter_content(65536):
                         if chunk: vf.write(chunk)
                 if os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
-                    log_fn(f"{prefix} Downloaded via requests ({os.path.getsize(save_path)/1024/1024:.1f} MB)")
+                    sz = os.path.getsize(save_path)/(1024*1024)
+                    log_fn(f"{prefix} ✅ Video via requests ({sz:.1f} MB)")
                     return save_path
-        except Exception as e: log_fn(f"{prefix} requests err: {e}")
+        except Exception as e:
+            log_fn(f"{prefix} ⚠️ requests gagal: {e}")
 
+    # ── Button click methods ──
     dl_clicked = False
+    # Method A: Selenium scroll + click
     try:
-        dl_clicked = driver.execute_script("""
-            for(const b of document.querySelectorAll('button')){
-                const l=b.getAttribute('aria-label')||'';
-                if(l==='Download'||l==='Unduh'){
-                    b.scrollIntoView({block:'center'});
-                    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
-                        b.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
-                    return true;}} return false;""")
-        if dl_clicked: log_fn(f"{prefix} Download diklik (JS)")
+        dl_btns = driver.find_elements(By.CSS_SELECTOR,
+            'button[aria-label="Download"], button[aria-label="Unduh"]')
+        if dl_btns:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", dl_btns[0])
+            time.sleep(0.5)
+            ActionChains(driver).move_to_element(dl_btns[0]).click().perform()
+            dl_clicked = True
+            log_fn(f"{prefix} ✅ Download diklik (Selenium)")
     except: pass
 
+    # Method B: JS pointer events
     if not dl_clicked:
         try:
-            dl_btns = driver.find_elements(By.CSS_SELECTOR,'button[aria-label="Download"], button[aria-label="Unduh"]')
+            dl_clicked = driver.execute_script("""
+                for(const btn of document.querySelectorAll('button')){
+                    const l=btn.getAttribute('aria-label')||'';
+                    if(l==='Download'||l==='Unduh'){
+                        btn.scrollIntoView({block:'center'});
+                        ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
+                            btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
+                        return true;}
+                } return false;
+            """)
+            if dl_clicked: log_fn(f"{prefix} ✅ Download diklik (JS pointer)")
+        except: pass
+
+    # Method C: Enter key
+    if not dl_clicked:
+        try:
+            dl_btns = driver.find_elements(By.CSS_SELECTOR,
+                'button[aria-label="Download"], button[aria-label="Unduh"]')
             if dl_btns:
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", dl_btns[0])
-                time.sleep(0.5); ActionChains(driver).move_to_element(dl_btns[0]).click().perform()
-                dl_clicked = True; log_fn(f"{prefix} Download diklik (Selenium)")
+                dl_btns[0].send_keys(Keys.ENTER)
+                dl_clicked = True
+                log_fn(f"{prefix} ✅ Download diklik (Enter)")
+        except: pass
+
+    # Method D: direct JS click any matching element
+    if not dl_clicked:
+        try:
+            dl_clicked = driver.execute_script("""
+                const sel=['button[aria-label="Download"]','button[aria-label="Unduh"]',
+                           'a[download]','a[href*=".mp4"]'];
+                for(const s of sel){const el=document.querySelector(s);if(el){el.click();return true;}}
+                return false;
+            """)
+            if dl_clicked: log_fn(f"{prefix} ✅ Download diklik (Method D)")
         except: pass
 
     if not dl_clicked:
-        try:
-            dl_btns = driver.find_elements(By.CSS_SELECTOR,'button[aria-label="Download"], button[aria-label="Unduh"]')
-            if dl_btns: dl_btns[0].send_keys(Keys.ENTER); dl_clicked = True
-        except: pass
+        log_fn(f"{prefix} ❌ Tidak bisa klik tombol Download")
+        return None
 
-    if not dl_clicked: log_fn(f"{prefix} Tidak bisa klik Download"); return None
-
-    log_fn(f"{prefix} Menunggu download (60 detik)...")
+    log_fn(f"{prefix} ⏳ Menunggu file terdownload (max 60 detik)...")
     for _ in range(60):
         time.sleep(1)
-        for folder in [output_dir, dl_folder]:
-            try:
-                new_files = [f for f in glob.glob(os.path.join(folder,"*.mp4")) if os.path.getmtime(f) > start_time]
-                if new_files and not glob.glob(os.path.join(folder,"*.crdownload")):
-                    newest = max(new_files, key=os.path.getmtime)
+        # Check output_dir
+        try:
+            mp4s = glob.glob(os.path.join(output_dir, "*.mp4"))
+            new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
+            if new_files:
+                newest = max(new_files, key=os.path.getmtime)
+                if not glob.glob(os.path.join(output_dir, "*.crdownload")):
                     if newest != save_path: shutil.move(newest, save_path)
-                    log_fn(f"{prefix} Video: {filename}"); return save_path
-            except: pass
-    log_fn(f"{prefix} Timeout 60 detik"); return None
+                    log_fn(f"{prefix} ✅ Video diunduh: {filename}")
+                    return save_path
+        except: pass
+        # Check Downloads folder
+        try:
+            mp4s = glob.glob(os.path.join(downloads_folder, "*.mp4"))
+            new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
+            if new_files:
+                newest = max(new_files, key=os.path.getmtime)
+                if not glob.glob(os.path.join(downloads_folder, "*.crdownload")):
+                    shutil.move(newest, save_path)
+                    log_fn(f"{prefix} ✅ Video diunduh dari Downloads: {filename}")
+                    return save_path
+        except: pass
+
+    log_fn(f"{prefix} ❌ Timeout download 60 detik")
+    return None
 
 BRUTAL_RAW_DIR = os.path.join(APP_DIR, "brutal_stok_raw")
+
+def merge_leftover_raw(log_fn=None):
+    """Merge leftover raw videos from previous interrupted sessions."""
+    if not os.path.isdir(BRUTAL_RAW_DIR):
+        return []
+    raws = sorted(glob.glob(os.path.join(BRUTAL_RAW_DIR, "*.mp4")), key=os.path.getmtime)
+    if len(raws) < 2:
+        return []
+    if log_fn:
+        log_fn(f"🔄 Ditemukan {len(raws)} raw video sisa, melakukan merge...")
+    os.makedirs(BRUTAL_STOK_DIR, exist_ok=True)
+    merged = []
+    for i in range(0, len(raws) - 1, 2):
+        mp = merge_video_pair(raws[i], raws[i+1], BRUTAL_STOK_DIR, log_fn)
+        if mp:
+            merged.append(mp)
+            for vp in [raws[i], raws[i+1]]:
+                try:
+                    if os.path.exists(vp): os.remove(vp)
+                except: pass
+    # Handle odd leftover
+    if len(raws) % 2 == 1:
+        leftover = raws[-1]
+        dest = os.path.join(BRUTAL_STOK_DIR, os.path.basename(leftover))
+        try: shutil.move(leftover, dest); merged.append(dest)
+        except: pass
+    if log_fn and merged:
+        log_fn(f"✅ Merge sisa selesai: {len(merged)} video baru ditambahkan ke stok")
+    return merged
 
 def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
     os.makedirs(BRUTAL_STOK_DIR, exist_ok=True)
     os.makedirs(BRUTAL_RAW_DIR, exist_ok=True)
+    # Merge leftover raw videos dari sesi sebelumnya
+    leftover_merged = merge_leftover_raw(log_fn)
+    if leftover_merged:
+        # Re-check kebutuhan setelah merge sisa
+        needed = stok_needed()
+        if needed <= 0:
+            log_fn(f"Stok sudah penuh setelah merge sisa ({count_stok()}/{MAX_STOK})")
+            return leftover_merged
     # needed = jumlah video final yang dibutuhkan, raw harus 2x lipat (2 raw = 1 merged)
     target = needed * 2
     log_fn(f"Target generate: {target} raw -> {needed} video 20 detik")
@@ -632,23 +728,37 @@ def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
     return merged
 
 
-def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event):
+def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event,
+                          nama_produk_radio="", nama_produk_input="",
+                          add_product=True, add_sound=True):
     if not schedule: return 0
+    # Filter: hanya upload yang belum selesai (tanpa status "done")
+    remaining = [s for s in schedule if s.get("status") != "done"]
+    if not remaining:
+        log_fn("Semua schedule sudah selesai diupload.")
+        return 0
+    log_fn(f"Schedule: {len(remaining)} sisa dari {len(schedule)} total")
     chrome_proc = open_chrome_debug(TIKTOK_UD, TIKTOK_PORT)
     driver = None; uploaded = 0
     try:
         driver = connect_selenium(TIKTOK_PORT)
-        total = len(schedule)
-        for idx, item in enumerate(schedule):
+        total = len(remaining)
+        for idx, item in enumerate(remaining):
             if stop_event.is_set(): break
             path = item["path"]
             schedule_str = item["schedule"]
             if not os.path.exists(path):
-                log_fn(f"[{idx+1}/{total}] File tidak ada, skip: {os.path.basename(path)}"); continue
+                log_fn(f"[{idx+1}/{total}] File tidak ada, skip: {os.path.basename(path)}")
+                item["status"] = "skipped"
+                save_schedule(schedule)  # Simpan progress
+                continue
             try:
                 sched_dt = datetime.strptime(schedule_str, "%Y-%m-%d %H:%M")
             except:
-                log_fn(f"[{idx+1}/{total}] Format jadwal error, skip"); continue
+                log_fn(f"[{idx+1}/{total}] Format jadwal error, skip")
+                item["status"] = "skipped"
+                save_schedule(schedule)
+                continue
             log_fn(f"[{idx+1}/{total}] Upload: {os.path.basename(path)} | {schedule_str}")
             try:
                 navigate_upload_page(driver, force=(idx > 0))
@@ -657,13 +767,18 @@ def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event):
                 time.sleep(5)
                 # Tambah nomor urut [1], [2], dst di depan deskripsi
                 deskripsi_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
-                do_post_video(driver, deskripsi_with_num, "", "", log_fn, sched_dt, stop_event,
-                              add_sound=False, add_product=False, skip_switches=True,
+                do_post_video(driver, deskripsi_with_num,
+                              nama_produk_radio, nama_produk_input,
+                              log_fn, sched_dt, stop_event,
+                              add_sound=add_sound, add_product=add_product,
+                              skip_switches=True,
                               hashtags=hashtags if hashtags else None)
                 try: os.remove(path)
                 except: pass
                 uploaded += 1
-                log_fn(f"  [{idx+1}/{total}] Upload sukses")
+                item["status"] = "done"
+                save_schedule(schedule)  # Simpan progress setiap upload sukses
+                log_fn(f"  [{idx+1}/{total}] Upload sukses ✓ (progress disimpan)")
             except Exception as e:
                 log_fn(f"  [{idx+1}/{total}] Error: {e}")
             if idx < total-1 and not stop_event.is_set():
@@ -674,7 +789,7 @@ def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event):
         except: pass
         try: chrome_proc.terminate()
         except: pass
-    log_fn(f"Upload selesai: {uploaded}/{len(schedule)}")
+    log_fn(f"Upload selesai: {uploaded}/{total}")
     return uploaded
 
 
@@ -713,6 +828,10 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     settings = load_settings()
     prompt_name = settings.get("prompt_name",""); folder_name = settings.get("folder_name","")
     deskripsi = settings.get("deskripsi",""); hashtags = settings.get("hashtags",[])
+    nama_produk_radio = settings.get("nama_produk_radio","")
+    nama_produk_input = settings.get("nama_produk_input","")
+    add_product = settings.get("add_product", True)
+    add_sound = settings.get("add_sound", True)
     prompt_text = load_prompts().get(prompt_name,"")
 
     if not prompt_text:
@@ -753,7 +872,11 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
         sendmsg("Pipeline dihentikan sebelum upload."); log_done.set(); full_auto_task.pop(uid,None); return
 
     log_fn("STEP 3: Upload TikTok")
-    uploaded = upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event)
+    uploaded = upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event,
+                                      nama_produk_radio=nama_produk_radio,
+                                      nama_produk_input=nama_produk_input,
+                                      add_product=add_product,
+                                      add_sound=add_sound)
     log_fn(f"Upload selesai: {uploaded}/{len(schedule)}")
     sendmsg(f"<b>Pipeline selesai!</b>\nTerupload: <b>{uploaded}/{len(schedule)}</b>\nSisa stok: <b>{count_stok()}</b>")
     log_done.set()
@@ -807,13 +930,28 @@ def main_menu_kb(uid=None):
 
 def status_text():
     s = load_settings(); stok = count_stok(); sched = load_schedule()
+    prod_status = "\u2705 ON" if s.get('add_product', True) else "\u274c OFF"
+    sound_status = "\u2705 ON" if s.get('add_sound', True) else "\u274c OFF"
+    # Schedule progress
+    sched_done = len([x for x in sched if x.get("status") == "done"])
+    sched_remaining = len([x for x in sched if x.get("status") not in ("done", "skipped")])
+    sched_info = f"{len(sched)} slot"
+    if sched_done > 0:
+        sched_info += f" (\u2705 {sched_done} selesai, \u23f3 {sched_remaining} sisa)"
+    # Raw leftover
+    raw_count = len(glob.glob(os.path.join(BRUTAL_RAW_DIR, "*.mp4"))) if os.path.isdir(BRUTAL_RAW_DIR) else 0
+    raw_info = f"\n\u26a0\ufe0f Raw sisa: <b>{raw_count}</b> (akan auto-merge saat generate)" if raw_count > 0 else ""
     return (f"<b>Brutal Bot</b>\n\n"
             f"Stok: <b>{stok}/{MAX_STOK}</b> video\n"
             f"Prompt: <code>{escape_html(s.get('prompt_name','(kosong)'))}</code>\n"
             f"Folder: <code>{escape_html(s.get('folder_name','(kosong)'))}</code>\n"
             f"Deskripsi: <code>{escape_html(s.get('deskripsi','(kosong)')[:50])}</code>\n"
             f"Hashtags: <code>{escape_html(', '.join('#'+h for h in s.get('hashtags',[])) or '(kosong)')}</code>\n"
-            f"Schedule tersimpan: <b>{len(sched)}</b> slot\n"
+            f"\n<b>\ud83d\uded2 Produk:</b> {prod_status}\n"
+            f"  Nama: <code>{escape_html(s.get('nama_produk_radio','(kosong)')[:50])}</code>\n"
+            f"  Judul: <code>{escape_html(s.get('nama_produk_input','(kosong)')[:50])}</code>\n"
+            f"<b>\ud83c\udfb5 Sound:</b> {sound_status}\n"
+            f"\nSchedule: <b>{sched_info}</b>{raw_info}\n"
             f"Generate jam: <b>{GENERATE_HOUR:02d}:00</b> | Schedule mulai: <b>{SCHEDULE_START_HOUR:02d}:00</b>")
 
 
@@ -833,7 +971,13 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set prompt NAMA</code>\n"
             "<code>/set folder NAMA</code>\n"
             "<code>/set desc teks deskripsi</code>\n"
-            "<code>/set hashtags fyp, viral, tiktok</code>",
+            "<code>/set hashtags fyp, viral, tiktok</code>\n"
+            "\n<b>🛒 Produk:</b>\n"
+            "<code>/set produk on</code> atau <code>/set produk off</code>\n"
+            "<code>/set produk_radio NAMA_RADIO</code>\n"
+            "<code>/set produk_input JUDUL_PRODUK</code>\n"
+            "\n<b>🎵 Sound:</b>\n"
+            "<code>/set sound on</code> atau <code>/set sound off</code>",
             parse_mode=ParseMode.HTML); return
     sub = args[1].lower(); val = args[2].strip()
     s = load_settings()
@@ -851,6 +995,24 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif sub in ("hashtags","tags"):
         tags = [t.strip().lstrip('#') for t in re.split(r'[,\n]+',val) if t.strip()]
         s["hashtags"] = tags; val = ', '.join('#'+t for t in tags)
+    elif sub == "produk":
+        if val.lower() in ("on","true","1","ya"):
+            s["add_product"] = True; val = "ON ✅"
+        elif val.lower() in ("off","false","0","tidak"):
+            s["add_product"] = False; val = "OFF ❌"
+        else:
+            await update.message.reply_text("Gunakan: <code>/set produk on</code> atau <code>/set produk off</code>", parse_mode=ParseMode.HTML); return
+    elif sub == "produk_radio":
+        s["nama_produk_radio"] = val
+    elif sub == "produk_input":
+        s["nama_produk_input"] = val
+    elif sub == "sound":
+        if val.lower() in ("on","true","1","ya"):
+            s["add_sound"] = True; val = "ON ✅"
+        elif val.lower() in ("off","false","0","tidak"):
+            s["add_sound"] = False; val = "OFF ❌"
+        else:
+            await update.message.reply_text("Gunakan: <code>/set sound on</code> atau <code>/set sound off</code>", parse_mode=ParseMode.HTML); return
     else:
         await update.message.reply_text("Sub-command tidak dikenal."); return
     save_settings(s)
@@ -869,11 +1031,25 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "settings_menu":
         prompts = load_prompts(); folders = list_bahan_folders()
+        s = load_settings()
+        prod_status = "✅ ON" if s.get('add_product', True) else "❌ OFF"
+        sound_status = "✅ ON" if s.get('add_sound', True) else "❌ OFF"
         text = ("<b>Settings</b>\n\nGunakan /set:\n"
                 "<code>/set prompt NAMA</code>\n<code>/set folder NAMA</code>\n"
                 "<code>/set desc teks...</code>\n<code>/set hashtags fyp, viral</code>\n\n"
+                "<b>🛒 Produk:</b>\n"
+                "<code>/set produk on/off</code>\n"
+                "<code>/set produk_radio NAMA_RADIO</code>\n"
+                "<code>/set produk_input JUDUL_PRODUK</code>\n\n"
+                "<b>🎵 Sound:</b>\n"
+                "<code>/set sound on/off</code>\n\n"
                 f"Prompt: {escape_html(', '.join(prompts.keys()))}\n"
-                f"Folder: {escape_html(', '.join(folders))}")
+                f"Folder: {escape_html(', '.join(folders))}\n\n"
+                f"<b>Current:</b>\n"
+                f"  Produk: {prod_status}\n"
+                f"  Produk Radio: <code>{escape_html(s.get('nama_produk_radio','(kosong)'))}</code>\n"
+                f"  Produk Input: <code>{escape_html(s.get('nama_produk_input','(kosong)'))}</code>\n"
+                f"  Sound: {sound_status}")
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "gen_now":
@@ -937,7 +1113,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ll3=threading.Lock(); log3=[]
             def lg3(m):
                 with ll3: log3.append(m)
-            uploaded = upload_schedule_tiktok(schedule, s.get("deskripsi",""), s.get("hashtags",[]), lg3, stop_evt)
+            uploaded = upload_schedule_tiktok(schedule, s.get("deskripsi",""), s.get("hashtags",[]), lg3, stop_evt,
+                                              nama_produk_radio=s.get("nama_produk_radio",""),
+                                              nama_produk_input=s.get("nama_produk_input",""),
+                                              add_product=s.get("add_product", True),
+                                              add_sound=s.get("add_sound", True))
             asyncio.run_coroutine_threadsafe(
                 bot.send_message(chat_id,f"Upload selesai! {uploaded}/{len(schedule)} video ke TikTok.",parse_mode=ParseMode.HTML),main_loop)
             active_upload_task.pop(uid,None)
