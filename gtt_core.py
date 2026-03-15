@@ -484,22 +484,26 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
         driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": RAW_DIR})
         remaining = target_raw
         while remaining > 0 and not stop_event.is_set():
-            batch = min(remaining, 10)
+            batch = min(remaining, 30)
             log_fn(f"[UD {ud_num}] Batch: {batch} tab (sisa {remaining})")
             tab_handles = []; tab_status = {}; tab_prog = {}
             batch_start = time.time()
+            driver.get(GROK_URL); time.sleep(3)
             for i in range(batch):
                 if stop_event.is_set(): break
                 img = get_random_bahan_image(bahan_folder)
                 if not img: log_fn(f"[UD {ud_num}] Tidak ada gambar!"); break
-                if i == 0: driver.get(GROK_URL); time.sleep(3)
-                else: driver.switch_to.new_window('tab'); driver.get(GROK_URL); time.sleep(3)
                 tab_handles.append(driver.current_window_handle)
                 ok = setup_tab_grok(driver, img, prompt_text, log_fn, i)
                 tab_status[i] = "generating" if ok else "failed"
                 tab_prog[i] = 0
                 if not ok: failed += 1
                 time.sleep(1)
+                if i < batch - 1:
+                    if ok:
+                        driver.switch_to.new_window('tab'); driver.get(GROK_URL); time.sleep(3)
+                    else:
+                        driver.get(GROK_URL); time.sleep(3)
             if stop_event.is_set(): break
             timeout_start = time.time()
             while not stop_event.is_set():
