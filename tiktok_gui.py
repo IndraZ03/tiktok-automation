@@ -278,6 +278,23 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
       # B – Next 1
       n1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Next']]")))
       n1.click(); time.sleep(2)
+
+      # B2 – Cek apakah ada tab "My shop", jika ya klik "Showcase products"
+      try:
+          my_shop_tab = driver.find_elements(By.XPATH,
+              "//div[contains(@class,'TUXTabBar-item')]//button[contains(@class,'TUXTabBar-itemTitle')]//div[text()='My shop']")
+          if my_shop_tab and my_shop_tab[0].is_displayed():
+              log("Tab 'My shop' terdeteksi, klik 'Showcase products'...")
+              showcase_tab = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH,
+                  "//div[contains(@class,'TUXTabBar-item')]//button[contains(@class,'TUXTabBar-itemTitle')]//div[text()='Showcase products']")))
+              showcase_tab.click()
+              time.sleep(2)
+              log("✓ Tab 'Showcase products' diklik")
+          else:
+              log("Tab 'My shop' tidak terdeteksi, lanjut...")
+      except Exception as e_tab:
+          log(f"⚠ Cek tab My shop: {e_tab}")
+
       # C – Radio button selection
       log(f"STEP C: Memilih produk: {nama_produk_radio[:60]}...")
       xpath_produk = f"//input[@type='radio' and @name='{nama_produk_radio}']"
@@ -1115,35 +1132,100 @@ class TikTokSchedulerApp:
             self.start_from_combo.set("-- Tidak ada video --")
 
     def _show_upload_history(self):
-        """Show upload history in a popup window."""
-        db = load_db()
+        """Show upload history in a popup window with delete capability."""
         win = tk.Toplevel(self.root)
         win.title("Upload History")
-        win.geometry("600x500")
+        win.geometry("650x500")
         win.configure(bg=BG)
         win.attributes('-topmost', True)
 
         tk.Label(win, text="📝 Upload History", bg=BG, fg=ACCENT,
                  font=("Segoe UI", 16, "bold")).pack(pady=10)
 
-        text = scrolledtext.ScrolledText(win, bg="#0a0a15", fg="#aaffaa",
-                                          font=("Consolas", 10), relief="flat",
-                                          wrap="word")
-        text.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+        # Style Treeview
+        style = ttk.Style()
+        style.configure("Treeview", background="#0a0a15", foreground="#aaffaa", 
+                        fieldbackground="#0a0a15", font=("Consolas", 10), borderwidth=0)
+        style.map('Treeview', background=[('selected', ACCENT2)], foreground=[('selected', 'white')])
+        style.configure("Treeview.Heading", background=BG_CARD, foreground=FG, font=("Segoe UI", 10, "bold"))
 
-        if not db:
-            text.insert(tk.END, "Belum ada riwayat upload.\n")
-        else:
-            for folder_name, videos in db.items():
-                text.insert(tk.END, f"\n═══ 📁 {folder_name} ({len(videos)} video) ═══\n", )
-                for i, v in enumerate(videos, 1):
-                    text.insert(tk.END, f"  {i}. {v}\n")
+        tree_frame = tk.Frame(win, bg=BG)
+        tree_frame.pack(fill="both", expand=True, padx=15, pady=(0, 10))
 
-        text.config(state="disabled")
+        scroll_y = ttk.Scrollbar(tree_frame)
+        scroll_y.pack(side="right", fill="y")
 
-        tk.Button(win, text="Tutup", bg=BTN_DANGER, fg="white", relief="flat",
+        tree = ttk.Treeview(tree_frame, columns=("folder", "video"), show="headings",
+                            yscrollcommand=scroll_y.set, selectmode="extended")
+        tree.heading("folder", text="Folder")
+        tree.column("folder", width=200, anchor="w")
+        tree.heading("video", text="Video")
+        tree.column("video", width=400, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        scroll_y.config(command=tree.yview)
+
+        def refresh_tree():
+            for item in tree.get_children():
+                tree.delete(item)
+            db = load_db()
+            if not db:
+                tree.insert("", tk.END, values=("Belum ada riwayat upload.", ""))
+            else:
+                for folder_name, videos in db.items():
+                    for v in videos:
+                        tree.insert("", tk.END, values=(folder_name, v))
+
+        refresh_tree()
+
+        def delete_selected():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning("Peringatan", "Pilih riwayat yang ingin dihapus!", parent=win)
+                return
+            
+            # Don't delete if it's the empty message
+            first_val = tree.item(selected[0], "values")
+            if first_val and first_val[0] == "Belum ada riwayat upload.": return
+
+            if messagebox.askyesno("Konfirmasi", f"Hapus {len(selected)} riwayat terpilih?", parent=win):
+                db = load_db()
+                changed = False
+                for item in selected:
+                    vals = tree.item(item, "values")
+                    if vals and len(vals) == 2:
+                        folder, video = vals[0], vals[1]
+                        if folder in db and video in db[folder]:
+                            db[folder].remove(video)
+                            changed = True
+                            if not db[folder]:
+                                del db[folder]
+                if changed:
+                    save_db(db)
+                    refresh_tree()
+                    self._refresh_video_list()
+
+        def clear_all():
+            db = load_db()
+            if not db: return
+            if messagebox.askyesno("Konfirmasi", "Hapus SEMUA riwayat upload?", parent=win):
+                save_db({})
+                refresh_tree()
+                self._refresh_video_list()
+
+        btn_frame = tk.Frame(win, bg=BG)
+        btn_frame.pack(fill="x", padx=15, pady=(0, 10))
+
+        tk.Button(btn_frame, text="🗑️ Hapus Terpilih", bg="#ff9800", fg="white", relief="flat",
+                  padx=15, pady=5, font=("Segoe UI", 10, "bold"),
+                  command=delete_selected, cursor="hand2").pack(side="left")
+
+        tk.Button(btn_frame, text="💣 Hapus Semua", bg=BTN_DANGER, fg="white", relief="flat",
+                  padx=15, pady=5, font=("Segoe UI", 10, "bold"),
+                  command=clear_all, cursor="hand2").pack(side="left", padx=10)
+
+        tk.Button(btn_frame, text="Tutup", bg=BG_INPUT, fg=FG, relief="flat",
                   padx=20, pady=5, font=("Segoe UI", 10),
-                  command=win.destroy, cursor="hand2").pack(pady=(0, 10))
+                  command=win.destroy, cursor="hand2").pack(side="right")
 
     def _log(self, msg, tag=None):
         ts = datetime.now().strftime("%H:%M:%S")
