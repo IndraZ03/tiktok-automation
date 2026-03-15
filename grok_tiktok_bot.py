@@ -114,14 +114,38 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
         # STEP 1: Generate jika stok kurang
         if needed > 0 and not stop_event.is_set():
             send(f"<b>UD {ud_num} STEP 1:</b> Generate {needed} video (stok: {current_stok}/{batch_size})")
-            log_lines = []; log_lock = threading.Lock()
+            import html as _html
+            gen_log_lines = []; gen_log_lock = threading.Lock()
+            gen_done = threading.Event()
+
             def log_fn(msg):
-                with log_lock:
-                    log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {msg}")
-                    if len(log_lines) > 30: log_lines.pop(0)
+                s = _html.escape(str(msg))
+                with gen_log_lock:
+                    gen_log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                    if len(gen_log_lines) > 20: gen_log_lines.pop(0)
+
+            def _gen_updater():
+                last_text = ""
+                while not gen_done.is_set() and not stop_event.is_set():
+                    time.sleep(5)
+                    with gen_log_lock:
+                        if not gen_log_lines: continue
+                        text = f"<b>[UD {ud_num}] Generate Progress ({count_stok(ud_num)}/{batch_size})</b>\n" + "\n".join(gen_log_lines)
+                    if text != last_text:
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(
+                                bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
+                            future.result(timeout=10)
+                            last_text = text
+                        except: pass
+
+            updater_t = threading.Thread(target=_gen_updater, daemon=True)
+            updater_t.start()
 
             generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
                                  grok_ud, grok_port, log_fn, stop_event)
+            gen_done.set()
+            updater_t.join(timeout=3)
             send(f"<b>UD {ud_num}:</b> Generate selesai! Stok: {count_stok(ud_num)}")
 
         if stop_event.is_set(): break
