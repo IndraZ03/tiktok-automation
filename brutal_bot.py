@@ -38,7 +38,7 @@ ALLOWED_USER_IDS = []   # kosong = semua boleh
 APP_DIR          = r"C:\tiktok_automation"
 BAHAN_DIR        = os.path.join(APP_DIR, "bahan")
 BRUTAL_STOK_DIR  = os.path.join(APP_DIR, "brutal_stok")
-MP3_DIR          = os.path.join(APP_DIR, "TikTok_MP3")
+MP3_DIR          = os.path.join(APP_DIR, "brutal_mp3")
 BRUTAL_UD        = os.path.join(APP_DIR, "user_data", "brutal1")
 BRUTAL_PORT      = "9260"
 GROK_URL         = "https://grok.com/imagine"
