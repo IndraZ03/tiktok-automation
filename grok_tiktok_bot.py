@@ -11,11 +11,12 @@ from telegram.constants import ParseMode
 
 sys.path.insert(0, r"c:\tiktok_automation")
 from gtt_core import (
-    APP_DIR, BAHAN_DIR, DB_FILE, RAW_DIR,
+    APP_DIR, BAHAN_DIR, DB_FILE, RAW_DIR, USER_DATA_BASE,
     load_db, save_db, get_ud_config, stok_dir, count_stok, list_stok,
     load_ud_schedule, save_ud_schedule,
     load_prompts, save_prompts, list_bahan_folders, list_bahan_images,
     escape_html, generate_stok_for_ud, build_tiktok_schedule, upload_tiktok_batch,
+    resolve_ud_path,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -52,7 +53,7 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
     while not stop_event.is_set():
         db = load_db()
         active = db.get("active_ud", [1, 2])
-        grok_ud = db.get("grok_ud", os.path.join(APP_DIR, "user_data", "gtt_grok"))
+        grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
         grok_port = db.get("grok_port", "9270")
 
         # Kumpulkan kandidat UD
@@ -259,8 +260,10 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set interval 1 5</code> - Interval (jam)\n"
             "<code>/set batch 1 30</code> - Batch size\n"
             "<code>/set sched 1 2026-03-16 02:00</code> - Schedule\n"
-            "<code>/set grok_ud PATH</code> - Grok user_data\n"
-            "<code>/set grok_port PORT</code> - Grok port",
+            "<code>/set tiktok_ud 1 2</code> - TikTok user_data UD 1 = user_data/2\n"
+            "<code>/set tiktok_port 1 9223</code> - TikTok port\n"
+            "<code>/set grok_ud gtt_grok</code> - Grok user_data\n"
+            "<code>/set grok_port 9270</code> - Grok port",
             parse_mode=ParseMode.HTML)
         return
     parts = args[1].split(None, 1)
@@ -278,8 +281,9 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Active UD: <b>{', '.join(str(x) for x in nums)}</b>", parse_mode=ParseMode.HTML)
         return
     if sub == "grok_ud":
-        db["grok_ud"] = val; save_db(db)
-        await update.message.reply_text(f"Grok UD: <code>{escape_html(val)}</code>", parse_mode=ParseMode.HTML); return
+        full_path = resolve_ud_path(val)
+        db["grok_ud"] = full_path; save_db(db)
+        await update.message.reply_text(f"Grok UD: <code>{escape_html(full_path)}</code>", parse_mode=ParseMode.HTML); return
     if sub == "grok_port":
         db["grok_port"] = val; save_db(db)
         await update.message.reply_text(f"Grok Port: <code>{val}</code>", parse_mode=ParseMode.HTML); return
@@ -339,7 +343,8 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("Format tanggal salah!", parse_mode=ParseMode.HTML); return
     elif sub == "tiktok_ud":
-        cfg["tiktok_ud"] = ud_val
+        cfg["tiktok_ud"] = resolve_ud_path(ud_val)
+        ud_val = cfg["tiktok_ud"]
     elif sub == "tiktok_port":
         cfg["tiktok_port"] = ud_val
     else:
@@ -512,7 +517,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
 
         stop_evt = threading.Event()
-        grok_ud = db.get("grok_ud", os.path.join(APP_DIR, "user_data", "gtt_grok"))
+        grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
         grok_port = db.get("grok_port", "9270")
         def _gen():
             def lg(m): pass

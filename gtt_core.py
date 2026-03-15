@@ -19,11 +19,19 @@ sys.path.insert(0, r"c:\tiktok_automation")
 from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page, do_upload_file, do_post_video
 
 APP_DIR = r"C:\tiktok_automation"
+USER_DATA_BASE = os.path.join(APP_DIR, "user_data")
 BAHAN_DIR = os.path.join(APP_DIR, "bahan")
 PROMPTS_FILE = os.path.join(APP_DIR, "grok_prompts.json")
 DB_FILE = os.path.join(APP_DIR, "gtt_db.json")
 GROK_URL = "https://grok.com/imagine"
 RAW_DIR = os.path.join(APP_DIR, "gtt_raw")
+
+def resolve_ud_path(val):
+    val = val.strip()
+    if not val: return ""
+    if ":" in val or val.startswith("\\") or val.startswith("/"):
+        return os.path.normpath(val)
+    return os.path.normpath(os.path.join(USER_DATA_BASE, val))
 
 def _find_bin(name):
     found = shutil.which(name)
@@ -57,16 +65,16 @@ _DEFAULT_UD_CONFIG = {
 
 _DEFAULT_DB = {
     "active_ud": [1, 2],
-    "grok_ud": os.path.join(APP_DIR, "user_data", "gtt_grok"),
+    "grok_ud": os.path.join(USER_DATA_BASE, "gtt_grok"),
     "grok_port": "9270",
     "ud_configs": {},
 }
 
 _UD_TIKTOK_DEFAULTS = {
-    1: {"tiktok_ud": os.path.join(APP_DIR, "user_data", "1"), "tiktok_port": "9222"},
-    2: {"tiktok_ud": os.path.join(APP_DIR, "user_data", "2"), "tiktok_port": "9223"},
-    3: {"tiktok_ud": os.path.join(APP_DIR, "user_data", "3"), "tiktok_port": "9224"},
-    4: {"tiktok_ud": os.path.join(APP_DIR, "user_data", "4"), "tiktok_port": "9225"},
+    1: {"tiktok_ud": os.path.join(USER_DATA_BASE, "1"), "tiktok_port": "9222"},
+    2: {"tiktok_ud": os.path.join(USER_DATA_BASE, "2"), "tiktok_port": "9223"},
+    3: {"tiktok_ud": os.path.join(USER_DATA_BASE, "3"), "tiktok_port": "9224"},
+    4: {"tiktok_ud": os.path.join(USER_DATA_BASE, "4"), "tiktok_port": "9225"},
 }
 
 def load_db():
@@ -86,7 +94,7 @@ def get_ud_config(db, ud_num):
     if key not in db.get("ud_configs", {}):
         cfg = copy.deepcopy(_DEFAULT_UD_CONFIG)
         defaults = _UD_TIKTOK_DEFAULTS.get(ud_num, {})
-        cfg["tiktok_ud"] = defaults.get("tiktok_ud", os.path.join(APP_DIR, "user_data", str(ud_num)))
+        cfg["tiktok_ud"] = defaults.get("tiktok_ud", os.path.join(USER_DATA_BASE, str(ud_num)))
         cfg["tiktok_port"] = defaults.get("tiktok_port", str(9221 + ud_num))
         now = datetime.now()
         cfg["schedule"]["tanggal"] = now.strftime("%Y-%m-%d")
