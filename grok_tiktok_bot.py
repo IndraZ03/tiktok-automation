@@ -526,22 +526,26 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log_lines = []
         log_lock = threading.Lock()
         
-        async def _log_updater():
+        def _log_updater():
             last_text = ""
             while not stop_evt.is_set():
-                await asyncio.sleep(4.0)
+                time.sleep(4.0)
                 with log_lock:
                     if not log_lines: continue
                     text = f"<b>[UD {ud_num}] Prog Generate {needed} Stok</b>\n" + "\n".join(log_lines)
                 if text != last_text:
                     try:
-                        await bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, 
-                                                    parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+                        future = asyncio.run_coroutine_threadsafe(
+                            bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, 
+                                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                            main_loop
+                        )
+                        future.result(timeout=5)
                         last_text = text
-                    except Exception as e:
-                        pass # Ignore flood control or unchanged messages
+                    except Exception:
+                        pass
 
-        asyncio.create_task(_log_updater())
+        threading.Thread(target=_log_updater, daemon=True).start()
         
         def _gen():
             import html
