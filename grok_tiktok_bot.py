@@ -520,46 +520,55 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
         grok_port = db.get("grok_port", "9270")
         
-        initial_msg = await q.edit_message_text(f"Generate UD {ud_num} dimulai! Target: {needed} video\nInit...", reply_markup=main_menu_kb(uid))
+        initial_msg = await q.edit_message_text(f"Generate UD {ud_num} dimulai! Target: {needed} video\nMembuka browser...", reply_markup=main_menu_kb(uid))
         msg_id = initial_msg.message_id
         
         log_lines = []
         log_lock = threading.Lock()
-        last_edit = [time.time()]
+        
+        async def _log_updater():
+            last_text = ""
+            while not stop_evt.is_set():
+                await asyncio.sleep(4.0)
+                with log_lock:
+                    if not log_lines: continue
+                    text = f"<b>[UD {ud_num}] Prog Generate {needed} Stok</b>\n" + "\n".join(log_lines)
+                if text != last_text:
+                    try:
+                        await bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, 
+                                                    parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+                        last_text = text
+                    except Exception as e:
+                        pass # Ignore flood control or unchanged messages
+
+        asyncio.create_task(_log_updater())
         
         def _gen():
+            import html
             def lg(msg):
+                s = html.escape(str(msg))
                 with log_lock:
-                    log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {msg}")
-                    if len(log_lines) > 15:
+                    log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                    if len(log_lines) > 20:
                         log_lines.pop(0)
-                
-                # Throttle edit message 2.5 seconds max
-                now = time.time()
-                if now - last_edit[0] > 2.5:
-                    last_edit[0] = now
-                    try:
-                        text = f"<b>[UD {ud_num}] Generate Progress</b>\n" + "\n".join(log_lines)
-                        asyncio.run_coroutine_threadsafe(
-                            bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, 
-                                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
-                            main_loop
-                        )
-                    except: pass
-                    
-            generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                 grok_ud, grok_port, lg, stop_evt)
-                                 
-            # Final Update
+                        
             try:
-                final_text = f"<b>Generate UD {ud_num} Selesai!</b> Stok: {count_stok(ud_num)}\n" + "\n".join(log_lines[-5:])
-                asyncio.run_coroutine_threadsafe(
-                    bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id, 
-                                          parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
-                    main_loop
-                )
-            except: pass
-            active_gen_task.pop(uid, None)
+                generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
+                                     grok_ud, grok_port, lg, stop_evt)
+            except Exception as e:
+                lg(f"Error {type(e).__name__}: {str(e)[:40]}")
+            finally:
+                stop_evt.set()
+                try:
+                    with log_lock:
+                        final_text = f"<b>Generate UD {ud_num} Selesai!</b> Stok: {count_stok(ud_num)}\n" + "\n".join(log_lines[-7:])
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id, 
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop
+                    )
+                except: pass
+                active_gen_task.pop(uid, None)
             
         t = threading.Thread(target=_gen, daemon=True); t.start()
         active_gen_task[uid] = {"stop": stop_evt, "thread": t}
