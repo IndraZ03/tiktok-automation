@@ -48,8 +48,11 @@ TIKTOK_UD        = os.path.join(APP_DIR, "user_data", "brutal")  # UD TikTok upl
 TIKTOK_PORT      = "9261"
 
 MAX_STOK         = 50   # max video di brutal_stok
-GENERATE_HOUR    = 1    # jam mulai generate (01:00)
+GENERATE_HOUR    = 0    # jam mulai generate
+GENERATE_MINUTE  = 1    # menit mulai generate (00:01)
 SCHEDULE_START_HOUR = 2 # jam mulai schedule TikTok (02:00)
+BATCH1_COUNT     = 30   # jumlah video batch pertama
+BATCH2_COUNT     = 20   # jumlah video batch kedua
 
 # ═══════════════════════════════════════════════════════════════
 #  STATE
@@ -157,10 +160,11 @@ def _is_in_rest(minutes_abs: int) -> tuple:
             return True, end
     return False, 0
 
-def generate_schedule(video_paths: list, base_date: datetime = None) -> list:
+def generate_schedule(video_paths: list, base_date: datetime = None, max_videos: int = None) -> list:
     """
-    Generate schedule for up to 50 videos using sequential random anti-collision.
+    Generate schedule for videos using sequential random anti-collision.
     base_date: datetime for the first video slot (default: today 02:00 + random 0-15 min)
+    max_videos: max number of videos to schedule (default: len(video_paths))
     Returns list of {"path": ..., "schedule": "YYYY-MM-DD HH:MM"} sorted by time.
     """
     if not video_paths: return []
@@ -169,11 +173,14 @@ def generate_schedule(video_paths: list, base_date: datetime = None) -> list:
         today = datetime.now().replace(hour=SCHEDULE_START_HOUR, minute=0, second=0, microsecond=0)
         base_date = today + timedelta(minutes=random.randint(0, 15))
 
+    limit = max_videos if max_videos else len(video_paths)
+    to_schedule = video_paths[:limit]
+
     results = []
     current_dt = base_date
     first_dt = base_date
 
-    for i, path in enumerate(video_paths[:MAX_STOK]):
+    for i, path in enumerate(to_schedule):
         if i > 0:
             # Random gap 5-25 menit
             gap = random.randint(5, 25)
@@ -188,10 +195,6 @@ def generate_schedule(video_paths: list, base_date: datetime = None) -> list:
             if not in_rest:
                 break
             # Jump to end of rest + random 8-36 menit
-            base_mins = candidate_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            rest_day_offset = candidate_dt - base_mins
-            hours_so_far = int(rest_day_offset.total_seconds() // 3600)
-            # Compute absolute datetime at end of rest period
             candidate_dt = candidate_dt.replace(
                 hour=end_mins // 60,
                 minute=end_mins % 60,
@@ -728,7 +731,7 @@ def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
     return merged
 
 
-def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event,
+def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, stop_event=None,
                           nama_produk_radio="", nama_produk_input="",
                           add_product=True, add_sound=True):
     if not schedule: return 0
@@ -794,6 +797,7 @@ def upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event,
 
 
 def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
+    """Full Auto pipeline: generate 50 stok → schedule 30 → wait → schedule 20."""
     def sendmsg(text):
         asyncio.run_coroutine_threadsafe(bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
 
@@ -841,6 +845,7 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
         sendmsg(f"Folder bahan <code>{escape_html(folder_name)}</code> kosong!")
         log_done.set(); full_auto_task.pop(uid,None); return
 
+    # ── STEP 1: Generate stok ──
     needed = stok_needed()
     if needed <= 0:
         log_fn(f"Stok sudah penuh ({count_stok()}/{MAX_STOK}), skip generate")
@@ -859,26 +864,87 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     if not stok_files:
         sendmsg("Tidak ada stok video!"); log_done.set(); full_auto_task.pop(uid,None); return
 
-    log_fn("STEP 2: Buat schedule")
-    today_02 = datetime.now().replace(hour=SCHEDULE_START_HOUR,minute=0,second=0,microsecond=0)
-    schedule = generate_schedule(stok_files, base_date=today_02)
-    save_schedule(schedule)
-    log_fn(f"Schedule: {len(schedule)} slot")
-    preview = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule[:8])])
-    if len(schedule)>8: preview+=f"\n  ... +{len(schedule)-8} lagi"
-    sendmsg(f"<b>Schedule ({len(schedule)} video):</b>\n{preview}\n\nMulai upload TikTok...")
+    upload_kwargs = dict(
+        deskripsi=deskripsi, hashtags=hashtags,
+        nama_produk_radio=nama_produk_radio,
+        nama_produk_input=nama_produk_input,
+        add_product=add_product, add_sound=add_sound
+    )
+    total_uploaded = 0
+
+    # ── STEP 2: BATCH 1 — Schedule & upload 30 video mulai jam 02:00 ──
+    batch1_files = stok_files[:BATCH1_COUNT]
+    batch2_files = stok_files[BATCH1_COUNT:BATCH1_COUNT + BATCH2_COUNT]
+
+    log_fn(f"STEP 2: Batch 1 — {len(batch1_files)} video mulai jam {SCHEDULE_START_HOUR:02d}:00")
+    today_02 = datetime.now().replace(hour=SCHEDULE_START_HOUR, minute=0, second=0, microsecond=0)
+    # Jika jam 02:00 sudah lewat hari ini, gunakan besok
+    if datetime.now() >= today_02:
+        today_02 += timedelta(days=1)
+    base1 = today_02 + timedelta(minutes=random.randint(0, 15))
+    schedule_batch1 = generate_schedule(batch1_files, base_date=base1)
+    save_schedule(schedule_batch1)
+
+    preview1 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch1[:8])])
+    if len(schedule_batch1) > 8: preview1 += f"\n  ... +{len(schedule_batch1)-8} lagi"
+    sendmsg(f"<b>Batch 1 ({len(schedule_batch1)} video):</b>\n{preview1}\n\nMulai upload Batch 1...")
 
     if stop_event.is_set():
         sendmsg("Pipeline dihentikan sebelum upload."); log_done.set(); full_auto_task.pop(uid,None); return
 
-    log_fn("STEP 3: Upload TikTok")
-    uploaded = upload_schedule_tiktok(schedule, deskripsi, hashtags, log_fn, stop_event,
-                                      nama_produk_radio=nama_produk_radio,
-                                      nama_produk_input=nama_produk_input,
-                                      add_product=add_product,
-                                      add_sound=add_sound)
-    log_fn(f"Upload selesai: {uploaded}/{len(schedule)}")
-    sendmsg(f"<b>Pipeline selesai!</b>\nTerupload: <b>{uploaded}/{len(schedule)}</b>\nSisa stok: <b>{count_stok()}</b>")
+    log_fn("STEP 3: Upload Batch 1")
+    uploaded1 = upload_schedule_tiktok(schedule_batch1, log_fn=log_fn, stop_event=stop_event, **upload_kwargs)
+    total_uploaded += uploaded1
+    log_fn(f"Batch 1 selesai: {uploaded1}/{len(schedule_batch1)}")
+    sendmsg(f"<b>Batch 1 selesai!</b> {uploaded1}/{len(schedule_batch1)} uploaded")
+
+    if stop_event.is_set() or not batch2_files:
+        if not batch2_files:
+            sendmsg(f"<b>Pipeline selesai!</b>\nTotal: <b>{total_uploaded}/{len(stok_files)}</b>")
+        else:
+            sendmsg("Pipeline dihentikan setelah Batch 1.")
+        log_done.set(); full_auto_task.pop(uid,None); return
+
+    # ── STEP 4: Tunggu sampai waktu schedule video ke-30 ──
+    last_batch1_time_str = schedule_batch1[-1]["schedule"]
+    last_batch1_dt = datetime.strptime(last_batch1_time_str, "%Y-%m-%d %H:%M")
+    now = datetime.now()
+    if now < last_batch1_dt:
+        wait_secs = (last_batch1_dt - now).total_seconds()
+        h = int(wait_secs // 3600); m = int((wait_secs % 3600) // 60)
+        log_fn(f"STEP 4: Menunggu sampai {last_batch1_time_str} ({h}j {m}m lagi)...")
+        sendmsg(f"<b>Menunggu Batch 2...</b>\nWaktu video ke-{len(schedule_batch1)}: <code>{last_batch1_time_str}</code>\n({h} jam {m} menit lagi)")
+        elapsed = 0
+        while elapsed < wait_secs and not stop_event.is_set():
+            time.sleep(min(60, wait_secs - elapsed))
+            elapsed += 60
+    else:
+        log_fn(f"Waktu video ke-{len(schedule_batch1)} sudah lewat, langsung Batch 2")
+
+    if stop_event.is_set():
+        sendmsg("Pipeline dihentikan sebelum Batch 2."); log_done.set(); full_auto_task.pop(uid,None); return
+
+    # ── STEP 5: BATCH 2 — Schedule & upload 20 video dari datetime.now() ──
+    log_fn(f"STEP 5: Batch 2 — {len(batch2_files)} video mulai dari sekarang")
+    base2 = datetime.now() + timedelta(minutes=random.randint(5, 15))
+    schedule_batch2 = generate_schedule(batch2_files, base_date=base2)
+    # Gabungkan schedule untuk save
+    full_schedule = schedule_batch1 + schedule_batch2
+    save_schedule(full_schedule)
+
+    preview2 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch2[:8])])
+    if len(schedule_batch2) > 8: preview2 += f"\n  ... +{len(schedule_batch2)-8} lagi"
+    sendmsg(f"<b>Batch 2 ({len(schedule_batch2)} video):</b>\n{preview2}\n\nMulai upload Batch 2...")
+
+    log_fn("STEP 6: Upload Batch 2")
+    uploaded2 = upload_schedule_tiktok(schedule_batch2, log_fn=log_fn, stop_event=stop_event, **upload_kwargs)
+    total_uploaded += uploaded2
+    log_fn(f"Batch 2 selesai: {uploaded2}/{len(schedule_batch2)}")
+
+    log_fn(f"Pipeline Complete: {total_uploaded}/{len(stok_files)}")
+    sendmsg(f"<b>Pipeline selesai!</b>\nBatch 1: <b>{uploaded1}/{len(schedule_batch1)}</b>\n"
+            f"Batch 2: <b>{uploaded2}/{len(schedule_batch2)}</b>\n"
+            f"Total: <b>{total_uploaded}/{len(stok_files)}</b>\nSisa stok: <b>{count_stok()}</b>")
     log_done.set()
     full_auto_task.pop(uid, None)
 
@@ -887,22 +953,23 @@ def run_full_auto_daemon(uid, chat_id, bot, main_loop, stop_event):
     def sendmsg(text):
         asyncio.run_coroutine_threadsafe(bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
 
-    sendmsg(f"<b>Full Auto Aktif!</b>\nSetiap hari jam <b>{GENERATE_HOUR:02d}:00</b> WIB:\n"
+    sendmsg(f"<b>Full Auto Aktif!</b>\nSetiap hari jam <b>{GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d}</b> WIB:\n"
             f"1. Generate {MAX_STOK} video via Grok\n"
-            f"2. Schedule TikTok mulai jam {SCHEDULE_START_HOUR:02d}:00\n\nTekan Stop Auto untuk berhenti.")
+            f"2. Schedule Batch 1: {BATCH1_COUNT} video mulai jam {SCHEDULE_START_HOUR:02d}:00\n"
+            f"3. Tunggu → Schedule Batch 2: {BATCH2_COUNT} video\n\nTekan Stop Auto untuk berhenti.")
 
     while not stop_event.is_set():
         now = datetime.now()
-        target = now.replace(hour=GENERATE_HOUR, minute=0, second=0, microsecond=0)
+        target = now.replace(hour=GENERATE_HOUR, minute=GENERATE_MINUTE, second=0, microsecond=0)
         if now >= target: target += timedelta(days=1)
         wait_secs = (target - now).total_seconds()
         h = int(wait_secs//3600); m = int((wait_secs%3600)//60)
-        sendmsg(f"<b>Full Auto:</b> Menunggu jam {GENERATE_HOUR:02d}:00...\n({h} jam {m} menit lagi)")
+        sendmsg(f"<b>Full Auto:</b> Menunggu jam {GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d}...\n({h} jam {m} menit lagi)")
         elapsed = 0
         while elapsed < wait_secs and not stop_event.is_set():
             time.sleep(min(60, wait_secs-elapsed)); elapsed += 60
         if stop_event.is_set(): break
-        sendmsg(f"<b>Jam {GENERATE_HOUR:02d}:00!</b> Memulai pipeline...")
+        sendmsg(f"<b>Jam {GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d}!</b> Memulai pipeline...")
         run_full_pipeline(uid, chat_id, bot, main_loop, stop_event)
         if stop_event.is_set(): break
 
@@ -918,8 +985,8 @@ def main_menu_kb(uid=None):
          InlineKeyboardButton("Settings", callback_data="settings_menu")],
         [InlineKeyboardButton("Generate Sekarang", callback_data="gen_now"),
          InlineKeyboardButton("Buat Schedule", callback_data="make_schedule")],
-        [InlineKeyboardButton("Upload TikTok Sekarang", callback_data="upload_now")],
-        [InlineKeyboardButton("Stop Full Auto" if is_auto else "Full Auto (01:00 Harian)",
+        [InlineKeyboardButton("📤 Upload TikTok Sekarang", callback_data="upload_now")],
+        [InlineKeyboardButton("Stop Full Auto" if is_auto else f"Full Auto ({GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d} Harian)",
                               callback_data="stop_auto" if is_auto else "start_auto")],
         [InlineKeyboardButton("Refresh", callback_data="refresh")],
     ]
@@ -952,7 +1019,8 @@ def status_text():
             f"  Judul: <code>{escape_html(s.get('nama_produk_input','(kosong)')[:50])}</code>\n"
             f"<b>Sound:</b> {sound_status}\n"
             f"\nSchedule: <b>{sched_info}</b>{raw_info}\n"
-            f"Generate jam: <b>{GENERATE_HOUR:02d}:00</b> | Schedule mulai: <b>{SCHEDULE_START_HOUR:02d}:00</b>")
+            f"Generate jam: <b>{GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d}</b> | Schedule mulai: <b>{SCHEDULE_START_HOUR:02d}:00</b>\n"
+            f"Batch: <b>{BATCH1_COUNT}+{BATCH2_COUNT}</b> (2x schedule per hari)")
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1105,10 +1173,20 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                   parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "upload_now":
-        schedule = load_schedule()
-        if not schedule: await q.answer("Belum ada schedule! Buat dulu.", show_alert=True); return
+        # Upload TikTok Sekarang: schedule dari datetime.now(), semaksimalnya
+        stok_files = list_stok()
+        if not stok_files: await q.answer("Stok kosong! Generate dulu.", show_alert=True); return
         if active_upload_task.get(uid): await q.answer("Upload sudah berjalan!", show_alert=True); return
         s = load_settings(); stop_evt = threading.Event()
+
+        # Generate schedule mulai dari sekarang + random 5-15 menit
+        base_now = datetime.now() + timedelta(minutes=random.randint(5, 15))
+        schedule = generate_schedule(stok_files, base_date=base_now)
+        save_schedule(schedule)
+
+        preview = "\n".join([f"{i+1}. <code>{x['schedule']}</code>" for i,x in enumerate(schedule[:8])])
+        if len(schedule) > 8: preview += f"\n... +{len(schedule)-8} lagi"
+
         def _upload():
             ll3=threading.Lock(); log3=[]
             def lg3(m):
@@ -1123,7 +1201,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             active_upload_task.pop(uid,None)
         t = threading.Thread(target=_upload, daemon=True)
         active_upload_task[uid] = {"stop": stop_evt, "thread": t}; t.start()
-        await q.edit_message_text(f"<b>Upload dimulai!</b>\n{len(schedule)} video ke TikTok.",
+        await q.edit_message_text(f"<b>📤 Upload Sekarang!</b>\n{len(schedule)} video dari stok\nMulai: <code>{base_now.strftime('%H:%M')}</code>\n\n{preview}",
                                   parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "start_auto":
@@ -1132,7 +1210,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         t = threading.Thread(target=run_full_auto_daemon,
                              args=(uid,chat_id,bot,main_loop,stop_evt), daemon=True)
         full_auto_task[uid] = {"stop": stop_evt, "thread": t}; t.start()
-        await q.edit_message_text("<b>Full Auto aktif!</b>\nPipeline otomatis setiap hari jam 01:00.",
+        await q.edit_message_text(f"<b>Full Auto aktif!</b>\nPipeline otomatis setiap hari jam {GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d}.\n"
+                                  f"Batch 1: {BATCH1_COUNT} video | Batch 2: {BATCH2_COUNT} video",
                                   parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "stop_auto":
