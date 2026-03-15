@@ -157,8 +157,8 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
             continue
 
         interval_hours = cfg.get("interval_hours", 5)
-        # Schedule mulai dari sekarang + 60 menit (agar TikTok bisa schedule)
-        start_dt = datetime.now() + timedelta(minutes=60)
+        # Schedule mulai dari sekarang + 30 menit setelah stok penuh
+        start_dt = datetime.now() + timedelta(minutes=30)
         start_dt = start_dt.replace(second=0, microsecond=0)
         # Bulatkan ke 5 menit
         rounded = ((start_dt.minute + 4) // 5) * 5

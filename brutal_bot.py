@@ -4,7 +4,7 @@
 Pipeline: Generate 50 video (Grok multi-tab) setiap jam 01:00
 → Schedule 50 video ke TikTok jam 02:00 dst dengan anti-collision
 """
-import os, sys, re, time, shutil, asyncio, subprocess, logging, json, threading, random, glob
+import os, sys, re, time, shutil, asyncio, subprocess, logging, json, threading, random, glob, tempfile
 from datetime import datetime, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,13 +38,14 @@ ALLOWED_USER_IDS = []   # kosong = semua boleh
 APP_DIR          = r"C:\tiktok_automation"
 BAHAN_DIR        = os.path.join(APP_DIR, "bahan")
 BRUTAL_STOK_DIR  = os.path.join(APP_DIR, "brutal_stok")
-BRUTAL_UD        = os.path.join(APP_DIR, "user_data", "brutal")
+MP3_DIR          = os.path.join(APP_DIR, "TikTok_MP3")
+BRUTAL_UD        = os.path.join(APP_DIR, "user_data", "brutal1")
 BRUTAL_PORT      = "9260"
 GROK_URL         = "https://grok.com/imagine"
 SETTINGS_FILE    = os.path.join(APP_DIR, "brutal_settings.json")
 SCHEDULE_FILE    = os.path.join(APP_DIR, "tiktok_daily_schedule.json")
 
-TIKTOK_UD        = os.path.join(APP_DIR, "user_data", "brutal")  # UD TikTok upload
+TIKTOK_UD        = os.path.join(APP_DIR, "user_data", "brutal2")  # UD TikTok upload
 TIKTOK_PORT      = "9261"
 
 MAX_STOK         = 50   # max video di brutal_stok
@@ -69,10 +70,10 @@ _DEFAULT_SETTINGS = {
     "folder_name": "",
     "deskripsi": "",
     "hashtags": [],
-    "nama_produk_radio": "",
+    "nama_produk_radio_list": [],
     "nama_produk_input": "beli sebelum promonya habis",
     "add_product": True,
-    "add_sound": True,
+    "add_sound": False,
 }
 
 def load_settings():
@@ -125,6 +126,26 @@ def get_random_bahan_image(folder_name):
     imgs = list_bahan_images(folder_name)
     if not imgs: return None
     return os.path.join(BAHAN_DIR, folder_name, random.choice(imgs))
+
+# ─── MP3 Sound ───
+def list_mp3():
+    os.makedirs(MP3_DIR, exist_ok=True)
+    return sorted([f for f in os.listdir(MP3_DIR) if f.lower().endswith('.mp3')])
+
+def get_random_mp3():
+    mp3s = list_mp3()
+    if not mp3s: return None
+    return os.path.join(MP3_DIR, random.choice(mp3s))
+
+def get_random_produk_radio(settings=None):
+    """Pick random nama_produk_radio from the list."""
+    s = settings or load_settings()
+    lst = s.get("nama_produk_radio_list", [])
+    # Backward compat: jika masih ada string lama
+    if not lst and s.get("nama_produk_radio", ""):
+        return s["nama_produk_radio"]
+    if not lst: return ""
+    return random.choice(lst)
 
 # ─── Stok ───
 def count_stok():
@@ -222,6 +243,55 @@ def load_schedule() -> list:
 # ═══════════════════════════════════════════════════════════════
 #  FFmpeg MERGE (2 video → 1 ~20 detik)
 # ═══════════════════════════════════════════════════════════════
+def _mute_and_add_mp3(video_path, log_fn=None):
+    """Mute video audio and replace with random MP3 from TikTok_MP3 folder."""
+    mp3_path = get_random_mp3()
+    if not mp3_path:
+        if log_fn: log_fn("⚠️ Tidak ada file MP3 di TikTok_MP3, video tetap muted")
+        # Just mute the video
+        tmp_out = video_path + ".muted.mp4"
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-an", "-c:v", "copy", tmp_out]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+                os.replace(tmp_out, video_path)
+                if log_fn: log_fn(f"🔇 Video dimute (tanpa MP3)")
+                return True
+        except Exception as e:
+            if log_fn: log_fn(f"❌ Mute error: {e}")
+        try:
+            if os.path.exists(tmp_out): os.remove(tmp_out)
+        except: pass
+        return False
+
+    mp3_name = os.path.basename(mp3_path)
+    if log_fn: log_fn(f"🎵 Menambahkan audio: {mp3_name[:40]}")
+    tmp_out = video_path + ".audio.mp4"
+    # Mute original audio, add MP3 as audio track, loop MP3 if shorter than video
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-stream_loop", "-1", "-i", mp3_path,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-shortest",
+        tmp_out
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+            os.replace(tmp_out, video_path)
+            if log_fn: log_fn(f"✅ Audio diganti: {mp3_name[:40]}")
+            return True
+        if log_fn: log_fn(f"❌ Audio replace gagal: {r.stderr[-150:]}")
+    except Exception as e:
+        if log_fn: log_fn(f"❌ Audio replace error: {e}")
+    try:
+        if os.path.exists(tmp_out): os.remove(tmp_out)
+    except: pass
+    return False
+
 def merge_video_pair(vid1, vid2, output_dir, log_fn=None):
     os.makedirs(output_dir, exist_ok=True)
     existing = glob.glob(os.path.join(output_dir, "*.mp4"))
@@ -240,6 +310,8 @@ def merge_video_pair(vid1, vid2, output_dir, log_fn=None):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             if log_fn: log_fn(f"✅ Merged: {next_num}.mp4 ({os.path.getsize(out_path)/1024/1024:.1f} MB)")
+            # Mute original audio & replace with random MP3
+            _mute_and_add_mp3(out_path, log_fn)
             return out_path
         if log_fn: log_fn(f"❌ Merge gagal: {r.stderr[-150:]}")
         return None
@@ -733,7 +805,8 @@ def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
 
 def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, stop_event=None,
                           nama_produk_radio="", nama_produk_input="",
-                          add_product=True, add_sound=True):
+                          add_product=True, add_sound=False,
+                          nama_produk_radio_list=None):
     if not schedule: return 0
     # Filter: hanya upload yang belum selesai (tanpa status "done")
     remaining = [s for s in schedule if s.get("status") != "done"]
@@ -762,6 +835,11 @@ def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, s
                 item["status"] = "skipped"
                 save_schedule(schedule)
                 continue
+            # Pick random produk_radio for this upload
+            chosen_radio = nama_produk_radio
+            if nama_produk_radio_list:
+                chosen_radio = random.choice(nama_produk_radio_list)
+                log_fn(f"  🎲 Produk radio dipilih: {chosen_radio[:50]}")
             log_fn(f"[{idx+1}/{total}] Upload: {os.path.basename(path)} | {schedule_str}")
             try:
                 navigate_upload_page(driver, force=(idx > 0))
@@ -771,7 +849,7 @@ def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, s
                 # Tambah nomor urut [1], [2], dst di depan deskripsi
                 deskripsi_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
                 do_post_video(driver, deskripsi_with_num,
-                              nama_produk_radio, nama_produk_input,
+                              chosen_radio, nama_produk_input,
                               log_fn, sched_dt, stop_event,
                               add_sound=add_sound, add_product=add_product,
                               skip_switches=True,
@@ -832,10 +910,14 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     settings = load_settings()
     prompt_name = settings.get("prompt_name",""); folder_name = settings.get("folder_name","")
     deskripsi = settings.get("deskripsi",""); hashtags = settings.get("hashtags",[])
-    nama_produk_radio = settings.get("nama_produk_radio","")
+    nama_produk_radio_list = settings.get("nama_produk_radio_list", [])
+    # Backward compat
+    if not nama_produk_radio_list and settings.get("nama_produk_radio", ""):
+        nama_produk_radio_list = [settings["nama_produk_radio"]]
+    nama_produk_radio = get_random_produk_radio(settings)
     nama_produk_input = settings.get("nama_produk_input","")
     add_product = settings.get("add_product", True)
-    add_sound = settings.get("add_sound", True)
+    add_sound = settings.get("add_sound", False)
     prompt_text = load_prompts().get(prompt_name,"")
 
     if not prompt_text:
@@ -868,7 +950,8 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
         deskripsi=deskripsi, hashtags=hashtags,
         nama_produk_radio=nama_produk_radio,
         nama_produk_input=nama_produk_input,
-        add_product=add_product, add_sound=add_sound
+        add_product=add_product, add_sound=add_sound,
+        nama_produk_radio_list=nama_produk_radio_list
     )
     total_uploaded = 0
 
@@ -885,8 +968,7 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     schedule_batch1 = generate_schedule(batch1_files, base_date=base1)
     save_schedule(schedule_batch1)
 
-    preview1 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch1[:8])])
-    if len(schedule_batch1) > 8: preview1 += f"\n  ... +{len(schedule_batch1)-8} lagi"
+    preview1 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch1)])
     sendmsg(f"<b>Batch 1 ({len(schedule_batch1)} video):</b>\n{preview1}\n\nMulai upload Batch 1...")
 
     if stop_event.is_set():
@@ -932,8 +1014,7 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     full_schedule = schedule_batch1 + schedule_batch2
     save_schedule(full_schedule)
 
-    preview2 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch2[:8])])
-    if len(schedule_batch2) > 8: preview2 += f"\n  ... +{len(schedule_batch2)-8} lagi"
+    preview2 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch2)])
     sendmsg(f"<b>Batch 2 ({len(schedule_batch2)} video):</b>\n{preview2}\n\nMulai upload Batch 2...")
 
     log_fn("STEP 6: Upload Batch 2")
@@ -998,7 +1079,15 @@ def main_menu_kb(uid=None):
 def status_text():
     s = load_settings(); stok = count_stok(); sched = load_schedule()
     prod_status = "ON" if s.get('add_product', True) else "OFF"
-    sound_status = "ON" if s.get('add_sound', True) else "OFF"
+    sound_status = "ON" if s.get('add_sound', False) else "OFF"
+    # Produk radio list
+    radio_list = s.get('nama_produk_radio_list', [])
+    if not radio_list and s.get('nama_produk_radio', ''):
+        radio_list = [s['nama_produk_radio']]
+    radio_display = ', '.join(radio_list) if radio_list else '(kosong)'
+    # MP3 list
+    mp3_files = list_mp3()
+    mp3_display = f"{len(mp3_files)} file" if mp3_files else '(kosong)'
     # Schedule progress
     sched_done = len([x for x in sched if x.get("status") == "done"])
     sched_remaining = len([x for x in sched if x.get("status") not in ("done", "skipped")])
@@ -1015,9 +1104,10 @@ def status_text():
             f"Deskripsi: <code>{escape_html(s.get('deskripsi','(kosong)')[:50])}</code>\n"
             f"Hashtags: <code>{escape_html(', '.join('#'+h for h in s.get('hashtags',[])) or '(kosong)')}</code>\n"
             f"\n<b>Produk:</b> {prod_status}\n"
-            f"  Nama: <code>{escape_html(s.get('nama_produk_radio','(kosong)')[:50])}</code>\n"
+            f"  Nama ({len(radio_list)}): <code>{escape_html(radio_display[:80])}</code>\n"
             f"  Judul: <code>{escape_html(s.get('nama_produk_input','(kosong)')[:50])}</code>\n"
-            f"<b>Sound:</b> {sound_status}\n"
+            f"<b>Sound TikTok:</b> {sound_status}\n"
+            f"<b>🎵 MP3 Audio:</b> {mp3_display}\n"
             f"\nSchedule: <b>{sched_info}</b>{raw_info}\n"
             f"Generate jam: <b>{GENERATE_HOUR:02d}:{GENERATE_MINUTE:02d}</b> | Schedule mulai: <b>{SCHEDULE_START_HOUR:02d}:00</b>\n"
             f"Batch: <b>{BATCH1_COUNT}+{BATCH2_COUNT}</b> (2x schedule per hari)")
@@ -1042,10 +1132,17 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set hashtags fyp, viral, tiktok</code>\n"
             "\n<b>🛒 Produk:</b>\n"
             "<code>/set produk on</code> atau <code>/set produk off</code>\n"
-            "<code>/set produk_radio NAMA_RADIO</code>\n"
             "<code>/set produk_input JUDUL_PRODUK</code>\n"
-            "\n<b>🎵 Sound:</b>\n"
-            "<code>/set sound on</code> atau <code>/set sound off</code>",
+            "\n<b>🎵 Sound TikTok:</b>\n"
+            "<code>/set sound on</code> atau <code>/set sound off</code>\n"
+            "\n<b>📻 Produk Radio (multi):</b>\n"
+            "<code>/produk_radio</code> — lihat daftar\n"
+            "<code>/produk_radio add NAMA</code> — tambah\n"
+            "<code>/produk_radio del NOMOR</code> — hapus\n"
+            "\n<b>🎵 MP3 Audio:</b>\n"
+            "<code>/mp3</code> — lihat daftar\n"
+            "<code>/mp3 del NOMOR</code> — hapus\n"
+            "Kirim file .mp3 langsung ke chat untuk menambahkan",
             parse_mode=ParseMode.HTML); return
     sub = args[1].lower(); val = args[2].strip()
     s = load_settings()
@@ -1070,8 +1167,6 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             s["add_product"] = False; val = "OFF ❌"
         else:
             await update.message.reply_text("Gunakan: <code>/set produk on</code> atau <code>/set produk off</code>", parse_mode=ParseMode.HTML); return
-    elif sub == "produk_radio":
-        s["nama_produk_radio"] = val
     elif sub == "produk_input":
         s["nama_produk_input"] = val
     elif sub == "sound":
@@ -1085,6 +1180,129 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sub-command tidak dikenal."); return
     save_settings(s)
     await update.message.reply_text(f"<code>{sub}</code> = <code>{escape_html(val[:100])}</code>", parse_mode=ParseMode.HTML)
+
+
+async def cmd_produk_radio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manage produk radio list: /produk_radio, /produk_radio add NAMA, /produk_radio del NOMOR"""
+    uid = update.effective_user.id
+    if not is_allowed(uid): return
+    raw = update.message.text.strip(); args = raw.split(None, 2)
+    s = load_settings()
+    radio_list = s.get("nama_produk_radio_list", [])
+    # Backward compat
+    if not radio_list and s.get("nama_produk_radio", ""):
+        radio_list = [s["nama_produk_radio"]]
+        s["nama_produk_radio_list"] = radio_list
+        save_settings(s)
+
+    if len(args) < 2:
+        # Show list
+        if not radio_list:
+            await update.message.reply_text("<b>📻 Produk Radio:</b>\n(kosong)\n\n<code>/produk_radio add NAMA</code> untuk menambah", parse_mode=ParseMode.HTML)
+        else:
+            lines = [f"  {i+1}. <code>{escape_html(r)}</code>" for i, r in enumerate(radio_list)]
+            await update.message.reply_text(
+                f"<b>📻 Produk Radio ({len(radio_list)}):</b>\n" + "\n".join(lines) +
+                f"\n\nUpload akan memilih <b>random 1</b> dari daftar.\n"
+                f"<code>/produk_radio add NAMA</code> — tambah\n"
+                f"<code>/produk_radio del NOMOR</code> — hapus",
+                parse_mode=ParseMode.HTML)
+        return
+
+    sub_cmd = args[1].lower()
+    if sub_cmd == "add" and len(args) >= 3:
+        new_name = args[2].strip()
+        if new_name in radio_list:
+            await update.message.reply_text(f"<code>{escape_html(new_name)}</code> sudah ada di daftar!", parse_mode=ParseMode.HTML); return
+        radio_list.append(new_name)
+        s["nama_produk_radio_list"] = radio_list
+        save_settings(s)
+        await update.message.reply_text(f"✅ Ditambahkan: <code>{escape_html(new_name)}</code>\nTotal: {len(radio_list)} produk radio", parse_mode=ParseMode.HTML)
+    elif sub_cmd == "del" and len(args) >= 3:
+        try:
+            idx = int(args[2].strip()) - 1
+            if 0 <= idx < len(radio_list):
+                removed = radio_list.pop(idx)
+                s["nama_produk_radio_list"] = radio_list
+                save_settings(s)
+                await update.message.reply_text(f"🗑 Dihapus: <code>{escape_html(removed)}</code>\nSisa: {len(radio_list)} produk radio", parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"Nomor tidak valid (1-{len(radio_list)})"); return
+        except ValueError:
+            await update.message.reply_text("Gunakan nomor urut, contoh: <code>/produk_radio del 1</code>", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(
+            "<b>📻 Produk Radio:</b>\n"
+            "<code>/produk_radio</code> — lihat daftar\n"
+            "<code>/produk_radio add NAMA</code> — tambah\n"
+            "<code>/produk_radio del NOMOR</code> — hapus",
+            parse_mode=ParseMode.HTML)
+
+
+async def cmd_mp3(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/mp3 — list MP3 files; /mp3 del NOMOR — delete by index"""
+    uid = update.effective_user.id
+    if not is_allowed(uid): return
+    raw = update.message.text.strip(); args = raw.split(None, 2)
+    mp3_files = list_mp3()
+
+    if len(args) < 2:
+        if not mp3_files:
+            await update.message.reply_text(
+                "<b>🎵 MP3 Audio:</b>\n(kosong)\n\nKirim file .mp3 ke chat untuk menambahkan.",
+                parse_mode=ParseMode.HTML)
+        else:
+            lines = [f"  {i+1}. <code>{escape_html(f[:60])}</code>" for i, f in enumerate(mp3_files)]
+            await update.message.reply_text(
+                f"<b>🎵 MP3 Audio ({len(mp3_files)}):</b>\n" + "\n".join(lines) +
+                f"\n\nSetiap video akan mendapat <b>random 1</b> MP3.\n"
+                f"Kirim file .mp3 ke chat untuk menambahkan.\n"
+                f"<code>/mp3 del NOMOR</code> — hapus",
+                parse_mode=ParseMode.HTML)
+        return
+
+    sub_cmd = args[1].lower()
+    if sub_cmd == "del" and len(args) >= 3:
+        try:
+            idx = int(args[2].strip()) - 1
+            if 0 <= idx < len(mp3_files):
+                removed = mp3_files[idx]
+                fpath = os.path.join(MP3_DIR, removed)
+                try: os.remove(fpath)
+                except: pass
+                await update.message.reply_text(f"🗑 Dihapus: <code>{escape_html(removed[:60])}</code>\nSisa: {len(mp3_files)-1} file MP3", parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"Nomor tidak valid (1-{len(mp3_files)})")
+        except ValueError:
+            await update.message.reply_text("Gunakan nomor urut, contoh: <code>/mp3 del 1</code>", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(
+            "<b>🎵 MP3 Audio:</b>\n"
+            "<code>/mp3</code> — lihat daftar\n"
+            "<code>/mp3 del NOMOR</code> — hapus\n"
+            "Kirim file .mp3 langsung ke chat untuk menambahkan",
+            parse_mode=ParseMode.HTML)
+
+
+async def handle_audio_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle MP3 file sent to chat — save to TikTok_MP3 folder."""
+    uid = update.effective_user.id
+    if not is_allowed(uid): return
+    doc = update.message.document or update.message.audio
+    if not doc: return
+    fname = doc.file_name or f"audio_{int(time.time())}.mp3"
+    if not fname.lower().endswith('.mp3'):
+        await update.message.reply_text("⚠️ Hanya file .mp3 yang diterima."); return
+    os.makedirs(MP3_DIR, exist_ok=True)
+    save_path = os.path.join(MP3_DIR, fname)
+    tg_file = await doc.get_file()
+    await tg_file.download_to_drive(save_path)
+    count = len(list_mp3())
+    await update.message.reply_text(
+        f"✅ MP3 disimpan: <code>{escape_html(fname[:60])}</code>\n"
+        f"Total MP3: <b>{count}</b>\n"
+        f"Setiap video akan mendapat random 1 MP3 saat generate.",
+        parse_mode=ParseMode.HTML)
 
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1101,23 +1319,34 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prompts = load_prompts(); folders = list_bahan_folders()
         s = load_settings()
         prod_status = "✅ ON" if s.get('add_product', True) else "❌ OFF"
-        sound_status = "✅ ON" if s.get('add_sound', True) else "❌ OFF"
+        sound_status = "✅ ON" if s.get('add_sound', False) else "❌ OFF"
+        radio_list = s.get('nama_produk_radio_list', [])
+        if not radio_list and s.get('nama_produk_radio', ''):
+            radio_list = [s['nama_produk_radio']]
+        radio_display = ', '.join(radio_list) if radio_list else '(kosong)'
+        mp3_files = list_mp3()
+        mp3_display = f"{len(mp3_files)} file" if mp3_files else '(kosong)'
         text = ("<b>Settings</b>\n\nGunakan /set:\n"
                 "<code>/set prompt NAMA</code>\n<code>/set folder NAMA</code>\n"
                 "<code>/set desc teks...</code>\n<code>/set hashtags fyp, viral</code>\n\n"
                 "<b>🛒 Produk:</b>\n"
                 "<code>/set produk on/off</code>\n"
-                "<code>/set produk_radio NAMA_RADIO</code>\n"
                 "<code>/set produk_input JUDUL_PRODUK</code>\n\n"
-                "<b>🎵 Sound:</b>\n"
+                "<b>📻 Produk Radio (multi):</b>\n"
+                "<code>/produk_radio</code> — lihat/tambah/hapus\n\n"
+                "<b>🎵 Sound TikTok:</b>\n"
                 "<code>/set sound on/off</code>\n\n"
+                "<b>🎵 MP3 Audio:</b>\n"
+                "<code>/mp3</code> — lihat/hapus\n"
+                "Kirim file .mp3 ke chat\n\n"
                 f"Prompt: {escape_html(', '.join(prompts.keys()))}\n"
                 f"Folder: {escape_html(', '.join(folders))}\n\n"
                 f"<b>Current:</b>\n"
                 f"  Produk: {prod_status}\n"
-                f"  Produk Radio: <code>{escape_html(s.get('nama_produk_radio','(kosong)'))}</code>\n"
+                f"  Produk Radio ({len(radio_list)}): <code>{escape_html(radio_display[:80])}</code>\n"
                 f"  Produk Input: <code>{escape_html(s.get('nama_produk_input','(kosong)'))}</code>\n"
-                f"  Sound: {sound_status}")
+                f"  Sound TikTok: {sound_status}\n"
+                f"  MP3 Audio: {mp3_display}")
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "gen_now":
@@ -1167,10 +1396,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         today_02 = datetime.now().replace(hour=SCHEDULE_START_HOUR,minute=0,second=0,microsecond=0)
         schedule = generate_schedule(stok_files, base_date=today_02)
         save_schedule(schedule)
-        preview = "\n".join([f"{i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule[:10])])
-        if len(schedule)>10: preview+=f"\n... +{len(schedule)-10} lagi"
-        await q.edit_message_text(f"<b>Schedule ({len(schedule)} video):</b>\n{preview}",
-                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+        preview = "\n".join([f"{i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule)])
+        full_text = f"<b>Schedule ({len(schedule)} video):</b>\n{preview}"
+        # Split pesan jika terlalu panjang (Telegram limit 4096 chars)
+        if len(full_text) <= 4096:
+            await q.edit_message_text(full_text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+        else:
+            await q.edit_message_text(full_text[:4096], parse_mode=ParseMode.HTML)
+            for chunk_start in range(4096, len(full_text), 4096):
+                await bot.send_message(chat_id, full_text[chunk_start:chunk_start+4096], parse_mode=ParseMode.HTML)
+            await bot.send_message(chat_id, "Schedule di atas.", reply_markup=main_menu_kb(uid))
+        return
 
     if data == "upload_now":
         # Upload TikTok Sekarang: schedule dari datetime.now(), semaksimalnya
@@ -1184,25 +1420,37 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule = generate_schedule(stok_files, base_date=base_now)
         save_schedule(schedule)
 
-        preview = "\n".join([f"{i+1}. <code>{x['schedule']}</code>" for i,x in enumerate(schedule[:8])])
-        if len(schedule) > 8: preview += f"\n... +{len(schedule)-8} lagi"
+        preview = "\n".join([f"{i+1}. <code>{x['schedule']}</code>" for i,x in enumerate(schedule)])
+
+        # Produk radio list
+        radio_list = s.get('nama_produk_radio_list', [])
+        if not radio_list and s.get('nama_produk_radio', ''):
+            radio_list = [s['nama_produk_radio']]
 
         def _upload():
             ll3=threading.Lock(); log3=[]
             def lg3(m):
                 with ll3: log3.append(m)
             uploaded = upload_schedule_tiktok(schedule, s.get("deskripsi",""), s.get("hashtags",[]), lg3, stop_evt,
-                                              nama_produk_radio=s.get("nama_produk_radio",""),
+                                              nama_produk_radio=get_random_produk_radio(s),
                                               nama_produk_input=s.get("nama_produk_input",""),
                                               add_product=s.get("add_product", True),
-                                              add_sound=s.get("add_sound", True))
+                                              add_sound=s.get("add_sound", False),
+                                              nama_produk_radio_list=radio_list)
             asyncio.run_coroutine_threadsafe(
                 bot.send_message(chat_id,f"Upload selesai! {uploaded}/{len(schedule)} video ke TikTok.",parse_mode=ParseMode.HTML),main_loop)
             active_upload_task.pop(uid,None)
         t = threading.Thread(target=_upload, daemon=True)
         active_upload_task[uid] = {"stop": stop_evt, "thread": t}; t.start()
-        await q.edit_message_text(f"<b>📤 Upload Sekarang!</b>\n{len(schedule)} video dari stok\nMulai: <code>{base_now.strftime('%H:%M')}</code>\n\n{preview}",
-                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+        full_text = f"<b>Upload Sekarang!</b>\n{len(schedule)} video dari stok\nMulai: <code>{base_now.strftime('%H:%M')}</code>\n\n{preview}"
+        if len(full_text) <= 4096:
+            await q.edit_message_text(full_text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+        else:
+            await q.edit_message_text(full_text[:4096], parse_mode=ParseMode.HTML)
+            for chunk_start in range(4096, len(full_text), 4096):
+                await bot.send_message(chat_id, full_text[chunk_start:chunk_start+4096], parse_mode=ParseMode.HTML)
+            await bot.send_message(chat_id, "Upload dimulai!", reply_markup=main_menu_kb(uid))
+        return
 
     if data == "start_auto":
         if full_auto_task.get(uid): await q.answer("Full Auto sudah berjalan!", show_alert=True); return
@@ -1225,16 +1473,23 @@ async def post_init(application):
     await application.bot.set_my_commands([
         BotCommand("start","Menu utama"),
         BotCommand("set","Atur settings"),
+        BotCommand("mp3","Kelola MP3 audio"),
+        BotCommand("produk_radio","Kelola produk radio"),
     ])
 
 
 def main():
     os.makedirs(BRUTAL_STOK_DIR, exist_ok=True)
     os.makedirs(BRUTAL_RAW_DIR, exist_ok=True)
+    os.makedirs(MP3_DIR, exist_ok=True)
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("set", cmd_set))
+    app.add_handler(CommandHandler("mp3", cmd_mp3))
+    app.add_handler(CommandHandler("produk_radio", cmd_produk_radio))
     app.add_handler(CallbackQueryHandler(button_handler))
+    # Handle MP3 file uploads via document or audio
+    app.add_handler(MessageHandler(filters.Document.MimeType("audio/mpeg") | filters.AUDIO, handle_audio_file))
     print("Brutal Bot running...")
     app.run_polling()
 

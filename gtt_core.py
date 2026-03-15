@@ -469,74 +469,215 @@ def merge_video_pair(vid1, vid2, output_dir, log_fn=None):
 
 # ═══════════════════════════════════════════════════════════════
 #  GENERATE STOK (Grok multi-tab -> merge -> stok)
+#  Pipeline: batch 30 raw -> merge pairs -> repeat until target merged
 # ═══════════════════════════════════════════════════════════════
+BATCH_RAW = 30
+
+def _run_one_batch(driver, batch_size, bahan_folder, prompt_text, log_fn, stop_event, ud_num):
+    """Open batch_size tabs, generate raw videos, return list of raw file paths."""
+    tab_handles = []; tab_status = {}; tab_prog = {}
+    batch_start = time.time()
+    generated = []
+
+    for i in range(batch_size):
+        if stop_event.is_set(): break
+        img = get_random_bahan_image(bahan_folder)
+        if not img:
+            log_fn(f"[UD {ud_num}] Tidak ada gambar bahan!"); break
+
+        # Selalu buka tab baru agar fresh (fix Tab 1 gagal upload)
+        if i == 0:
+            try:
+                driver.switch_to.new_window('tab')
+                old_handles = driver.window_handles
+                if len(old_handles) > 1:
+                    driver.switch_to.window(old_handles[0])
+                    driver.close()
+                    driver.switch_to.window(driver.window_handles[-1])
+            except: pass
+            driver.get(GROK_URL); time.sleep(3)
+        else:
+            driver.switch_to.new_window('tab')
+            driver.get(GROK_URL); time.sleep(3)
+
+        tab_handles.append(driver.current_window_handle)
+        ok = setup_tab_grok(driver, img, prompt_text, log_fn, i)
+        tab_status[i] = "generating" if ok else "failed"
+        tab_prog[i] = 0
+        if not ok:
+            log_fn(f"[UD {ud_num}] [Tab {i+1}] Setup gagal")
+        time.sleep(1)
+
+    if stop_event.is_set():
+        return generated
+
+    # Tunggu semua tab selesai & download
+    timeout_start = time.time()
+    while not stop_event.is_set():
+        active = [i for i, s in tab_status.items() if s == "generating"]
+        if not active: break
+        if time.time() - timeout_start > 900:
+            for i in active:
+                tab_status[i] = "failed"
+                log_fn(f"[UD {ud_num}] [Tab {i+1}] Timeout 15m!")
+            break
+        for i in active:
+            if stop_event.is_set(): break
+            try:
+                driver.switch_to.window(tab_handles[i])
+                status, pct = check_tab_progress(driver)
+                if pct != tab_prog.get(i, 0):
+                    tab_prog[i] = pct
+                    parts = []
+                    for ti in range(len(tab_handles)):
+                        s = tab_status.get(ti, "?")
+                        if s == "generating": parts.append(f"T{ti+1}:{tab_prog.get(ti,0)}%")
+                        elif s == "done": parts.append(f"T{ti+1}:OK")
+                        else: parts.append(f"T{ti+1}:ERR")
+                    log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
+                if status == "done":
+                    vp = download_tab_video(driver, RAW_DIR, log_fn, i, batch_start)
+                    if vp and os.path.exists(vp):
+                        generated.append(vp); tab_status[i] = "done"
+                        log_fn(f"[UD {ud_num}] [Tab {i+1}] Raw #{len(generated)} OK")
+                        batch_start = time.time()
+                    else:
+                        tab_status[i] = "failed"
+                        log_fn(f"[UD {ud_num}] [Tab {i+1}] Download gagal")
+            except Exception as e:
+                log_fn(f"[UD {ud_num}] [Tab {i+1}] {str(e)[:60]}")
+        time.sleep(3)
+
+    # Tutup semua tab kecuali 1
+    try:
+        for h in driver.window_handles[1:]:
+            try: driver.switch_to.window(h); driver.close()
+            except: pass
+        driver.switch_to.window(driver.window_handles[0])
+    except: pass
+    time.sleep(2)
+
+    ok_count = sum(1 for s in tab_status.values() if s == "done")
+    fail_count = sum(1 for s in tab_status.values() if s == "failed")
+    log_fn(f"[UD {ud_num}] Batch selesai: {ok_count} OK, {fail_count} gagal")
+    return generated
+
+
+def _merge_raw_list(raw_list, out_dir, log_fn, stop_event, ud_num):
+    """Merge pairs of raw videos into 20s clips. Returns list of merged paths."""
+    merged = []
+    for i in range(0, len(raw_list) - 1, 2):
+        if stop_event.is_set(): break
+        mp = merge_video_pair(raw_list[i], raw_list[i + 1], out_dir, log_fn)
+        if mp:
+            merged.append(mp)
+            log_fn(f"[UD {ud_num}] Merged #{len(merged)}: {os.path.basename(mp)}")
+        for vp in [raw_list[i], raw_list[i + 1]]:
+            try:
+                if os.path.exists(vp): os.remove(vp)
+            except: pass
+    return merged
+
+
 def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, grok_port, log_fn, stop_event):
-    """Generate 'needed' merged 20s videos for a UD using Grok multi-tab."""
+    """
+    Generate 'needed' merged 20s videos for a UD.
+    Pipeline: batch 30 raw -> merge pairs (15 merged) -> repeat until target.
+    Merge runs concurrently with next batch generation.
+    """
     out_dir = stok_dir(ud_num)
     os.makedirs(RAW_DIR, exist_ok=True)
-    target_raw = needed * 2
-    log_fn(f"[UD {ud_num}] Target: {target_raw} raw -> {needed} merged 20s")
-    generated_raw = []; failed = 0
+    target_merged = needed
+    total_merged = 0
+    pending_raw = []
+    merge_threads = []
+    merge_results_lock = threading.Lock()
+    merge_results_count = [0]
+
+    log_fn(f"[UD {ud_num}] Target: {target_merged} merged 20s videos")
+    log_fn(f"[UD {ud_num}] Pipeline: batch {BATCH_RAW} raw -> merge -> repeat")
+
     chrome_proc = open_chrome_grok(grok_ud, grok_port)
     driver = None
+    batch_num = 0
+
     try:
         driver = connect_selenium_grok(grok_port)
         driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": RAW_DIR})
-        remaining = target_raw
-        while remaining > 0 and not stop_event.is_set():
-            batch = min(remaining, 30)
-            log_fn(f"[UD {ud_num}] Batch: {batch} tab (sisa {remaining})")
-            tab_handles = []; tab_status = {}; tab_prog = {}
-            batch_start = time.time()
-            driver.get(GROK_URL); time.sleep(3)
-            for i in range(batch):
-                if stop_event.is_set(): break
-                img = get_random_bahan_image(bahan_folder)
-                if not img: log_fn(f"[UD {ud_num}] Tidak ada gambar!"); break
-                tab_handles.append(driver.current_window_handle)
-                ok = setup_tab_grok(driver, img, prompt_text, log_fn, i)
-                tab_status[i] = "generating" if ok else "failed"
-                tab_prog[i] = 0
-                if not ok: failed += 1
-                time.sleep(1)
-                if i < batch - 1:
-                    if ok:
-                        driver.switch_to.new_window('tab'); driver.get(GROK_URL); time.sleep(3)
-                    else:
-                        driver.get(GROK_URL); time.sleep(3)
+
+        while total_merged < target_merged and not stop_event.is_set():
+            batch_num += 1
+            still_needed = target_merged - total_merged
+            raw_needed = min(BATCH_RAW, still_needed * 2)
+            log_fn(f"[UD {ud_num}] === BATCH {batch_num} === Generate {raw_needed} raw (butuh {still_needed} merged lagi)")
+
+            # Tunggu merge sebelumnya selesai
+            for mt in merge_threads:
+                mt.join(timeout=180)
+            merge_threads.clear()
+            with merge_results_lock:
+                total_merged += merge_results_count[0]
+                if merge_results_count[0] > 0:
+                    log_fn(f"[UD {ud_num}] Merge sebelumnya: +{merge_results_count[0]} -> total: {total_merged}/{target_merged}")
+                merge_results_count[0] = 0
+
+            if total_merged >= target_merged:
+                break
+
+            # Generate batch
+            new_raw = _run_one_batch(driver, raw_needed, bahan_folder, prompt_text, log_fn, stop_event, ud_num)
+            pending_raw.extend(new_raw)
+            log_fn(f"[UD {ud_num}] Raw pool: {len(pending_raw)} videos")
+
             if stop_event.is_set(): break
-            timeout_start = time.time()
-            while not stop_event.is_set():
-                active = [i for i,s in tab_status.items() if s=="generating"]
-                if not active: break
-                if time.time()-timeout_start > 600:
-                    for i in active: tab_status[i]="failed"; failed+=1
-                    break
-                for i in active:
-                    if stop_event.is_set(): break
-                    try:
-                        driver.switch_to.window(tab_handles[i])
-                        status, pct = check_tab_progress(driver)
-                        if pct != tab_prog.get(i,0):
-                            tab_prog[i] = pct
-                            parts = [f"T{ti+1}:{tab_prog.get(ti,0) if tab_status.get(ti)=='generating' else ('OK' if tab_status.get(ti)=='done' else 'ERR')}" for ti in range(len(tab_handles))]
-                            log_fn(f"[UD {ud_num}] " + ' | '.join(parts))
-                        if status == "done":
-                            vp = download_tab_video(driver, RAW_DIR, log_fn, i, batch_start)
-                            if vp and os.path.exists(vp):
-                                generated_raw.append(vp); tab_status[i]="done"
-                                log_fn(f"[UD {ud_num}] [Tab {i+1}] Raw #{len(generated_raw)}")
-                                batch_start = time.time()
-                            else: tab_status[i]="failed"; failed+=1
-                    except Exception as e: log_fn(f"[UD {ud_num}] [Tab {i+1}] {str(e)[:60]}")
-                time.sleep(3)
-            remaining = target_raw - len(generated_raw)
-            for h in driver.window_handles[1:]:
-                try: driver.switch_to.window(h); driver.close()
-                except: pass
-            try: driver.switch_to.window(driver.window_handles[0])
-            except: pass
-            time.sleep(2)
+
+            # Jika ganjil, generate 1 tambahan
+            if len(pending_raw) % 2 == 1 and len(pending_raw) > 0:
+                log_fn(f"[UD {ud_num}] Raw ganjil ({len(pending_raw)}), tambah 1...")
+                extra = _run_one_batch(driver, 1, bahan_folder, prompt_text, log_fn, stop_event, ud_num)
+                pending_raw.extend(extra)
+
+            if stop_event.is_set(): break
+
+            # Merge di background thread
+            to_merge = list(pending_raw)
+            pending_raw.clear()
+
+            def _do_merge(raw_list=to_merge):
+                result = _merge_raw_list(raw_list, out_dir, log_fn, stop_event, ud_num)
+                with merge_results_lock:
+                    merge_results_count[0] += len(result)
+
+            expected = len(to_merge) // 2
+            log_fn(f"[UD {ud_num}] Merging {len(to_merge)} raw -> ~{expected} merged (background)...")
+            mt = threading.Thread(target=_do_merge, daemon=True)
+            mt.start()
+            merge_threads.append(mt)
+
+            # Cek apakah masih butuh batch lagi
+            estimated = total_merged + expected
+            if estimated >= target_merged:
+                log_fn(f"[UD {ud_num}] Cukup raw, tunggu merge selesai...")
+                break
+
+        # Tunggu semua merge selesai
+        for mt in merge_threads:
+            mt.join(timeout=180)
+        with merge_results_lock:
+            total_merged += merge_results_count[0]
+            merge_results_count[0] = 0
+
+        # Sisa raw yang belum ter-merge
+        if pending_raw and not stop_event.is_set():
+            leftover = _merge_raw_list(pending_raw, out_dir, log_fn, stop_event, ud_num)
+            total_merged += len(leftover)
+            if len(pending_raw) % 2 == 1 and pending_raw:
+                last = pending_raw[-1]
+                if os.path.exists(last):
+                    dest = os.path.join(out_dir, os.path.basename(last))
+                    try: shutil.move(last, dest); total_merged += 1
+                    except: pass
+
     finally:
         try:
             if driver: driver.quit()
@@ -544,24 +685,9 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
         try: chrome_proc.terminate()
         except: pass
 
-    log_fn(f"[UD {ud_num}] Merge {len(generated_raw)} raw...")
-    merged = []
-    for i in range(0, len(generated_raw)-1, 2):
-        if stop_event.is_set(): break
-        mp = merge_video_pair(generated_raw[i], generated_raw[i+1], out_dir, log_fn)
-        if mp:
-            merged.append(mp)
-            for vp in [generated_raw[i], generated_raw[i+1]]:
-                try:
-                    if os.path.exists(vp): os.remove(vp)
-                except: pass
-    if len(generated_raw) % 2 == 1:
-        leftover = generated_raw[-1]
-        dest = os.path.join(out_dir, os.path.basename(leftover))
-        try: shutil.move(leftover, dest); merged.append(dest)
-        except: pass
-    log_fn(f"[UD {ud_num}] Stok baru: {len(merged)} video")
-    return merged
+    final_stok = count_stok(ud_num)
+    log_fn(f"[UD {ud_num}] Pipeline selesai! Total stok: {final_stok}")
+    return total_merged
 
 # ═══════════════════════════════════════════════════════════════
 #  TIKTOK UPLOAD (schedule + upload batch)
