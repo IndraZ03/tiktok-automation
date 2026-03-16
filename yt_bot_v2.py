@@ -48,7 +48,7 @@ SCHEDULE_PER_UD_FILE = os.path.join(APP_DIR, "yt_schedule_per_ud.json")
 ACTIVE_UD_FILE = os.path.join(APP_DIR, "yt_auto_userdata.json")
 USER_SETTINGS_FILE = os.path.join(APP_DIR, "yt_user_settings.json")
 DEFAULT_ACTIVE_UD = [2, 5, 6]
-UD_PORT_MAP = {1:"9222",2:"9223",3:"9224",4:"9225",5:"9226",6:"9227",7:"9228"}
+UD_PORT_MAP = {i: str(9221 + i) for i in range(1, 21)}  # UD 1-20 → port 9222-9241
 
 # FFmpeg
 def _find_bin(name):
@@ -533,12 +533,12 @@ def _settings_kb():
     ])
 
 def _ud_picker_kb(prefix):
-    """Build UD picker (1-7) inline keyboard."""
+    """Build UD picker (1-20) inline keyboard."""
     rows = []
     row = []
-    for i in range(1, 8):
+    for i in range(1, 21):
         row.append(InlineKeyboardButton(f"UD {i}", callback_data=f"{prefix}_{i}"))
-        if len(row) == 4:
+        if len(row) == 5:
             rows.append(row); row = []
     if row:
         rows.append(row)
@@ -605,7 +605,7 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif sub == "ud":
         nums = [int(x) for x in re.split(r'[,\s]+', val) if x.strip().isdigit()]
-        nums = [n for n in nums if 1 <= n <= 7]
+        nums = [n for n in nums if 1 <= n <= 20]
         if not nums:
             await update.message.reply_text("❌ Contoh: <code>/set ud 2,5,6</code>", parse_mode=ParseMode.HTML)
             return
@@ -704,7 +704,7 @@ async def _process_settings_text(update, ctx, field):
         cfg["interval"] = txt; save_cfg()
     elif field == "active_ud":
         nums = [int(x) for x in re.split(r'[,\s]+', txt) if x.strip().isdigit()]
-        nums = [n for n in nums if 1 <= n <= 7]
+        nums = [n for n in nums if 1 <= n <= 20]
         if nums: save_active_ud(nums)
         else:
             await update.message.reply_text("❌ Format salah. Contoh: <code>2,5,6</code>", parse_mode=ParseMode.HTML)
