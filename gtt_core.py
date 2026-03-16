@@ -53,9 +53,10 @@ _DEFAULT_UD_CONFIG = {
     "deskripsi": "",
     "hashtags": [],
     "nama_produk_radio": "",
+    "nama_produk_radio_list": [],
     "nama_produk_input": "beli sebelum promonya habis",
     "add_product": True,
-    "add_sound": True,
+    "add_sound": False,
     "interval_hours": 5,
     "batch_size": 30,
     "tiktok_ud": "",
@@ -559,8 +560,8 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
         return generated
 
     # Phase 2: Tunggu semua tab selesai generate & download
-    timeout_per_tab = 300  # 5 menit per tab max
     timeout_global = time.time()
+    tab_first_seen = {}  # Track kapan tab pertama kali dicek
 
     while not stop_event.is_set():
         active = [i for i, s in tab_status.items() if s == "generating"]
@@ -579,6 +580,10 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                 driver.switch_to.window(tab_handles[i])
                 status, pct = check_tab_progress(driver)
 
+                # Track waktu pertama kali tab dicek
+                if i not in tab_first_seen:
+                    tab_first_seen[i] = time.time()
+
                 if pct != tab_prog.get(i, 0):
                     tab_prog[i] = pct
                     parts = []
@@ -591,6 +596,19 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                         else:
                             parts.append(f"T{ti+1}:ERR")
                     log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
+
+                # Deteksi stuck: tab 0% selama 90 detik 
+                # sementara tab lain sudah progres (ada yang > 10% atau done)
+                if tab_prog.get(i, 0) == 0 and status != "done":
+                    elapsed = time.time() - tab_first_seen.get(i, time.time())
+                    others_progressing = any(
+                        tab_prog.get(ti, 0) > 10 or tab_status.get(ti) == "done"
+                        for ti in range(len(tab_handles)) if ti != i
+                    )
+                    if elapsed > 90 and others_progressing:
+                        tab_status[i] = "stuck"
+                        log_fn(f"[UD {ud_num}] [Tab {i+1}] Stuck 0% selama {int(elapsed)}s, skip!")
+                        continue
 
                 if status == "done":
                     # Download dengan timeout ketat 60 detik
@@ -803,9 +821,13 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
     deskripsi = ud_cfg.get("deskripsi", "")
     hashtags = ud_cfg.get("hashtags", [])
     nama_produk_radio = ud_cfg.get("nama_produk_radio", "")
+    nama_produk_radio_list = ud_cfg.get("nama_produk_radio_list", [])
+    # Backward compat
+    if not nama_produk_radio_list and nama_produk_radio:
+        nama_produk_radio_list = [nama_produk_radio]
     nama_produk_input = ud_cfg.get("nama_produk_input", "")
     add_product = ud_cfg.get("add_product", True)
-    add_sound = ud_cfg.get("add_sound", True)
+    add_sound = ud_cfg.get("add_sound", False)
 
     chrome_proc = open_chrome_debug(tiktok_ud, tiktok_port)
     driver = None; uploaded = 0
@@ -823,6 +845,13 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
             except:
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Format jadwal error"); 
                 item["status"] = "skipped"; save_ud_schedule(ud_num, schedule); continue
+
+            # Pick random produk_radio with retry
+            radio_candidates = list(nama_produk_radio_list) if nama_produk_radio_list else ([nama_produk_radio] if nama_produk_radio else [])
+            if radio_candidates:
+                random.shuffle(radio_candidates)
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] 🎲 Produk: {radio_candidates[0][:40]}")
+
             log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Upload: {os.path.basename(path)} | {item['schedule']}")
             try:
                 navigate_upload_page(driver, force=(idx > 0))
@@ -830,10 +859,28 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
                 do_upload_file(driver, os.path.normpath(path), log_fn)
                 time.sleep(5)
                 desc_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
-                do_post_video(driver, desc_with_num, nama_produk_radio, nama_produk_input,
-                              log_fn, sched_dt, stop_event,
-                              add_sound=add_sound, add_product=add_product,
-                              skip_switches=True, hashtags=hashtags if hashtags else None)
+
+                # Retry produk radio
+                post_ok = False
+                tried = []
+                for radio_try in radio_candidates if radio_candidates else [""]:
+                    try:
+                        do_post_video(driver, desc_with_num, radio_try, nama_produk_input,
+                                      log_fn, sched_dt, stop_event,
+                                      add_sound=add_sound, add_product=add_product,
+                                      skip_switches=True, hashtags=hashtags if hashtags else None)
+                        post_ok = True; break
+                    except Exception as e_post:
+                        tried.append(radio_try)
+                        err_msg = str(e_post).lower()
+                        if any(kw in err_msg for kw in ["radio", "produk", "timeout", "presence", "not found", "xpath"]):
+                            log_fn(f"[UD {ud_num}]   ⚠️ '{radio_try[:30]}' tidak ada, coba lain...")
+                            continue
+                        else:
+                            raise
+                if not post_ok:
+                    raise Exception(f"Semua produk radio gagal: {', '.join(t[:20] for t in tried)}")
+
                 try: os.remove(path)
                 except: pass
                 uploaded += 1

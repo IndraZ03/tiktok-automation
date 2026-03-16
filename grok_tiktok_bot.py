@@ -278,8 +278,8 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set desc 1 teks...</code> - Deskripsi UD 1\n"
             "<code>/set hashtags 1 fyp, viral</code> - Hashtags UD 1\n"
             "<code>/set produk 1 on/off</code> - Toggle produk\n"
-            "<code>/set produk_radio 1 NAMA</code> - Nama produk radio\n"
             "<code>/set produk_input 1 JUDUL</code> - Judul produk\n"
+            "<code>/produk_radio 1</code> - Kelola daftar produk radio UD 1\n"
             "<code>/set sound 1 on/off</code> - Toggle sound favorites\n"
             "<code>/set interval 1 5</code> - Interval (jam)\n"
             "<code>/set batch 1 30</code> - Batch size\n"
@@ -339,7 +339,13 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cfg["add_product"] = ud_val.lower() in ("on","true","1","ya")
         ud_val = "ON" if cfg["add_product"] else "OFF"
     elif sub == "produk_radio":
+        # Backward compat: simpan ke list
+        radio_list = cfg.get("nama_produk_radio_list", [])
+        if ud_val and ud_val not in radio_list:
+            radio_list.append(ud_val)
+        cfg["nama_produk_radio_list"] = radio_list
         cfg["nama_produk_radio"] = ud_val
+        ud_val = ', '.join(radio_list) if radio_list else '(kosong)'
     elif sub == "produk_input":
         cfg["nama_produk_input"] = ud_val
     elif sub == "sound":
@@ -402,6 +408,83 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Dihentikan: {', '.join(stopped)}")
     else:
         await update.message.reply_text("Tidak ada proses berjalan.")
+
+# ═══════════════════════════════════════════════════════════════
+#  PRODUK RADIO (per UD list management)
+# ═══════════════════════════════════════════════════════════════
+async def cmd_produk_radio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/produk_radio UD_NUM — list; /produk_radio UD_NUM add NAMA; /produk_radio UD_NUM del NOMOR"""
+    uid = update.effective_user.id
+    if not is_allowed(uid): return
+    raw = update.message.text.strip(); args = raw.split(None, 3)
+
+    if len(args) < 2 or not args[1].isdigit():
+        await update.message.reply_text(
+            "<b>📻 Produk Radio</b>\n\n"
+            "<code>/produk_radio 1</code> — lihat daftar UD 1\n"
+            "<code>/produk_radio 1 add NAMA</code> — tambah\n"
+            "<code>/produk_radio 1 del NOMOR</code> — hapus",
+            parse_mode=ParseMode.HTML); return
+
+    ud_num = int(args[1])
+    db = load_db()
+    cfg = get_ud_config(db, ud_num)
+    radio_list = cfg.get("nama_produk_radio_list", [])
+    # Backward compat
+    if not radio_list and cfg.get("nama_produk_radio", ""):
+        radio_list = [cfg["nama_produk_radio"]]
+        cfg["nama_produk_radio_list"] = radio_list
+
+    if len(args) < 3:
+        # Show list
+        if not radio_list:
+            await update.message.reply_text(
+                f"<b>📻 Produk Radio UD {ud_num}:</b>\n(kosong)\n\n"
+                f"<code>/produk_radio {ud_num} add NAMA</code> untuk menambah",
+                parse_mode=ParseMode.HTML)
+        else:
+            lines = [f"  {i+1}. <code>{escape_html(r)}</code>" for i, r in enumerate(radio_list)]
+            await update.message.reply_text(
+                f"<b>📻 Produk Radio UD {ud_num} ({len(radio_list)}):</b>\n" + "\n".join(lines) +
+                f"\n\nUpload akan memilih <b>random 1</b> dari daftar.\n"
+                f"<code>/produk_radio {ud_num} add NAMA</code> — tambah\n"
+                f"<code>/produk_radio {ud_num} del NOMOR</code> — hapus",
+                parse_mode=ParseMode.HTML)
+        return
+
+    sub_cmd = args[2].lower()
+    if sub_cmd == "add" and len(args) >= 4:
+        new_name = args[3].strip()
+        if new_name in radio_list:
+            await update.message.reply_text(f"<code>{escape_html(new_name)}</code> sudah ada!", parse_mode=ParseMode.HTML); return
+        radio_list.append(new_name)
+        cfg["nama_produk_radio_list"] = radio_list
+        cfg["nama_produk_radio"] = new_name  # backward compat
+        save_ud_config(db, ud_num, cfg)
+        await update.message.reply_text(
+            f"✅ UD {ud_num}: Ditambahkan <code>{escape_html(new_name)}</code>\nTotal: {len(radio_list)} produk radio",
+            parse_mode=ParseMode.HTML)
+    elif sub_cmd == "del" and len(args) >= 4:
+        try:
+            idx = int(args[3].strip()) - 1
+            if 0 <= idx < len(radio_list):
+                removed = radio_list.pop(idx)
+                cfg["nama_produk_radio_list"] = radio_list
+                save_ud_config(db, ud_num, cfg)
+                await update.message.reply_text(
+                    f"🗑 UD {ud_num}: Dihapus <code>{escape_html(removed)}</code>\nSisa: {len(radio_list)}",
+                    parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"Nomor tidak valid (1-{len(radio_list)})"); return
+        except ValueError:
+            await update.message.reply_text(f"Gunakan nomor, contoh: <code>/produk_radio {ud_num} del 1</code>", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(
+            f"<b>📻 Produk Radio UD {ud_num}:</b>\n"
+            f"<code>/produk_radio {ud_num}</code> — lihat\n"
+            f"<code>/produk_radio {ud_num} add NAMA</code> — tambah\n"
+            f"<code>/produk_radio {ud_num} del NOMOR</code> — hapus",
+            parse_mode=ParseMode.HTML)
 
 # ═══════════════════════════════════════════════════════════════
 #  BUTTON HANDLER
@@ -511,7 +594,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Interval: <b>{cfg.get('interval_hours',5)}h</b>\n"
             f"Schedule: <code>{sched_str}</code>\n\n"
             f"<b>Produk:</b> {'ON' if cfg.get('add_product') else 'OFF'}\n"
-            f"  Radio: <code>{escape_html(cfg.get('nama_produk_radio','(kosong)')[:40])}</code>\n"
+            f"  Radio ({len(cfg.get('nama_produk_radio_list',[]))}): <code>{escape_html(', '.join(cfg.get('nama_produk_radio_list',[])) or cfg.get('nama_produk_radio','(kosong)'))[:60]}</code>\n"
             f"  Input: <code>{escape_html(cfg.get('nama_produk_input','(kosong)')[:40])}</code>\n"
             f"<b>Sound:</b> {'ON' if cfg.get('add_sound') else 'OFF'}\n"
             f"\nTikTok UD: <code>{escape_html(cfg.get('tiktok_ud',''))}</code>\n"
@@ -737,6 +820,7 @@ async def post_init(application):
     await application.bot.set_my_commands([
         BotCommand("start", "Menu utama"),
         BotCommand("set", "Konfigurasi"),
+        BotCommand("produk_radio", "Kelola produk radio"),
         BotCommand("help", "Panduan"),
         BotCommand("stop", "Stop proses"),
     ])
@@ -748,6 +832,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("set", cmd_set))
+    app.add_handler(CommandHandler("produk_radio", cmd_produk_radio))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
