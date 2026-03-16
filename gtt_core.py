@@ -665,71 +665,100 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
 
     try:
         while total_merged_this_session < target and not stop_event.is_set():
-            # Cek stok aktual
-            current_stok = count_stok(ud_num)
-            still_needed = target - total_merged_this_session
-            if still_needed <= 0:
-                log_fn(f"[UD {ud_num}] Target tercapai! Stok: {current_stok}")
-                break
-
-            # Safety: terlalu banyak gagal berturut
-            if consecutive_fails >= 5:
-                log_fn(f"[UD {ud_num}] 5x gagal berturut, restart Chrome...")
-                _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
-                chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
-                if not driver:
-                    log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
+            try:
+                # Cek stok aktual
+                current_stok = count_stok(ud_num)
+                still_needed = target - total_merged_this_session
+                if still_needed <= 0:
+                    log_fn(f"[UD {ud_num}] Target tercapai! Stok: {current_stok}")
                     break
-                consecutive_fails = 0
-                merged_since_restart = 0
-                continue
 
-            batch_num += 1
-            # Hitung berapa raw yang perlu: (still_needed * 2) - sisa raw pool
-            raw_needed_total = still_needed * 2 - len(raw_pool)
-            tabs_this_batch = min(TABS_PER_BATCH, max(raw_needed_total, 2))
-            log_fn(f"[UD {ud_num}] ── Batch {batch_num} ── {tabs_this_batch} tab (butuh {still_needed} merged, raw pool: {len(raw_pool)})")
+                # Safety: terlalu banyak gagal berturut
+                if consecutive_fails >= 5:
+                    log_fn(f"[UD {ud_num}] 5x gagal berturut, restart Chrome...")
+                    _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                    if not driver:
+                        log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
+                        break
+                    consecutive_fails = 0
+                    merged_since_restart = 0
+                    continue
 
-            # Generate mini-batch
-            new_raw = _run_mini_batch(driver, tabs_this_batch, bahan_folder, prompt_text, log_fn, stop_event, ud_num)
+                # Cek apakah driver masih hidup
+                if driver is None:
+                    log_fn(f"[UD {ud_num}] Driver mati, restart Chrome...")
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                    if not driver:
+                        log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
+                        break
+                    merged_since_restart = 0
 
-            if not new_raw and not raw_pool:
-                consecutive_fails += 1
-                log_fn(f"[UD {ud_num}] Batch {batch_num} gagal total ({consecutive_fails}/5)")
+                batch_num += 1
+                # Hitung berapa raw yang perlu: (still_needed * 2) - sisa raw pool
+                raw_needed_total = still_needed * 2 - len(raw_pool)
+                tabs_this_batch = min(TABS_PER_BATCH, max(raw_needed_total, 2))
+                log_fn(f"[UD {ud_num}] ── Batch {batch_num} ── {tabs_this_batch} tab (butuh {still_needed} merged, raw pool: {len(raw_pool)})")
+
+                # Generate mini-batch
+                new_raw = _run_mini_batch(driver, tabs_this_batch, bahan_folder, prompt_text, log_fn, stop_event, ud_num)
+
+                if not new_raw and not raw_pool:
+                    consecutive_fails += 1
+                    log_fn(f"[UD {ud_num}] Batch {batch_num} gagal total ({consecutive_fails}/5)")
+                    time.sleep(5)
+                    continue
+
+                consecutive_fails = 0  # Reset jika ada yang berhasil
+                raw_pool.extend(new_raw)
+                log_fn(f"[UD {ud_num}] Raw pool: {len(raw_pool)} videos")
+
+                if stop_event.is_set(): break
+
+                # Merge pairs dari raw pool
+                if len(raw_pool) >= 2:
+                    pairs_to_merge = list(raw_pool)
+                    raw_pool.clear()
+
+                    # Simpan sisa ganjil kembali ke pool
+                    if len(pairs_to_merge) % 2 == 1:
+                        raw_pool.append(pairs_to_merge.pop())
+
+                    merged_count = _merge_raw_list(pairs_to_merge, out_dir, log_fn, stop_event, ud_num)
+                    total_merged_this_session += merged_count
+                    merged_since_restart += merged_count
+                    log_fn(f"[UD {ud_num}] Progress: {total_merged_this_session}/{target} merged (stok: {count_stok(ud_num)})")
+
+                if stop_event.is_set(): break
+
+                # Restart Chrome tiap RESTART_EVERY_MERGED merged
+                if merged_since_restart >= RESTART_EVERY_MERGED:
+                    log_fn(f"[UD {ud_num}] Restart Chrome ({merged_since_restart} merged)...")
+                    _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                    if not driver:
+                        log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
+                        break
+                    merged_since_restart = 0
+
+            except Exception as e:
+                # Chrome crash / koneksi putus → restart otomatis
+                log_fn(f"[UD {ud_num}] ⚠️ Chrome error: {str(e)[:80]}")
+                log_fn(f"[UD {ud_num}] Auto-restart Chrome...")
+                try: _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
+                except: pass
+                driver = None
                 time.sleep(5)
-                continue
-
-            consecutive_fails = 0  # Reset jika ada yang berhasil
-            raw_pool.extend(new_raw)
-            log_fn(f"[UD {ud_num}] Raw pool: {len(raw_pool)} videos")
-
-            if stop_event.is_set(): break
-
-            # Merge pairs dari raw pool
-            if len(raw_pool) >= 2:
-                pairs_to_merge = list(raw_pool)
-                raw_pool.clear()
-
-                # Simpan sisa ganjil kembali ke pool
-                if len(pairs_to_merge) % 2 == 1:
-                    raw_pool.append(pairs_to_merge.pop())
-
-                merged_count = _merge_raw_list(pairs_to_merge, out_dir, log_fn, stop_event, ud_num)
-                total_merged_this_session += merged_count
-                merged_since_restart += merged_count
-                log_fn(f"[UD {ud_num}] Progress: {total_merged_this_session}/{target} merged (stok: {count_stok(ud_num)})")
-
-            if stop_event.is_set(): break
-
-            # Restart Chrome tiap RESTART_EVERY_MERGED merged
-            if merged_since_restart >= RESTART_EVERY_MERGED:
-                log_fn(f"[UD {ud_num}] Restart Chrome ({merged_since_restart} merged)...")
-                _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
                 chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
                 if not driver:
-                    log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
-                    break
-                merged_since_restart = 0
+                    consecutive_fails += 1
+                    log_fn(f"[UD {ud_num}] Restart gagal ({consecutive_fails}/5)")
+                    if consecutive_fails >= 5:
+                        log_fn(f"[UD {ud_num}] 5x restart gagal, abort!")
+                        break
+                else:
+                    merged_since_restart = 0
+                    log_fn(f"[UD {ud_num}] Chrome restart OK, lanjut generate...")
 
         # Handle sisa raw pool (ganjil terakhir) - pindah ke stok langsung
         if raw_pool and not stop_event.is_set():
