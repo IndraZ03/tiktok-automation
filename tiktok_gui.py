@@ -295,8 +295,34 @@ def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
       except Exception as e_tab:
           log(f"⚠ Cek tab My shop: {e_tab}")
 
-      # C – Radio button selection
-      log(f"STEP C: Memilih produk: {nama_produk_radio[:60]}...")
+      # C – Search product then select radio button
+      log(f"STEP C: Mencari produk: {nama_produk_radio[:60]}...")
+      
+      # C1 – Cari input search products & ketik nama produk
+      try:
+          search_input = WebDriverWait(driver, 10).until(
+              EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search products']")))
+          search_input.clear()
+          search_input.send_keys(nama_produk_radio)
+          time.sleep(1)
+          log(f"✓ Ketik '{nama_produk_radio[:40]}' di search")
+          
+          # C2 – Klik tombol search (icon svg)
+          try:
+              search_icon = driver.find_element(By.XPATH,
+                  "//div[contains(@class,'product-search-icon')]")
+              search_icon.click()
+              log("✓ Klik search icon")
+          except:
+              # Fallback: tekan Enter
+              search_input.send_keys(Keys.ENTER)
+              log("✓ Tekan Enter untuk search")
+          time.sleep(3)
+      except Exception as e_search:
+          log(f"⚠ Search input tidak ada, langsung pilih radio: {e_search}")
+
+      # C3 – Pilih radio button
+      log(f"STEP C3: Memilih radio: {nama_produk_radio[:60]}...")
       xpath_produk = f"//input[@type='radio' and @name='{nama_produk_radio}']"
       radio = wait.until(EC.presence_of_element_located((By.XPATH, xpath_produk)))
       target_radio_wrapper = radio.find_element(By.XPATH, "./..")
