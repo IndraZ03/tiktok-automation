@@ -836,10 +836,13 @@ def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, s
                 save_schedule(schedule)
                 continue
             # Pick random produk_radio for this upload
-            chosen_radio = nama_produk_radio
-            if nama_produk_radio_list:
-                chosen_radio = random.choice(nama_produk_radio_list)
+            radio_candidates = list(nama_produk_radio_list) if nama_produk_radio_list else ([nama_produk_radio] if nama_produk_radio else [])
+            if radio_candidates:
+                random.shuffle(radio_candidates)
+                chosen_radio = radio_candidates[0]
                 log_fn(f"  🎲 Produk radio dipilih: {chosen_radio[:50]}")
+            else:
+                chosen_radio = ""
             log_fn(f"[{idx+1}/{total}] Upload: {os.path.basename(path)} | {schedule_str}")
             try:
                 navigate_upload_page(driver, force=(idx > 0))
@@ -848,12 +851,35 @@ def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, s
                 time.sleep(5)
                 # Tambah nomor urut [1], [2], dst di depan deskripsi
                 deskripsi_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
-                do_post_video(driver, deskripsi_with_num,
-                              chosen_radio, nama_produk_input,
-                              log_fn, sched_dt, stop_event,
-                              add_sound=add_sound, add_product=add_product,
-                              skip_switches=True,
-                              hashtags=hashtags if hashtags else None)
+                
+                # Coba post dengan retry produk radio
+                post_ok = False
+                tried_radios = []
+                for radio_try in radio_candidates if radio_candidates else [""]:
+                    try:
+                        do_post_video(driver, deskripsi_with_num,
+                                      radio_try, nama_produk_input,
+                                      log_fn, sched_dt, stop_event,
+                                      add_sound=add_sound, add_product=add_product,
+                                      skip_switches=True,
+                                      hashtags=hashtags if hashtags else None)
+                        post_ok = True
+                        break
+                    except Exception as e_post:
+                        tried_radios.append(radio_try)
+                        err_msg = str(e_post).lower()
+                        # Jika error karena produk tidak ditemukan, coba nama lain
+                        if any(kw in err_msg for kw in ["radio", "produk", "timeout", "presence", "not found", "xpath"]):
+                            log_fn(f"  ⚠️ Produk '{radio_try[:30]}' tidak ditemukan, coba lain...")
+                            continue
+                        else:
+                            # Error lain (bukan soal produk), langsung raise
+                            raise
+                
+                if not post_ok:
+                    log_fn(f"  ❌ Semua produk radio gagal ({len(tried_radios)} dicoba)")
+                    raise Exception(f"Semua produk radio gagal: {', '.join(t[:20] for t in tried_radios)}")
+                
                 try: os.remove(path)
                 except: pass
                 uploaded += 1
