@@ -324,9 +324,62 @@ def merge_video_pair(vid1, vid2, output_dir, log_fn=None):
         except: pass
 
 # ═══════════════════════════════════════════════════════════════
+#  CHROME CLEANUP — clear cache & history, keep cookies
+# ═══════════════════════════════════════════════════════════════
+def clear_chrome_data(user_data_dir):
+    """Clear Chrome cache & history but keep cookies & login data."""
+    profile_dir = os.path.join(user_data_dir, "Default")
+    if not os.path.isdir(profile_dir):
+        # Mungkin belum pernah dibuka, skip
+        return
+
+    # --- Hapus cache directories ---
+    cache_dirs = [
+        "Cache", "Code Cache", "GPUCache", "DawnCache",
+        "GrShaderCache", "ShaderCache",
+        os.path.join("Service Worker", "CacheStorage"),
+    ]
+    for d in cache_dirs:
+        target = os.path.join(profile_dir, d)
+        if os.path.isdir(target):
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+            except Exception:
+                pass
+    # Cache juga bisa di level user_data_dir langsung
+    for d in ["ShaderCache", "GrShaderCache"]:
+        target = os.path.join(user_data_dir, d)
+        if os.path.isdir(target):
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+            except Exception:
+                pass
+
+    # --- Hapus history & browsing data files (bukan cookies!) ---
+    history_files = [
+        "History", "History-journal",
+        "Top Sites", "Top Sites-journal",
+        "Visited Links", "Visited Links-journal",
+        "Web Data", "Web Data-journal",
+        "Shortcuts", "Shortcuts-journal",
+        "Network Action Predictor", "Network Action Predictor-journal",
+        "Favicons", "Favicons-journal",
+    ]
+    for f in history_files:
+        target = os.path.join(profile_dir, f)
+        if os.path.isfile(target):
+            try:
+                os.remove(target)
+            except Exception:
+                pass
+
+    logger.info(f"🧹 Chrome data cleared (cache+history) for {user_data_dir}")
+
+# ═══════════════════════════════════════════════════════════════
 #  GROK SELENIUM HELPERS (copied from grok_imagine_bot.py)
 # ═══════════════════════════════════════════════════════════════
 def open_chrome_grok(user_data_dir, port):
+    clear_chrome_data(user_data_dir)  # << bersihkan cache & history
     chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
     proc = subprocess.Popen([
         chrome_path,
@@ -814,6 +867,7 @@ def upload_schedule_tiktok(schedule, deskripsi="", hashtags=None, log_fn=None, s
         log_fn("Semua schedule sudah selesai diupload.")
         return 0
     log_fn(f"Schedule: {len(remaining)} sisa dari {len(schedule)} total")
+    clear_chrome_data(TIKTOK_UD)  # << bersihkan cache & history
     chrome_proc = open_chrome_debug(TIKTOK_UD, TIKTOK_PORT)
     driver = None; uploaded = 0
     try:

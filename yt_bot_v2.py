@@ -897,6 +897,28 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
         return None
 
     url = links[0]
+
+    # ── Cek apakah folder sudah ada (hindari download ulang saat restart) ──
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--no-playlist", "--print", "title", url],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pre_title = sanitize_filename(result.stdout.strip())
+            existing_folder = os.path.join(FINAL_DIR, pre_title)
+            if os.path.isdir(existing_folder):
+                existing_mp4s = [f for f in os.listdir(existing_folder) if f.lower().endswith(".mp4")]
+                if existing_mp4s:
+                    log_fn(
+                        f"⏩ [UD {ud_num}] Folder sudah ada: {pre_title} "
+                        f"({len(existing_mp4s)} video), skip download.",
+                        "info"
+                    )
+                    return existing_folder
+    except Exception as e:
+        log_fn(f"⚠️ [UD {ud_num}] Gagal cek judul video: {e}", "warn")
+
     log_fn(f"📥 [UD {ud_num}] Downloading: {url[:60]}...", "info")
 
     job_temp = os.path.join(TEMP_DIR, f"auto_ud{ud_num}_{int(time.time())}")

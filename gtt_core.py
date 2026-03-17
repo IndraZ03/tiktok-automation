@@ -2,7 +2,7 @@
 GTT Core — Grok TikTok Bot Engine
 Database, Grok generation, video merge, TikTok upload helpers.
 """
-import os, sys, re, time, shutil, subprocess, json, threading, random, glob, copy
+import os, sys, re, time, shutil, subprocess, json, threading, random, glob, copy, logging
 from datetime import datetime, timedelta
 
 from selenium import webdriver
@@ -25,6 +25,8 @@ PROMPTS_FILE = os.path.join(APP_DIR, "grok_prompts.json")
 DB_FILE = os.path.join(APP_DIR, "gtt_db.json")
 GROK_URL = "https://grok.com/imagine"
 RAW_DIR = os.path.join(APP_DIR, "gtt_raw")
+
+logger = logging.getLogger(__name__)
 
 def resolve_ud_path(val):
     val = val.strip()
@@ -163,9 +165,51 @@ def escape_html(t):
     return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 # ═══════════════════════════════════════════════════════════════
+#  CHROME CLEANUP — clear cache & history, keep cookies
+# ═══════════════════════════════════════════════════════════════
+def clear_chrome_data(user_data_dir):
+    """Clear Chrome cache & history but keep cookies & login data."""
+    profile_dir = os.path.join(user_data_dir, "Default")
+    if not os.path.isdir(profile_dir):
+        return
+    # --- Hapus cache directories ---
+    cache_dirs = [
+        "Cache", "Code Cache", "GPUCache", "DawnCache",
+        "GrShaderCache", "ShaderCache",
+        os.path.join("Service Worker", "CacheStorage"),
+    ]
+    for d in cache_dirs:
+        target = os.path.join(profile_dir, d)
+        if os.path.isdir(target):
+            try: shutil.rmtree(target, ignore_errors=True)
+            except Exception: pass
+    for d in ["ShaderCache", "GrShaderCache"]:
+        target = os.path.join(user_data_dir, d)
+        if os.path.isdir(target):
+            try: shutil.rmtree(target, ignore_errors=True)
+            except Exception: pass
+    # --- Hapus history & browsing data files (bukan cookies!) ---
+    history_files = [
+        "History", "History-journal",
+        "Top Sites", "Top Sites-journal",
+        "Visited Links", "Visited Links-journal",
+        "Web Data", "Web Data-journal",
+        "Shortcuts", "Shortcuts-journal",
+        "Network Action Predictor", "Network Action Predictor-journal",
+        "Favicons", "Favicons-journal",
+    ]
+    for f in history_files:
+        target = os.path.join(profile_dir, f)
+        if os.path.isfile(target):
+            try: os.remove(target)
+            except Exception: pass
+    logger.info(f"🧹 Chrome data cleared (cache+history) for {user_data_dir}")
+
+# ═══════════════════════════════════════════════════════════════
 #  GROK SELENIUM HELPERS
 # ═══════════════════════════════════════════════════════════════
 def open_chrome_grok(user_data_dir, port):
+    clear_chrome_data(user_data_dir)  # << bersihkan cache & history
     chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
     proc = subprocess.Popen([
         chrome_path, f"--remote-debugging-port={port}",
@@ -829,6 +873,7 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
     add_product = ud_cfg.get("add_product", True)
     add_sound = ud_cfg.get("add_sound", False)
 
+    clear_chrome_data(tiktok_ud)  # << bersihkan cache & history
     chrome_proc = open_chrome_debug(tiktok_ud, tiktok_port)
     driver = None; uploaded = 0
     try:
