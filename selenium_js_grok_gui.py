@@ -156,17 +156,37 @@ class AutomationEngine:
     def setup_tabs(self, driver, n_tabs):
         self.log(f"Menyiapkan {n_tabs} tab...")
         while len(driver.window_handles) < n_tabs:
-            driver.switch_to.new_window('tab')
-            driver.get(GROK_URL)
-            time.sleep(1)
+            try:
+                driver.switch_to.new_window('tab')
+            except: pass
             if self._stop.is_set():
                 break
 
         for idx, h in enumerate(driver.window_handles[:n_tabs]):
+            if self._stop.is_set(): break
             driver.switch_to.window(h)
-            if 'grok.com' not in driver.current_url or 'imagine' not in driver.current_url:
-                driver.get(GROK_URL)
-                time.sleep(1)
+            
+            nav_ok = False
+            for nav_try in range(3):
+                try:
+                    driver.get(GROK_URL)
+                    time.sleep(2 + nav_try * 1.5)
+                    current_url = driver.current_url or ''
+                    if 'grok.com' in current_url or 'imagine' in current_url:
+                        nav_ok = True
+                        break
+                    elif 'about:blank' in current_url or not current_url.startswith('http'):
+                        self.log(f"Tab {idx+1} tertahan di about:blank, retry {nav_try+1}/3...")
+                        time.sleep(1)
+                    else:
+                        nav_ok = True
+                        break
+                except Exception as e:
+                    self.log(f"Tab {idx+1} navigasi error: {str(e)[:40]}, retry...")
+                    time.sleep(2)
+            
+            if not nav_ok:
+                self.log(f"Tab {idx+1} gagal muat url setelah 3x percobaan.")
         self.log(f"Total tab siap: {len(driver.window_handles)}")
 
     # ── Main Run (Using JS Injection) ─────────────────────────────────────────────────
@@ -236,6 +256,19 @@ class AutomationEngine:
 
                 try:
                     driver.switch_to.window(handle)
+                    
+                    try:
+                        WebDriverWait(driver, 15).until(
+                            lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.tiptap, textarea, button[aria-label='Settings'], button[aria-label='Pengaturan']")) > 0
+                        )
+                        if cycle == 0 and i == 0:
+                            self.log(f"Tab {i+1}: Menunggu render awal selesai...")
+                            time.sleep(8)
+                        else:
+                            time.sleep(1)
+                    except:
+                        self.log(f"Tab {i+1}: ⚠️ Render UI terlambat")
+
                     selenium_js_grok.inject_js(driver)
                     self.set_tab_status(i, 0, "generating")
 

@@ -316,83 +316,229 @@ def _stop_chrome_session(chrome_proc, driver, log_fn, ud_num):
     time.sleep(3)
 
 
+def _prewarm_chrome(driver, log_fn, ud_num):
+    """Pre-warm Chrome by loading Grok on the initial tab.
+    This caches JS/CSS so subsequent tabs load much faster."""
+    log_fn(f"[UD {ud_num}] 🔥 Pre-warming Chrome (loading Grok pertama kali)...")
+    try:
+        driver.get(GROK_URL)
+        # Tunggu sampai halaman benar-benar render
+        WebDriverWait(driver, 30).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR,
+                "div.tiptap, textarea, button[aria-label='Settings'], button[aria-label='Pengaturan']")) > 0
+        )
+        time.sleep(3)  # extra settle time for JS hydration
+        log_fn(f"[UD {ud_num}] ✅ Pre-warm selesai, JS/CSS sudah di-cache")
+    except Exception as e:
+        log_fn(f"[UD {ud_num}] ⚠️ Pre-warm timeout, lanjut saja: {str(e)[:40]}")
+        time.sleep(5)  # fallback wait
+
+
+def _setup_single_tab(driver, tab_index, bahan_folder, prompt_text, log_fn, ud_num):
+    """Setup dan generate pada satu tab. Return (handle, status_str)."""
+    import base64
+    img = get_random_bahan_image(bahan_folder)
+    if not img:
+        log_fn(f"[UD {ud_num}] Tidak ada gambar bahan!")
+        return None, 'failed'
+
+    # Navigate ke Grok dengan retry
+    nav_ok = False
+    for nav_try in range(3):
+        try:
+            driver.get(GROK_URL)
+            time.sleep(4 + nav_try * 2)
+            current_url = driver.current_url or ''
+            if 'grok.com' in current_url or 'imagine' in current_url:
+                nav_ok = True
+                break
+            elif 'about:blank' in current_url or not current_url.startswith('http'):
+                log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Masih about:blank, retry {nav_try+1}/3...")
+                time.sleep(2)
+            else:
+                nav_ok = True
+                break
+        except Exception as nav_e:
+            log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Navigasi error: {str(nav_e)[:40]}, retry...")
+            time.sleep(3)
+
+    if not nav_ok:
+        log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ❌ Gagal navigasi ke Grok setelah 3x retry")
+        return driver.current_window_handle, 'failed'
+
+    handle = driver.current_window_handle
+
+    # Tunggu UI render
+    try:
+        WebDriverWait(driver, 20).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR,
+                "div.tiptap, textarea, button[aria-label='Settings'], button[aria-label='Pengaturan']")) > 0
+        )
+        time.sleep(2)
+    except Exception as e:
+        log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ UI render timeout, akan dicoba inject...")
+
+    # Inject grok_auto.js
+    try:
+        inject_js(driver, GROK_JS_FILE)
+    except Exception as e:
+        log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] JS inject gagal: {e}")
+        return handle, 'failed'
+
+    # Prepare image
+    img_b64 = None
+    img_name = "ref.jpg"
+    if img and os.path.exists(img):
+        with open(img, 'rb') as f:
+            img_b64 = base64.b64encode(f.read()).decode('utf-8')
+        img_name = os.path.basename(img)
+
+    config = {
+        'prompt': prompt_text,
+        'image': img_b64,
+        'imageName': img_name,
+        'mode': 'video',
+    }
+    try:
+        result = driver.execute_script(
+            "return await window.__grokTabGenerate(arguments[0], arguments[1]);",
+            tab_index, config
+        )
+        status = result.get('status', '') if result else ''
+        if status in ('generating', 'running'):
+            log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] Generate dimulai (JS)")
+            return handle, 'generating'
+        else:
+            err = result.get('error', 'unknown') if result else 'no result'
+            log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] Setup gagal: {err}")
+            return handle, 'failed'
+    except Exception as e:
+        log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] Generate error: {str(e)[:60]}")
+        return handle, 'failed'
+
+
+def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num):
+    """Download video dari tab yang sudah selesai generate.
+    Return path file jika berhasil, None jika gagal."""
+    downloads_folder = os.path.expanduser("~/Downloads")
+
+    log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] Generate selesai, download...")
+    try:
+        driver.execute_script(
+            "window.__grokTabDownload(arguments[0]);", tab_index)
+    except: pass
+    time.sleep(3)
+
+    # Wait for .mp4 file to appear (max 45s, with crdownload stall detection)
+    dl_start = time.time()
+    last_crdownload_size = -1
+    crdownload_stall_start = None
+
+    while time.time() - dl_start < 45:
+        time.sleep(2)
+        for search_dir in [RAW_DIR, downloads_folder]:
+            try:
+                mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
+                new_files = [f for f in mp4s if os.path.getmtime(f) > batch_start]
+                crdownloads = glob.glob(os.path.join(search_dir, "*.crdownload"))
+
+                if new_files and not crdownloads:
+                    newest = max(new_files, key=os.path.getmtime)
+                    if os.path.getsize(newest) > 10000:
+                        dest = os.path.join(RAW_DIR, f"gtt_{int(time.time())}_{tab_index}.mp4")
+                        if search_dir != RAW_DIR:
+                            shutil.move(newest, dest)
+                        else:
+                            if newest != dest:
+                                try: shutil.move(newest, dest)
+                                except: dest = newest
+                        return dest
+
+                # Detect stalled crdownload (tidak bertambah dalam 20 detik)
+                if crdownloads:
+                    try:
+                        cr_size = sum(os.path.getsize(f) for f in crdownloads)
+                        if cr_size == last_crdownload_size:
+                            if crdownload_stall_start is None:
+                                crdownload_stall_start = time.time()
+                            elif time.time() - crdownload_stall_start > 20:
+                                log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Download stall 20s, abort")
+                                # Hapus crdownload yang macet
+                                for cr in crdownloads:
+                                    try: os.remove(cr)
+                                    except: pass
+                                return None
+                        else:
+                            last_crdownload_size = cr_size
+                            crdownload_stall_start = None
+                    except: pass
+
+            except: pass
+
+        # Check JS state
+        try:
+            js_state = driver.execute_script(
+                "return window.__grokTabCheckProgress(arguments[0]);", tab_index)
+            if js_state and js_state.get('status') == 'downloaded':
+                # Give a moment for file write to complete
+                time.sleep(2)
+                for search_dir in [RAW_DIR, downloads_folder]:
+                    mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
+                    new_files = [f for f in mp4s if os.path.getmtime(f) > batch_start]
+                    if new_files:
+                        newest = max(new_files, key=os.path.getmtime)
+                        if os.path.getsize(newest) > 10000:
+                            dest = os.path.join(RAW_DIR, f"gtt_{int(time.time())}_{tab_index}.mp4")
+                            if search_dir != RAW_DIR:
+                                shutil.move(newest, dest)
+                            else:
+                                if newest != dest:
+                                    try: shutil.move(newest, dest)
+                                    except: dest = newest
+                            return dest
+                break  # JS says downloaded but no file found
+        except: pass
+
+    return None
+
+
 def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_event, ud_num):
     """
     Buka num_tabs tab, generate via grok_auto.js, download raw video.
     Return list of raw file paths yang berhasil didownload.
     Uses JS injection: __grokTabGenerate + __grokTabCheckProgress + __grokTabDownload
     """
-    import base64
     tab_handles = []
     tab_status = {}  # i -> 'generating' | 'done' | 'failed' | ...
     tab_prog = {}
     batch_start = time.time()
     generated = []
-    downloads_folder = os.path.expanduser("~/Downloads")
+    next_tab_index = 0  # Counter for tab indices (including retries)
+
+    # Phase 0: Pre-warm Chrome pada tab pertama (cache JS/CSS)
+    _prewarm_chrome(driver, log_fn, ud_num)
 
     # Phase 1: Setup semua tab via JS injection
     for i in range(num_tabs):
         if stop_event.is_set(): break
-        img = get_random_bahan_image(bahan_folder)
-        if not img:
-            log_fn(f"[UD {ud_num}] Tidak ada gambar bahan!"); break
 
         # Buka tab baru
         try:
             driver.switch_to.new_window('tab')
             if i == 0:
+                # Tutup tab pre-warm
                 old_handles = driver.window_handles
                 if len(old_handles) > 1:
                     driver.switch_to.window(old_handles[0])
                     driver.close()
                     driver.switch_to.window(driver.window_handles[-1])
         except: pass
-        driver.get(GROK_URL)
-        time.sleep(4)
 
-        tab_handles.append(driver.current_window_handle)
-
-        # Inject grok_auto.js
-        try:
-            inject_js(driver, GROK_JS_FILE)
-        except Exception as e:
-            log_fn(f"[UD {ud_num}] [Tab {i+1}] JS inject gagal: {e}")
-            tab_status[i] = "failed"
-            continue
-
-        # Prepare image as base64
-        img_b64 = None
-        img_name = "ref.jpg"
-        if img and os.path.exists(img):
-            with open(img, 'rb') as f:
-                img_b64 = base64.b64encode(f.read()).decode('utf-8')
-            img_name = os.path.basename(img)
-
-        # Call __grokTabGenerate(tabIndex, config)
-        config = {
-            'prompt': prompt_text,
-            'image': img_b64,
-            'imageName': img_name,
-            'mode': 'video',
-        }
-        try:
-            result = driver.execute_script(
-                "return await window.__grokTabGenerate(arguments[0], arguments[1]);",
-                i, config
-            )
-            status = result.get('status', '') if result else ''
-            if status in ('generating', 'running'):
-                tab_status[i] = 'generating'
-                log_fn(f"[UD {ud_num}] [Tab {i+1}] Generate dimulai (JS)")
-            else:
-                tab_status[i] = 'failed'
-                err = result.get('error', 'unknown') if result else 'no result'
-                log_fn(f"[UD {ud_num}] [Tab {i+1}] Setup gagal: {err}")
-        except Exception as e:
-            log_fn(f"[UD {ud_num}] [Tab {i+1}] Generate error: {str(e)[:60]}")
-            tab_status[i] = 'failed'
-
-        tab_prog[i] = 0
+        handle, status = _setup_single_tab(driver, next_tab_index, bahan_folder, prompt_text, log_fn, ud_num)
+        tab_handles.append(handle or driver.current_window_handle)
+        tab_status[next_tab_index] = status
+        tab_prog[next_tab_index] = 0
+        next_tab_index += 1
         time.sleep(1)
 
     if stop_event.is_set():
@@ -400,11 +546,35 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
 
     # Phase 2: Poll __grokTabCheckProgress until all done
     timeout_global = time.time()
+    retry_tabs = []  # List of tab indices that need retry (download failed)
+    MAX_RETRIES_PER_BATCH = 3
+    retries_done = 0
 
     while not stop_event.is_set():
         active = [i for i, s in tab_status.items() if s == 'generating']
         if not active:
-            break
+            # Check if we need to create retry tabs
+            if retry_tabs and retries_done < MAX_RETRIES_PER_BATCH:
+                retry_idx = retry_tabs.pop(0)
+                retries_done += 1
+                log_fn(f"[UD {ud_num}] 🔄 Retry buat tab baru (pengganti Tab {retry_idx+1} yang gagal download)")
+                try:
+                    driver.switch_to.window(driver.window_handles[-1])
+                    driver.switch_to.new_window('tab')
+                    new_tab_idx = next_tab_index
+                    handle, status = _setup_single_tab(
+                        driver, new_tab_idx, bahan_folder, prompt_text, log_fn, ud_num)
+                    tab_handles.append(handle or driver.current_window_handle)
+                    tab_status[new_tab_idx] = status
+                    tab_prog[new_tab_idx] = 0
+                    next_tab_index += 1
+                    if status == 'generating':
+                        continue  # Keep polling
+                except Exception as e:
+                    log_fn(f"[UD {ud_num}] ⚠️ Retry tab gagal: {str(e)[:50]}")
+            else:
+                break
+
         if time.time() - timeout_global > 600:
             for i in active:
                 tab_status[i] = 'timeout'
@@ -414,7 +584,13 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
         for i in list(active):
             if stop_event.is_set(): break
             try:
-                driver.switch_to.window(tab_handles[i])
+                # Find the correct handle for this tab index
+                handle_idx = list(tab_status.keys()).index(i)
+                if handle_idx < len(tab_handles):
+                    driver.switch_to.window(tab_handles[handle_idx])
+                else:
+                    continue
+
                 state = driver.execute_script(
                     "return window.__grokTabCheckProgress(arguments[0]);", i)
                 if not state:
@@ -426,57 +602,20 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                 if pct != tab_prog.get(i, 0):
                     tab_prog[i] = pct
                     parts = []
-                    for ti in range(len(tab_handles)):
+                    for ti in tab_status:
                         s = tab_status.get(ti, '?')
                         if s == 'generating':
                             parts.append(f"T{ti+1}:{tab_prog.get(ti,0)}%")
                         elif s == 'done':
                             parts.append(f"T{ti+1}:OK")
+                        elif s == 'dl_fail':
+                            parts.append(f"T{ti+1}:DL!")
                         else:
                             parts.append(f"T{ti+1}:ERR")
                     log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
 
                 if status == 'done':
-                    # Download via JS
-                    log_fn(f"[UD {ud_num}] [Tab {i+1}] Generate selesai, download...")
-                    try:
-                        driver.execute_script(
-                            "window.__grokTabDownload(arguments[0]);", i)
-                    except: pass
-                    time.sleep(3)
-
-                    # Wait for .mp4 file to appear
-                    dl_start = time.time()
-                    found_path = None
-                    while time.time() - dl_start < 90:
-                        time.sleep(2)
-                        for search_dir in [RAW_DIR, downloads_folder]:
-                            try:
-                                mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
-                                new_files = [f for f in mp4s if os.path.getmtime(f) > batch_start]
-                                crdownloads = glob.glob(os.path.join(search_dir, "*.crdownload"))
-                                if new_files and not crdownloads:
-                                    newest = max(new_files, key=os.path.getmtime)
-                                    if os.path.getsize(newest) > 10000:
-                                        # Move to RAW_DIR if from Downloads
-                                        dest = os.path.join(RAW_DIR, f"gtt_{int(time.time())}_{i}.mp4")
-                                        if search_dir != RAW_DIR:
-                                            shutil.move(newest, dest)
-                                        else:
-                                            if newest != dest:
-                                                try: shutil.move(newest, dest)
-                                                except: dest = newest
-                                        found_path = dest
-                                        break
-                            except: pass
-                        if found_path: break
-                        # Also check JS state
-                        try:
-                            js_state = driver.execute_script(
-                                "return window.__grokTabCheckProgress(arguments[0]);", i)
-                            if js_state and js_state.get('status') == 'downloaded':
-                                break
-                        except: pass
+                    found_path = _download_tab_video(driver, i, batch_start, log_fn, ud_num)
 
                     if found_path and os.path.exists(found_path) and os.path.getsize(found_path) > 10000:
                         generated.append(found_path)
@@ -485,7 +624,8 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                         batch_start = time.time()
                     else:
                         tab_status[i] = 'dl_fail'
-                        log_fn(f"[UD {ud_num}] [Tab {i+1}] Download gagal, skip")
+                        log_fn(f"[UD {ud_num}] [Tab {i+1}] ❌ Download gagal → akan buat tab pengganti")
+                        retry_tabs.append(i)
 
                 elif status == 'error':
                     tab_status[i] = 'failed'

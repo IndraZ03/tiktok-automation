@@ -523,9 +523,11 @@
 
     // Returns true if the download button (Unduh) is visible.
     function _isDownloadButtonVisible() {
-        // button[aria-label="Unduh"] or button[aria-label="Download"]
-        const btn = $('button[aria-label="Unduh"], button[aria-label="Download"]');
-        return btn && isVisible(btn);
+        const btns = Array.from(document.querySelectorAll('button[aria-label="Unduh"], button[aria-label="Download"]')).filter(b => isVisible(b));
+        if (btns.length === 0) return false;
+        // Cek hanya tombol yang TERAKHIR (video hasil generasi terbaru)
+        const lastBtn = btns[btns.length - 1];
+        return isVisible(lastBtn);
     }
 
     // ── Track progress (PRECISE — waits for real "done" signal) ──
@@ -985,9 +987,13 @@
             }
         }
 
-        // 2. Cek selesai — HANYA jika overlay pernah terlihat sebelumnya
+        // 2. Cek selesai — overlay pernah terlihat ATAU sudah lama menunggu
         //    Ini mencegah false-positive dari video history di halaman
-        if (tabState.generatingOccurred) {
+        //    KECUALI jika sudah lewat 60 detik dan ada video/download button
+        const shouldCheckDone = tabState.generatingOccurred || 
+            (Date.now() - tabState.firstCheckTs > 60000);
+
+        if (shouldCheckDone) {
 
             // Handle optional "I prefer this" / "Saya lebih suka ini" step
             const preferBtns = Array.from(document.querySelectorAll('button')).filter(b => {
@@ -1013,10 +1019,14 @@
                 tabState.status   = 'done';
                 tabState.progress = 100;
                 tabState.videoUrl = finishedUrl || tabState.videoUrl;
-                log(`[Tab ${tabIndex}] ✅ DONE (confirmed after generating observed)`);
+                if (!tabState.generatingOccurred) {
+                    log(`[Tab ${tabIndex}] ✅ DONE (overlay missed — video sudah selesai saat cek tab lain)`);
+                } else {
+                    log(`[Tab ${tabIndex}] ✅ DONE (confirmed after generating observed)`);
+                }
             }
         }
-        // else: tetap 'running'/'unknown' sampai overlay pernah terlihat
+        // else: tetap 'running'/'unknown' sampai overlay pernah terlihat atau 60s timeout
 
         return tabState;
     };
@@ -1035,15 +1045,19 @@
 
         (async () => {
             try {
-                // Tunggu tombol Unduh muncul di DOM (max 20 detik)
-                const dlBtn = await waitForElement(
-                    'button[aria-label="Unduh"], button[aria-label="Download"]',
-                    20000, true
-                );
+                // Tunggu tombol Unduh paling akhir (terbaru) muncul di DOM (max 20 detik)
+                const dlBtn = await waitForElement(() => {
+                    const btns = Array.from(document.querySelectorAll('button[aria-label="Unduh"], button[aria-label="Download"]')).filter(b => isVisible(b));
+                    return btns.length > 0 ? btns[btns.length - 1] : null;
+                }, 20000);
+                
                 if (!dlBtn) throw new Error('Tombol Unduh tidak muncul dalam 20 detik');
 
                 dlBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
                 await sleep(500);
+                
+                // Coba multiple metode klik untuk robustness
+                try { dlBtn.click(); } catch(e) {}
                 simulateClick(dlBtn);
                 log(`[Tab ${tabIndex}] ✅ Tombol Unduh diklik!`);
 
