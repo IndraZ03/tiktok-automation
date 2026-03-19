@@ -578,7 +578,30 @@
                 continue;
             }
 
-            // ─ Not generating anymore — check for result ─
+            // ─ Not generating anymore — check for Skip / "I prefer this" ─
+            // Grok sometimes shows 2 video options with Skip button
+            const skipBtn = Array.from(document.querySelectorAll('button')).find(b =>
+                (b.textContent || '').trim() === 'Skip' && isVisible(b));
+            if (skipBtn) {
+                log('⏭ Menerima 2 opsi video. Klik "Skip"...');
+                simulateClick(skipBtn);
+                STATE.progress = 99;
+                await sleep(3000);
+                continue;
+            }
+            const preferBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                const t = (b.textContent || '').trim().toLowerCase();
+                return (t.includes('prefer this') || t.includes('suka ini')) && isVisible(b);
+            });
+            if (preferBtn) {
+                log('💡 Menerima 2 opsi video. Klik "I prefer this"...');
+                simulateClick(preferBtn);
+                STATE.progress = 99;
+                await sleep(3000);
+                continue;
+            }
+
+            // ─ Check for result ─
             // CRITICAL: only declare done when generating overlay is GONE
             const videoUrl = _getFinishedVideoUrl();
             if (videoUrl) {
@@ -987,30 +1010,60 @@
             }
         }
 
-        // 2. Cek selesai — overlay pernah terlihat ATAU sudah lama menunggu
-        //    Ini mencegah false-positive dari video history di halaman
-        //    KECUALI jika sudah lewat 60 detik dan ada video/download button
+        // 2. Cek selesai — overlay pernah terlihat ATAU sudah cukup lama menunggu
+        //    Dulu: 60 detik timeout → terlalu lama jika video sudah selesai saat cek tab lain
+        //    Sekarang: 10 detik cukup untuk menghindari false-positive dari video history
         const shouldCheckDone = tabState.generatingOccurred || 
-            (Date.now() - tabState.firstCheckTs > 60000);
+            (Date.now() - tabState.firstCheckTs > 10000);
 
         if (shouldCheckDone) {
 
-            // Handle optional "I prefer this" / "Saya lebih suka ini" step
-            const preferBtns = Array.from(document.querySelectorAll('button')).filter(b => {
-                const text = (b.textContent || '').trim().toLowerCase();
-                return text.includes('prefer this') || text.includes('suka ini');
-            });
+            // Handle optional "Skip" or "I prefer this" / "Saya lebih suka ini" step
+            // When Grok offers 2 video options, click Skip to bypass selection
+            if (!tabState.preferClicked) {
+                const allBtns = Array.from(document.querySelectorAll('button'));
 
-            if (preferBtns.length > 0) {
-                if (!tabState.preferClicked) {
-                    log(`[Tab ${tabIndex}] 💡 Menerima 2 opsi video. Memilih opsi pertama ("I prefer this")...`);
-                    simulateClick(preferBtns[0]);
+                // Priority 1: Click "Skip" button
+                const skipBtn = allBtns.find(b => {
+                    const text = (b.textContent || '').trim();
+                    return text === 'Skip' && isVisible(b);
+                });
+
+                if (skipBtn) {
+                    log(`[Tab ${tabIndex}] ⏭ Menerima 2 opsi video. Klik "Skip"...`);
+                    simulateClick(skipBtn);
                     tabState.preferClicked = true;
+                    tabState.status = 'generating';
+                    tabState.progress = 99;
+                    return tabState;
                 }
-                // Tetap status generating untuk menunggu proses pemilihan selesai dan video final muncul
-                tabState.status = 'generating';
-                tabState.progress = 99;
-                return tabState;
+
+                // Priority 2: Click "I prefer this" / "Saya lebih suka ini"
+                const preferBtn = allBtns.find(b => {
+                    const text = (b.textContent || '').trim().toLowerCase();
+                    return text.includes('prefer this') || text.includes('suka ini');
+                });
+
+                if (preferBtn) {
+                    log(`[Tab ${tabIndex}] 💡 Menerima 2 opsi video. Klik "I prefer this"...`);
+                    simulateClick(preferBtn);
+                    tabState.preferClicked = true;
+                    tabState.status = 'generating';
+                    tabState.progress = 99;
+                    return tabState;
+                }
+            } else {
+                // Already clicked Skip/Prefer, wait for the result
+                const stillHasChoiceBtns = Array.from(document.querySelectorAll('button')).some(b => {
+                    const text = (b.textContent || '').trim().toLowerCase();
+                    return text === 'skip' || text.includes('prefer this') || text.includes('suka ini');
+                });
+                if (stillHasChoiceBtns) {
+                    // Choice UI still visible, keep waiting
+                    tabState.status = 'generating';
+                    tabState.progress = 99;
+                    return tabState;
+                }
             }
 
             const finishedUrl = _getFinishedVideoUrl();

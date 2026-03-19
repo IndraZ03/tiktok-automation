@@ -327,23 +327,66 @@
             await sleep(3000);
         }
 
-        // C3 - Select radio button
-        const radio = $(`input[type='radio'][name='${productRadioName}']`);
-        if (radio) {
+        // C2 - Verify search results exist and match
+        // Check if there are ANY radio buttons (= search returned results)
+        const allRadios = $$("input[type='radio']");
+        if (!allRadios || allRadios.length === 0) {
+            // No results at all
+            throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak ditemukan. Tidak ada hasil pencarian.`);
+        }
+
+        // C3 - Try to find exact match by name attribute
+        let radio = $(`input[type='radio'][name='${productRadioName}']`);
+
+        // C4 - If no exact name match, try matching by text content near radios
+        if (!radio) {
+            let foundMatch = false;
+            for (const r of allRadios) {
+                // Look at the text near this radio (parent/grandparent containers)
+                const container = r.closest('div[class*="product"], div[class*="item"], label, tr, li')
+                                 || r.parentElement?.parentElement?.parentElement
+                                 || r.parentElement?.parentElement
+                                 || r.parentElement;
+                if (!container) continue;
+
+                const containerText = (container.textContent || '').trim().toLowerCase();
+                const searchName = productRadioName.toLowerCase();
+
+                // Check if the container text includes the product name
+                if (containerText.includes(searchName) || searchName.includes(containerText.substring(0, 20))) {
+                    const wrapper = r.parentElement;
+                    wrapper.scrollIntoView({ block: 'center' });
+                    await sleep(500);
+                    simulateClick(wrapper);
+                    log(`  ✅ Radio produk dipilih (text match)`);
+                    foundMatch = true;
+                    break;
+                }
+            }
+
+            if (!foundMatch) {
+                // Collect visible product names for error message
+                const visibleProducts = [];
+                for (const r of allRadios) {
+                    const container = r.closest('div[class*="product"], div[class*="item"], label, tr, li')
+                                     || r.parentElement?.parentElement
+                                     || r.parentElement;
+                    if (container) {
+                        const txt = (container.textContent || '').trim().substring(0, 60);
+                        if (txt) visibleProducts.push(txt);
+                    }
+                }
+                const availableInfo = visibleProducts.length > 0
+                    ? ` Hasil yg muncul: ${visibleProducts.slice(0, 3).join(' | ')}`
+                    : '';
+                throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak cocok dengan hasil pencarian.${availableInfo}`);
+            }
+        } else {
             const wrapper = radio.parentElement;
             wrapper.scrollIntoView({ block: 'center' });
             await sleep(500);
             simulateClick(wrapper);
-            log('  ✅ Radio produk dipilih');
-        } else {
-            // Fallback: click first radio
-            const anyRadio = $("input[type='radio']");
-            if (anyRadio) {
-                simulateClick(anyRadio.parentElement);
-                log('  ✅ Radio produk dipilih (fallback: first radio)');
-            } else {
-                log('  ⚠️ Radio produk tidak ditemukan');
-            }
+            log('  ✅ Radio produk dipilih (exact match)');
         }
         await sleep(1000);
 
