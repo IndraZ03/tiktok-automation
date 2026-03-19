@@ -228,6 +228,7 @@
             const clean = tag.replace(/^#/, '').trim();
             if (!clean) continue;
 
+            // Insert space + hashtag
             document.execCommand('insertText', false, ' #' + clean);
             await sleep(500);
 
@@ -239,6 +240,10 @@
                 key: 'Tab', code: 'Tab', keyCode: 9, bubbles: true
             }));
             await sleep(800);
+
+            // Add space after hashtag to separate from next one
+            document.execCommand('insertText', false, ' ');
+            await sleep(300);
 
             log(`  ✅ #${clean}`);
         }
@@ -331,40 +336,76 @@
         log(`  🔍 Mencari produk: ${productRadioName.substring(0, 60)}...`);
         const searchInput = $("input[placeholder='Search products']");
         if (searchInput) {
-            simulateType(searchInput, productRadioName);
+            // Set value using native setter (works better with React)
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value').set;
+            nativeSetter.call(searchInput, productRadioName);
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
             await sleep(1000);
 
-            // Click search icon (SVG inside .product-search-icon)
-            const searchIcon = $(".product-search-icon") ||
-                              $(".TUXTextInputCore-trailingIconWrapper");
-            if (searchIcon) {
-                simulateClick(searchIcon);
-                log('  🔍 Search icon diklik');
-            } else {
-                // Fallback: press Enter
+            // Try clicking search icon with multiple methods
+            let searchClicked = false;
+
+            // Method 1: Click the icon wrapper div directly with .click()
+            const iconWrapper = $(".TUXTextInputCore-trailingIconWrapper");
+            if (iconWrapper) {
+                iconWrapper.click();
+                searchClicked = true;
+                log('  🔍 Search icon diklik (method 1: wrapper.click)');
+            }
+
+            // Method 2: Click the .product-search-icon div
+            if (!searchClicked) {
+                const searchIconDiv = $(".product-search-icon");
+                if (searchIconDiv) {
+                    searchIconDiv.click();
+                    searchClicked = true;
+                    log('  🔍 Search icon diklik (method 2: icon.click)');
+                }
+            }
+
+            // Method 3: Click the SVG inside the icon
+            if (!searchClicked) {
+                const svg = $(".product-search-icon svg") || $(".TUXTextInputCore-trailingIconWrapper svg");
+                if (svg) {
+                    svg.closest('div').click();
+                    searchClicked = true;
+                    log('  🔍 Search icon diklik (method 3: svg parent.click)');
+                }
+            }
+
+            // Method 4: Fallback Enter key
+            if (!searchClicked) {
                 searchInput.dispatchEvent(new KeyboardEvent('keydown', {
                     key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
                 }));
+                searchInput.dispatchEvent(new KeyboardEvent('keypress', {
+                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                }));
+                searchInput.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                }));
+                log('  🔍 Search via Enter key (fallback)');
             }
+
             await sleep(3000);
         }
 
-        // C2 - Find matching product in the product table
-        // Products are in: tr.product-tb-row > td > .product-info-cell
-        //   Radio: input[type=radio].TUXRadioStandalone-input
-        //   Name:  span.product-name
-        const productRows = $$("tr.product-tb-row");
+        // C2 - Wait for product table to load (may take time after search)
+        let productRows = $$("tr.product-tb-row");
+        if (productRows.length === 0) {
+            log('  ⏳ Menunggu tabel produk dimuat...');
+            for (let retry = 0; retry < 5; retry++) {
+                await sleep(2000);
+                productRows = $$("tr.product-tb-row");
+                if (productRows.length > 0) break;
+            }
+        }
+
         let foundRadio = null;
         let foundMatch = false;
         const visibleProducts = [];
-
-        if (productRows.length === 0) {
-            // Fallback: check for any radio buttons
-            const anyRadio = $$("input[type='radio']");
-            if (!anyRadio || anyRadio.length === 0) {
-                throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak ditemukan. Tidak ada hasil pencarian.`);
-            }
-        }
 
         // Search through product table rows
         const searchName = productRadioName.toLowerCase().trim();
