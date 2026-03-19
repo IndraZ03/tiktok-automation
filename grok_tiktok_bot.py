@@ -31,8 +31,9 @@ ALLOWED_USER_IDS = []
 # ═══════════════════════════════════════════════════════════════
 #  STATE
 # ═══════════════════════════════════════════════════════════════
-full_auto_task = {}   # uid -> {stop, thread}
-active_gen_task = {}  # uid -> {stop, thread}
+full_auto_task = {}      # uid -> {stop, thread}
+active_gen_task = {}     # uid -> {stop, thread}
+active_upload_task = {}  # uid -> {stop, thread}
 
 def is_allowed(uid):
     return not ALLOWED_USER_IDS or uid in ALLOWED_USER_IDS
@@ -213,6 +214,8 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
 # ═══════════════════════════════════════════════════════════════
 def main_menu_kb(uid=None):
     is_auto = bool(uid and full_auto_task.get(uid))
+    is_gen = bool(uid and active_gen_task.get(uid))
+    is_upload = bool(uid and active_upload_task.get(uid))
     db = load_db()
     active = db.get("active_ud", [1, 2])
     rows = [
@@ -226,6 +229,16 @@ def main_menu_kb(uid=None):
         if len(ud_row) == 3:
             rows.append(ud_row); ud_row = []
     if ud_row: rows.append(ud_row)
+
+    # Stok Sekarang & Upload Sekarang (like brutal_bot)
+    rows.append([InlineKeyboardButton("🎬 Stok Sekarang", callback_data="stok_now_choose"),
+                 InlineKeyboardButton("📤 Upload Sekarang", callback_data="upload_now_choose")])
+
+    # Stop buttons when tasks are running
+    if is_gen:
+        rows.append([InlineKeyboardButton("⏹ Stop Generate", callback_data="stop_gen")])
+    if is_upload:
+        rows.append([InlineKeyboardButton("⏹ Stop Upload", callback_data="stop_upload")])
 
     rows.append([InlineKeyboardButton("Settings", callback_data="settings_menu")])
     rows.append([InlineKeyboardButton(
@@ -743,6 +756,215 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Gunakan <code>/set</code> untuk mengubah konfigurasi.")
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
+    # ── STOK SEKARANG (choose UD) ──
+    if data == "stok_now_choose":
+        if active_gen_task.get(uid):
+            await q.edit_message_text("Generate sudah berjalan!", reply_markup=main_menu_kb(uid)); return
+        db = load_db()
+        active = db.get("active_ud", [1, 2])
+        rows = []
+        for ud in active:
+            cfg = get_ud_config(db, ud)
+            stok = count_stok(ud)
+            batch = cfg.get('batch_size', 30)
+            rows.append([InlineKeyboardButton(
+                f"UD {ud} (Stok: {stok}/{batch})",
+                callback_data=f"stok_now_{ud}")])
+        rows.append([InlineKeyboardButton("Kembali", callback_data="refresh")])
+        await q.edit_message_text(
+            "<b>🎬 Stok Sekarang</b>\nPilih UD untuk generate stok:",
+            parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows)); return
+
+    if data.startswith("stok_now_"):
+        ud_num = int(data.split("_")[-1])
+        if active_gen_task.get(uid):
+            await q.edit_message_text("Generate sudah berjalan!", reply_markup=main_menu_kb(uid)); return
+        db = load_db()
+        cfg = get_ud_config(db, ud_num)
+        prompt_text = load_prompts().get(cfg.get("prompt_name", ""), "")
+        if not prompt_text:
+            await q.edit_message_text(f"UD {ud_num}: Prompt belum diset!", reply_markup=main_menu_kb(uid)); return
+        if not cfg.get("bahan_folder"):
+            await q.edit_message_text(f"UD {ud_num}: Bahan belum diset!", reply_markup=main_menu_kb(uid)); return
+        needed = max(0, cfg.get("batch_size", 30) - count_stok(ud_num))
+        if needed <= 0:
+            await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
+
+        stop_evt = threading.Event()
+        grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
+        grok_port = db.get("grok_port", "9270")
+
+        initial_msg = await q.edit_message_text(
+            f"<b>🎬 Stok Sekarang UD {ud_num}</b>\nTarget: {needed} video\nMembuka browser...",
+            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+        msg_id = initial_msg.message_id
+
+        log_lines = []; log_lock = threading.Lock()
+
+        def _stok_log_updater():
+            last_text = ""
+            while not stop_evt.is_set():
+                time.sleep(4.0)
+                with log_lock:
+                    if not log_lines: continue
+                    text = f"<b>🎬 [UD {ud_num}] Stok Generate ({needed} video)</b>\n" + "\n".join(log_lines)
+                if text != last_text:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
+                                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                            main_loop)
+                        future.result(timeout=5)
+                        last_text = text
+                    except: pass
+        threading.Thread(target=_stok_log_updater, daemon=True).start()
+
+        def _stok_gen():
+            import html as _html
+            def lg(msg):
+                s = _html.escape(str(msg))
+                with log_lock:
+                    log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                    if len(log_lines) > 20: log_lines.pop(0)
+            try:
+                generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
+                                     grok_ud, grok_port, lg, stop_evt)
+            except Exception as e:
+                lg(f"Error {type(e).__name__}: {str(e)[:40]}")
+            finally:
+                stop_evt.set()
+                try:
+                    with log_lock:
+                        final_text = f"<b>🎬 Stok UD {ud_num} Selesai!</b> Stok: {count_stok(ud_num)}\n" + "\n".join(log_lines[-7:])
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop)
+                except: pass
+                active_gen_task.pop(uid, None)
+
+        t = threading.Thread(target=_stok_gen, daemon=True); t.start()
+        active_gen_task[uid] = {"stop": stop_evt, "thread": t}
+        return
+
+    if data == "stop_gen":
+        task = active_gen_task.get(uid)
+        if task: task["stop"].set(); active_gen_task.pop(uid, None)
+        await q.edit_message_text("<b>Generate dihentikan.</b>", parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+
+    # ── UPLOAD TIKTOK SEKARANG (choose UD) ──
+    if data == "upload_now_choose":
+        if active_upload_task.get(uid):
+            await q.edit_message_text("Upload sudah berjalan!", reply_markup=main_menu_kb(uid)); return
+        db = load_db()
+        active = db.get("active_ud", [1, 2])
+        rows = []
+        for ud in active:
+            stok = count_stok(ud)
+            rows.append([InlineKeyboardButton(
+                f"UD {ud} (Stok: {stok} video)",
+                callback_data=f"upload_now_{ud}")])
+        rows.append([InlineKeyboardButton("Kembali", callback_data="refresh")])
+        await q.edit_message_text(
+            "<b>📤 Upload TikTok Sekarang</b>\nPilih UD untuk upload stok:",
+            parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows)); return
+
+    if data.startswith("upload_now_"):
+        ud_num = int(data.split("_")[-1])
+        if active_upload_task.get(uid):
+            await q.edit_message_text("Upload sudah berjalan!", reply_markup=main_menu_kb(uid)); return
+        db = load_db()
+        cfg = get_ud_config(db, ud_num)
+        stok_files = list_stok(ud_num)[:cfg.get("batch_size", 30)]
+        if not stok_files:
+            await q.edit_message_text(f"Stok UD {ud_num} kosong! Generate dulu.", reply_markup=main_menu_kb(uid)); return
+
+        tiktok_ud = cfg.get("tiktok_ud", "")
+        tiktok_port = cfg.get("tiktok_port", "")
+        if not tiktok_ud or not tiktok_port:
+            await q.edit_message_text(
+                f"UD {ud_num}: TikTok UD/Port belum diset!\n"
+                f"Gunakan:\n<code>/set {ud_num} tiktok_ud PATH</code>\n<code>/set {ud_num} tiktok_port PORT</code>",
+                parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+
+        stop_evt = threading.Event()
+        interval_hours = cfg.get("interval_hours", 5)
+
+        # Schedule mulai dari sekarang + 30 menit
+        start_dt = datetime.now() + timedelta(minutes=30)
+        start_dt = start_dt.replace(second=0, microsecond=0)
+        schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
+        save_ud_schedule(ud_num, schedule)
+
+        preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule[:20]))
+        if len(schedule) > 20:
+            preview += f"\n  ... +{len(schedule)-20} lagi"
+
+        initial_msg = await q.edit_message_text(
+            f"<b>📤 Upload UD {ud_num} Sekarang!</b>\n"
+            f"{len(schedule)} video, interval {interval_hours}h\n"
+            f"Mulai: <code>{start_dt.strftime('%H:%M')}</code>\n\n{preview}",
+            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+        upload_msg_id = initial_msg.message_id
+
+        log_lines_ul = []; log_lock_ul = threading.Lock()
+
+        def _upload_log_updater():
+            last_text = ""
+            while not stop_evt.is_set():
+                time.sleep(5.0)
+                with log_lock_ul:
+                    if not log_lines_ul: continue
+                    text = f"<b>📤 [UD {ud_num}] Upload TikTok</b>\n" + "\n".join(log_lines_ul[-15:])
+                if text != last_text:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            bot.edit_message_text(text, chat_id=chat_id, message_id=upload_msg_id,
+                                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                            main_loop)
+                        future.result(timeout=5)
+                        last_text = text
+                    except: pass
+        threading.Thread(target=_upload_log_updater, daemon=True).start()
+
+        def _upload_now():
+            import html as _html
+            def lg(m):
+                s = _html.escape(str(m))
+                with log_lock_ul:
+                    log_lines_ul.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                    if len(log_lines_ul) > 20: log_lines_ul.pop(0)
+            try:
+                uploaded = upload_tiktok_batch(ud_num, schedule, cfg, lg, stop_evt)
+            except Exception as e:
+                lg(f"Error: {type(e).__name__}: {str(e)[:40]}")
+                uploaded = 0
+            finally:
+                stop_evt.set()
+                try:
+                    with log_lock_ul:
+                        final_text = (
+                            f"<b>📤 Upload UD {ud_num} Selesai!</b>\n"
+                            f"Uploaded: {uploaded}/{len(schedule)}\n"
+                            f"Sisa stok: {count_stok(ud_num)}\n\n" +
+                            "\n".join(log_lines_ul[-7:])
+                        )
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=upload_msg_id,
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop)
+                except: pass
+                active_upload_task.pop(uid, None)
+
+        t = threading.Thread(target=_upload_now, daemon=True); t.start()
+        active_upload_task[uid] = {"stop": stop_evt, "thread": t}
+        return
+
+    if data == "stop_upload":
+        task = active_upload_task.get(uid)
+        if task: task["stop"].set(); active_upload_task.pop(uid, None)
+        await q.edit_message_text("<b>Upload dihentikan.</b>", parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+
     # ── FULL AUTO ──
     if data == "start_auto":
         if full_auto_task.get(uid):
@@ -758,6 +980,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if t: t["stop"].set(); full_auto_task.pop(uid, None)
         t2 = active_gen_task.get(uid)
         if t2: t2["stop"].set(); active_gen_task.pop(uid, None)
+        t3 = active_upload_task.get(uid)
+        if t3: t3["stop"].set(); active_upload_task.pop(uid, None)
         await q.edit_message_text("<b>Full Auto dihentikan.</b>", parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
 # ═══════════════════════════════════════════════════════════════

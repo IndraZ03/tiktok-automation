@@ -334,37 +334,45 @@ def _prewarm_chrome(driver, log_fn, ud_num):
         time.sleep(5)  # fallback wait
 
 
-def _setup_single_tab(driver, tab_index, bahan_folder, prompt_text, log_fn, ud_num):
-    """Setup dan generate pada satu tab. Return (handle, status_str)."""
+def _setup_single_tab(driver, tab_index, bahan_folder, prompt_text, log_fn, ud_num, skip_nav=False):
+    """Setup dan generate pada satu tab. Return (handle, status_str).
+    skip_nav=True jika tab sudah di grok.com (misalnya tab pre-warm)."""
     import base64
     img = get_random_bahan_image(bahan_folder)
     if not img:
         log_fn(f"[UD {ud_num}] Tidak ada gambar bahan!")
         return None, 'failed'
 
-    # Navigate ke Grok dengan retry
-    nav_ok = False
-    for nav_try in range(3):
-        try:
-            driver.get(GROK_URL)
-            time.sleep(4 + nav_try * 2)
-            current_url = driver.current_url or ''
-            if 'grok.com' in current_url or 'imagine' in current_url:
-                nav_ok = True
-                break
-            elif 'about:blank' in current_url or not current_url.startswith('http'):
-                log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Masih about:blank, retry {nav_try+1}/3...")
-                time.sleep(2)
-            else:
-                nav_ok = True
-                break
-        except Exception as nav_e:
-            log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Navigasi error: {str(nav_e)[:40]}, retry...")
-            time.sleep(3)
+    # Navigate ke Grok dengan retry (skip jika sudah di grok.com)
+    if skip_nav:
+        # Cek apakah memang sudah di grok.com
+        current_url = driver.current_url or ''
+        if 'grok.com' not in current_url and 'imagine' not in current_url:
+            skip_nav = False  # Ternyata belum, tetap navigate
 
-    if not nav_ok:
-        log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ❌ Gagal navigasi ke Grok setelah 3x retry")
-        return driver.current_window_handle, 'failed'
+    if not skip_nav:
+        nav_ok = False
+        for nav_try in range(3):
+            try:
+                driver.get(GROK_URL)
+                time.sleep(4 + nav_try * 2)
+                current_url = driver.current_url or ''
+                if 'grok.com' in current_url or 'imagine' in current_url:
+                    nav_ok = True
+                    break
+                elif 'about:blank' in current_url or not current_url.startswith('http'):
+                    log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Masih about:blank, retry {nav_try+1}/3...")
+                    time.sleep(2)
+                else:
+                    nav_ok = True
+                    break
+            except Exception as nav_e:
+                log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Navigasi error: {str(nav_e)[:40]}, retry...")
+                time.sleep(3)
+
+        if not nav_ok:
+            log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ❌ Gagal navigasi ke Grok setelah 3x retry")
+            return driver.current_window_handle, 'failed'
 
     handle = driver.current_window_handle
 
@@ -502,6 +510,45 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num):
     return None
 
 
+def _open_new_grok_tab(driver, log_fn, ud_num, tab_num):
+    """Buka tab baru dan navigasi ke grok.com.
+    Menggunakan Selenium native: new_window('tab') + driver.get(URL) + WebDriverWait.
+    TIDAK menggunakan window.open(URL) karena gagal saat tab lain sedang generating.
+    Return handle tab baru atau None jika gagal."""
+    try:
+        # Step 1: Buat tab baru (selalu about:blank awalnya — ini normal)
+        driver.switch_to.new_window('tab')
+        new_handle = driver.current_window_handle
+        time.sleep(1)
+
+        # Step 2: Navigasi ke grok.com via driver.get (Selenium native, paling reliable)
+        for nav_try in range(3):
+            try:
+                driver.get(GROK_URL)
+                # Step 3: Tunggu sampai URL benar-benar berubah dari about:blank
+                WebDriverWait(driver, 15).until(
+                    lambda d: 'grok.com' in (d.current_url or '') or 'imagine' in (d.current_url or '')
+                )
+                log_fn(f"[UD {ud_num}] [Tab {tab_num}] ✅ Tab siap")
+                return new_handle
+            except Exception as e:
+                log_fn(f"[UD {ud_num}] [Tab {tab_num}] ⚠️ Navigasi gagal (retry {nav_try+1}/3): {str(e)[:40]}")
+                time.sleep(2 + nav_try * 2)
+
+        # Jika semua retry gagal, cek apakah minimal halaman sudah load
+        current_url = driver.current_url or ''
+        if 'grok.com' in current_url or 'imagine' in current_url:
+            log_fn(f"[UD {ud_num}] [Tab {tab_num}] ✅ Tab siap (setelah retry)")
+            return new_handle
+
+        log_fn(f"[UD {ud_num}] [Tab {tab_num}] ⚠️ URL masih: {current_url[:40]}, lanjut tetap...")
+        return new_handle
+
+    except Exception as e:
+        log_fn(f"[UD {ud_num}] [Tab {tab_num}] ❌ Gagal buat tab: {str(e)[:50]}")
+        return None
+
+
 def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_event, ud_num):
     """
     Buka num_tabs tab, generate via grok_auto.js, download raw video.
@@ -522,19 +569,28 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
     for i in range(num_tabs):
         if stop_event.is_set(): break
 
-        # Buka tab baru
-        try:
-            driver.switch_to.new_window('tab')
-            if i == 0:
-                # Tutup tab pre-warm
-                old_handles = driver.window_handles
-                if len(old_handles) > 1:
-                    driver.switch_to.window(old_handles[0])
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[-1])
-        except: pass
+        if i == 0:
+            # Tab pertama: REUSE tab pre-warm yang sudah di grok.com
+            # Tidak perlu buat tab baru atau navigasi ulang
+            handle, status = _setup_single_tab(
+                driver, next_tab_index, bahan_folder, prompt_text, log_fn, ud_num,
+                skip_nav=True  # Sudah di grok.com dari _prewarm_chrome
+            )
+        else:
+            # Tab selanjutnya: buka tab baru via window.open(GROK_URL)
+            new_handle = _open_new_grok_tab(driver, log_fn, ud_num, i + 1)
+            if not new_handle:
+                tab_handles.append(driver.current_window_handle)
+                tab_status[next_tab_index] = 'failed'
+                tab_prog[next_tab_index] = 0
+                next_tab_index += 1
+                continue
 
-        handle, status = _setup_single_tab(driver, next_tab_index, bahan_folder, prompt_text, log_fn, ud_num)
+            handle, status = _setup_single_tab(
+                driver, next_tab_index, bahan_folder, prompt_text, log_fn, ud_num,
+                skip_nav=True  # _open_new_grok_tab sudah navigasi ke grok.com
+            )
+
         tab_handles.append(handle or driver.current_window_handle)
         tab_status[next_tab_index] = status
         tab_prog[next_tab_index] = 0
@@ -559,17 +615,20 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                 retries_done += 1
                 log_fn(f"[UD {ud_num}] 🔄 Retry buat tab baru (pengganti Tab {retry_idx+1} yang gagal download)")
                 try:
-                    driver.switch_to.window(driver.window_handles[-1])
-                    driver.switch_to.new_window('tab')
                     new_tab_idx = next_tab_index
-                    handle, status = _setup_single_tab(
-                        driver, new_tab_idx, bahan_folder, prompt_text, log_fn, ud_num)
-                    tab_handles.append(handle or driver.current_window_handle)
-                    tab_status[new_tab_idx] = status
-                    tab_prog[new_tab_idx] = 0
-                    next_tab_index += 1
-                    if status == 'generating':
-                        continue  # Keep polling
+                    new_handle = _open_new_grok_tab(driver, log_fn, ud_num, f"R{new_tab_idx+1}")
+                    if not new_handle:
+                        log_fn(f"[UD {ud_num}] ⚠️ Retry tab gagal dibuat")
+                    else:
+                        handle, status = _setup_single_tab(
+                            driver, new_tab_idx, bahan_folder, prompt_text, log_fn, ud_num,
+                            skip_nav=True)
+                        tab_handles.append(handle or driver.current_window_handle)
+                        tab_status[new_tab_idx] = status
+                        tab_prog[new_tab_idx] = 0
+                        next_tab_index += 1
+                        if status == 'generating':
+                            continue  # Keep polling
                 except Exception as e:
                     log_fn(f"[UD {ud_num}] ⚠️ Retry tab gagal: {str(e)[:50]}")
             else:
