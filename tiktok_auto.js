@@ -333,73 +333,95 @@
         if (searchInput) {
             simulateType(searchInput, productRadioName);
             await sleep(1000);
-            // Click search or press Enter
-            searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
-            }));
+
+            // Click search icon (SVG inside .product-search-icon)
+            const searchIcon = $(".product-search-icon") ||
+                              $(".TUXTextInputCore-trailingIconWrapper");
+            if (searchIcon) {
+                simulateClick(searchIcon);
+                log('  🔍 Search icon diklik');
+            } else {
+                // Fallback: press Enter
+                searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                }));
+            }
             await sleep(3000);
         }
 
-        // C2 - Verify search results exist and match
-        // Check if there are ANY radio buttons (= search returned results)
-        const allRadios = $$("input[type='radio']");
-        if (!allRadios || allRadios.length === 0) {
-            // No results at all
-            throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak ditemukan. Tidak ada hasil pencarian.`);
+        // C2 - Find matching product in the product table
+        // Products are in: tr.product-tb-row > td > .product-info-cell
+        //   Radio: input[type=radio].TUXRadioStandalone-input
+        //   Name:  span.product-name
+        const productRows = $$("tr.product-tb-row");
+        let foundRadio = null;
+        let foundMatch = false;
+        const visibleProducts = [];
+
+        if (productRows.length === 0) {
+            // Fallback: check for any radio buttons
+            const anyRadio = $$("input[type='radio']");
+            if (!anyRadio || anyRadio.length === 0) {
+                throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak ditemukan. Tidak ada hasil pencarian.`);
+            }
         }
 
-        // C3 - Try to find exact match by name attribute
-        let radio = $(`input[type='radio'][name='${productRadioName}']`);
+        // Search through product table rows
+        const searchName = productRadioName.toLowerCase().trim();
+        for (const row of productRows) {
+            const nameSpan = row.querySelector("span.product-name");
+            if (!nameSpan) continue;
 
-        // C4 - If no exact name match, try matching by text content near radios
-        if (!radio) {
-            let foundMatch = false;
+            const prodName = (nameSpan.textContent || '').trim();
+            visibleProducts.push(prodName.substring(0, 60));
+
+            const radio = row.querySelector("input[type='radio'].TUXRadioStandalone-input");
+            if (!radio) continue;
+
+            // Skip disabled radios (Unavailable products)
+            if (radio.disabled || radio.closest('[data-disabled="true"]')) {
+                continue;
+            }
+
+            // Match: exact or contains
+            const prodNameLower = prodName.toLowerCase();
+            if (prodNameLower === searchName || prodNameLower.includes(searchName) || searchName.includes(prodNameLower)) {
+                foundRadio = radio;
+                foundMatch = true;
+                break;
+            }
+        }
+
+        // Fallback: try matching via input[name] attribute (name = product name)
+        if (!foundMatch) {
+            const allRadios = $$("input[type='radio'].TUXRadioStandalone-input");
             for (const r of allRadios) {
-                // Look at the text near this radio (parent/grandparent containers)
-                const container = r.closest('div[class*="product"], div[class*="item"], label, tr, li')
-                                 || r.parentElement?.parentElement?.parentElement
-                                 || r.parentElement?.parentElement
-                                 || r.parentElement;
-                if (!container) continue;
-
-                const containerText = (container.textContent || '').trim().toLowerCase();
-                const searchName = productRadioName.toLowerCase();
-
-                // Check if the container text includes the product name
-                if (containerText.includes(searchName) || searchName.includes(containerText.substring(0, 20))) {
-                    const wrapper = r.parentElement;
-                    wrapper.scrollIntoView({ block: 'center' });
-                    await sleep(500);
-                    simulateClick(wrapper);
-                    log(`  ✅ Radio produk dipilih (text match)`);
+                if (r.disabled) continue;
+                const rName = (r.getAttribute('name') || '').toLowerCase().trim();
+                if (rName === searchName || rName.includes(searchName) || searchName.includes(rName)) {
+                    foundRadio = r;
                     foundMatch = true;
                     break;
                 }
             }
+        }
 
-            if (!foundMatch) {
-                // Collect visible product names for error message
-                const visibleProducts = [];
-                for (const r of allRadios) {
-                    const container = r.closest('div[class*="product"], div[class*="item"], label, tr, li')
-                                     || r.parentElement?.parentElement
-                                     || r.parentElement;
-                    if (container) {
-                        const txt = (container.textContent || '').trim().substring(0, 60);
-                        if (txt) visibleProducts.push(txt);
-                    }
-                }
-                const availableInfo = visibleProducts.length > 0
-                    ? ` Hasil yg muncul: ${visibleProducts.slice(0, 3).join(' | ')}`
-                    : '';
-                throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak cocok dengan hasil pencarian.${availableInfo}`);
-            }
-        } else {
-            const wrapper = radio.parentElement;
-            wrapper.scrollIntoView({ block: 'center' });
+        if (!foundMatch || !foundRadio) {
+            const availableInfo = visibleProducts.length > 0
+                ? ` Hasil yg muncul: ${visibleProducts.slice(0, 3).join(' | ')}`
+                : '';
+            throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak cocok dengan hasil pencarian.${availableInfo}`);
+        }
+
+        // Click the radio's TUXRadioStandalone wrapper
+        const radioWrapper = foundRadio.closest('.TUXRadioStandalone') || foundRadio.parentElement;
+        if (radioWrapper) {
+            radioWrapper.scrollIntoView({ block: 'center' });
             await sleep(500);
-            simulateClick(wrapper);
-            log('  ✅ Radio produk dipilih (exact match)');
+            simulateClick(radioWrapper);
+            // Also click the radio itself for reliability
+            simulateClick(foundRadio);
+            log(`  ✅ Radio produk dipilih: ${foundRadio.getAttribute('name')?.substring(0, 50)}...`);
         }
         await sleep(1000);
 
