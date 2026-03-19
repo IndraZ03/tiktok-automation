@@ -994,6 +994,11 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
                         elif status == 'error':
                             err = state.get('error', 'Unknown')
                             log_fn(f"[UD {ud_num}] [{idx+1}/{total}] JS error: {err}")
+                            # If product not found, stop ALL uploads (same product for all)
+                            if 'PRODUCT_NOT_FOUND' in err:
+                                log_fn(f"[UD {ud_num}] ❌ PRODUK TIDAK DITEMUKAN — upload dihentikan!")
+                                log_fn(f"[UD {ud_num}] ℹ️ Cek nama produk di /produk_radio {ud_num}")
+                                stop_event.set()  # Stop everything
                             break
                     except: pass
                 else:

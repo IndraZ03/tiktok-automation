@@ -473,7 +473,7 @@ async def cmd_produk_radio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         radio_list.append(new_name)
         cfg["nama_produk_radio_list"] = radio_list
         cfg["nama_produk_radio"] = new_name  # backward compat
-        save_ud_config(db, ud_num, cfg)
+        save_db(db)
         await update.message.reply_text(
             f"✅ UD {ud_num}: Ditambahkan <code>{escape_html(new_name)}</code>\nTotal: {len(radio_list)} produk radio",
             parse_mode=ParseMode.HTML)
@@ -483,7 +483,7 @@ async def cmd_produk_radio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if 0 <= idx < len(radio_list):
                 removed = radio_list.pop(idx)
                 cfg["nama_produk_radio_list"] = radio_list
-                save_ud_config(db, ud_num, cfg)
+                save_db(db)
                 await update.message.reply_text(
                     f"🗑 UD {ud_num}: Dihapus <code>{escape_html(removed)}</code>\nSisa: {len(radio_list)}",
                     parse_mode=ParseMode.HTML)
