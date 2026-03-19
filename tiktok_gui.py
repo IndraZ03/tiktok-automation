@@ -73,8 +73,19 @@ def mark_uploaded(folder_name, video_name, db):
 
 
 # ═══════════════════════════════════════════════════════════════
-# CORE AUTOMATION (adapted from upload.py)
+# PATHS
 # ═══════════════════════════════════════════════════════════════
+TIKTOK_JS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiktok_auto.js")
+
+# ═══════════════════════════════════════════════════════════════
+# CORE AUTOMATION (JS injection approach)
+# ═══════════════════════════════════════════════════════════════
+def inject_tiktok_js(driver):
+    """Inject tiktok_auto.js into the current page."""
+    with open(TIKTOK_JS_FILE, 'r', encoding='utf-8') as f:
+        js_code = f.read()
+    driver.execute_script(js_code)
+
 def kill_chrome_on_port(port):
     """Kill any Chrome process using the specified debug port."""
     try:
@@ -1382,7 +1393,7 @@ class TikTokSchedulerApp:
             self.driver = connect_selenium(port)
             self._log("✓ Chrome terhubung!", "success")
 
-            # ── Upload loop ──
+            # ── Upload loop (JS injection approach) ──
             for idx, video_name in enumerate(to_upload):
                 if self.stop_event.is_set():
                     self._log("⏹ Dihentikan oleh user", "warn")
@@ -1399,25 +1410,83 @@ class TikTokSchedulerApp:
                 self._set_status(f"Uploading {idx+1}/{total}: {video_name}", ACCENT)
 
                 try:
-                    # Navigate to FRESH upload page (force=True to avoid leftover state)
+                    # 1. Navigate to fresh upload page
                     self._log("Navigasi ke halaman upload baru...", "info")
                     navigate_upload_page(self.driver, force=(idx > 0))
                     time.sleep(3)
 
-                    # Upload file
-                    do_upload_file(self.driver, video_path, self._log)
+                    # 2. Inject tiktok_auto.js
+                    inject_tiktok_js(self.driver)
+                    self._log("✓ JS injected", "info")
+
+                    # 3. Upload file via Selenium (input[type=file])
+                    self._log(f"Uploading {video_name}...")
+                    wait = WebDriverWait(self.driver, 30)
+                    upload_input = wait.until(
+                        EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+                    upload_input.send_keys(os.path.abspath(video_path))
+                    self._log(f"✓ File disuntikkan: {video_name}", "success")
                     time.sleep(5)
 
-                    # Post video with schedule
-                    do_post_video(self.driver, desc, product_radio, product_title,
-                                 self._log, current_dt, self.stop_event,
-                                 add_sound=add_sound, add_product=add_product,
-                                 skip_switches=skip_switches, hashtags=hashtags,
-                                 location=location_text)
+                    # 4. Build config for JS
+                    js_config = {
+                        'description': desc,
+                        'hashtags': hashtags if hashtags else [],
+                        'location': location_text,
+                        'productRadio': product_radio if add_product else None,
+                        'productTitle': product_title if add_product else None,
+                        'addSound': add_sound,
+                        'skipSwitches': skip_switches,
+                        'schedule': {
+                            'year': current_dt.year,
+                            'month': current_dt.month,
+                            'day': current_dt.day,
+                            'hour': current_dt.hour,
+                            'minute': current_dt.minute,
+                        }
+                    }
 
-                    # Mark as uploaded
-                    mark_uploaded(folder_name, video_name, db)
-                    self._log(f"✓ {video_name} berhasil di-schedule!", "success")
+                    # 5. Fire JS automation (async, returns immediately)
+                    self.driver.execute_script(
+                        "window.__tiktokUpload(arguments[0]);",
+                        js_config
+                    )
+                    self._log("▶ JS automation dimulai...", "info")
+
+                    # 6. Poll __tiktokGetState() until done/error
+                    poll_start = time.time()
+                    poll_timeout = 300  # 5 menit max per upload
+                    last_step = ''
+                    while time.time() - poll_start < poll_timeout:
+                        if self.stop_event.is_set():
+                            break
+                        time.sleep(2)
+                        try:
+                            state = self.driver.execute_script(
+                                "return window.__tiktokGetState();")
+                            if not state:
+                                continue
+                            status = state.get('status', '')
+                            step_name = state.get('step', '')
+                            progress = state.get('progress', 0)
+                            msg = state.get('message', '')
+
+                            if step_name != last_step:
+                                last_step = step_name
+                                self._log(f"  📌 {msg}")
+
+                            if status == 'done':
+                                self._log(f"✓ {video_name} berhasil di-schedule!", "success")
+                                mark_uploaded(folder_name, video_name, db)
+                                break
+                            elif status == 'error':
+                                err = state.get('error', 'Unknown')
+                                self._log(f"❌ JS error: {err}", "error")
+                                break
+                        except Exception as poll_e:
+                            pass
+                    else:
+                        self._log(f"⏰ Timeout {int(poll_timeout)}s pada {video_name}", "error")
 
                 except Exception as e:
                     self._log(f"❌ Error pada {video_name}: {e}", "error")

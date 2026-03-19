@@ -740,73 +740,146 @@ class AutomationEngine:
                         self.set_tab_status(i, 0, "error")
                         continue
 
-                    # Baca progress
+                    # Baca progress — menggunakan span.tabular-nums.animate-pulse
                     try:
-                        pct_text = driver.execute_script("""
-                            const spans = document.querySelectorAll('span.tabular-nums');
-                            for (const s of spans) {
+                        pct_val = driver.execute_script("""
+                            // Prioritas: span.tabular-nums.animate-pulse (overlay generating)
+                            for (const s of document.querySelectorAll('span.tabular-nums')) {
                                 const t = s.textContent.trim();
-                                if (t.includes('%')) return t;
+                                if (t.includes('%')) {
+                                    const m = t.match(/(\\d+)/);
+                                    if (m) return parseInt(m[1]);
+                                }
                             }
-                            const ov = document.querySelector('div.flex.justify-center.items-center.gap-2');
-                            if (ov) {
-                                for (const n of ov.querySelectorAll('span'))
-                                    if (n.textContent.includes('%')) return n.textContent.trim();
-                            }
-                            return '';
+                            return 0;
                         """)
-                        if pct_text:
-                            m = re.search(r'(\d+)', pct_text)
-                            if m:
-                                new_pct = int(m.group(1))
-                                if new_pct != tab_progress.get(i, 0):
-                                    tab_progress[i] = new_pct
-                                    self.set_tab_status(i, new_pct, "waiting")
-                                    # Tampilkan summary progress
-                                    parts = []
-                                    for ti in range(actual_tabs):
-                                        s = tab_status.get(ti, "?")
-                                        p = tab_progress.get(ti, 0)
-                                        if s == "done":    parts.append(f"T{ti+1}:✅")
-                                        elif s == "failed": parts.append(f"T{ti+1}:❌")
-                                        else:              parts.append(f"T{ti+1}:{p}%")
-                                    self.log(f"📊 {' | '.join(parts)}")
+                        if pct_val and pct_val > 0:
+                            if pct_val != tab_progress.get(i, 0):
+                                tab_progress[i] = pct_val
+                                self.set_tab_status(i, pct_val, "generating")  # kuning
+                                parts = []
+                                for ti in range(actual_tabs):
+                                    s = tab_status.get(ti, "?")
+                                    p = tab_progress.get(ti, 0)
+                                    if s == "done":    parts.append(f"T{ti+1}:✅")
+                                    elif s == "failed": parts.append(f"T{ti+1}:❌")
+                                    else:              parts.append(f"T{ti+1}:{p}%")
+                                self.log(f"📊 {' | '.join(parts)}")
                     except: pass
 
-                    # Cek status (done/generating/idle)
+                    # Cek overlay generating (PRESISI: span.animate-pulse "Generating"/"Membuat")
                     try:
                         is_generating = driver.execute_script("""
-                            const spans = document.querySelectorAll('span');
-                            for (const s of spans) {
-                                const t = s.textContent;
-                                if (t.includes('Menghasilkan') || t.includes('Generating')) return true;
+                            for (const s of document.querySelectorAll('span.animate-pulse')) {
+                                const t = s.textContent.trim();
+                                if (t === 'Generating' || t === 'Membuat') return true;
+                            }
+                            // fallback: cek button cancel
+                            for (const b of document.querySelectorAll('button')) {
+                                const t = b.textContent.trim();
+                                if (t === 'Membatalkan' || t === 'Cancel') return true;
                             }
                             return false;
                         """)
                     except: is_generating = False
 
+                    # Cek video selesai: video#sd-video dengan src assets.grok.com
                     try:
-                        dl_btns = driver.find_elements(By.CSS_SELECTOR,
-                            'button[aria-label="Download"], button[aria-label="Unduh"]')
-                        has_download = bool(dl_btns)
-                    except: has_download = False
+                        finished_url = driver.execute_script("""
+                            const v = document.querySelector('video#sd-video');
+                            if (v && v.src && v.src.includes('assets.grok.com') && v.src.includes('.mp4'))
+                                return v.src;
+                            const v2 = document.querySelector('video#hd-video');
+                            if (v2 && v2.src && v2.src.includes('assets.grok.com') && v2.src.includes('.mp4'))
+                                return v2.src;
+                            // fallback: cari video dengan .mp4 src https
+                            for (const v3 of document.querySelectorAll('video')) {
+                                if (v3.src && v3.src.startsWith('https://') && v3.src.includes('.mp4'))
+                                    return v3.src;
+                            }
+                            return null;
+                        """)
+                    except: finished_url = None
 
                     generation_started = tab_progress.get(i, 0) > 0
 
-                    if (has_download and not is_generating) or \
-                       (generation_started and not is_generating and tab_progress.get(i, 0) > 0):
-                        # Video selesai, langsung download
-                        self.log(f"[Tab {i+1}] ✅ Video selesai! Mengunduh...")
+                    # KRITIS: selesai hanya jika overlay HILANG + video URL sudah ada
+                    if not is_generating and finished_url and generation_started:
+                        self.log(f"[Tab {i+1}] ✅ Video selesai! URL: {finished_url[:70]}...")
                         self.set_tab_status(i, 100, "downloading")
-                        video_path = self.wait_and_download(driver, i, output_dir)
-                        if video_path:
-                            downloaded_in_cycle.append(video_path)
+
+                        # ── Download via requests (metode paling reliable) ──
+                        filename  = self.get_next_filename(output_dir)
+                        save_path = os.path.join(output_dir, filename)
+                        dl_ok = False
+
+                        try:
+                            # Ambil cookies dari browser untuk auth
+                            cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+                            headers = {
+                                'User-Agent': driver.execute_script("return navigator.userAgent;"),
+                                'Referer': 'https://grok.com/',
+                            }
+                            self.log(f"[Tab {i+1}] ⬇️ Downloading via requests...")
+                            resp = requests.get(finished_url, headers=headers, cookies=cookies,
+                                                stream=True, timeout=120)
+                            if resp.status_code == 200:
+                                size = 0
+                                with open(save_path, 'wb') as f:
+                                    for chunk in resp.iter_content(65536):
+                                        if chunk:
+                                            f.write(chunk)
+                                            size += len(chunk)
+                                if size > 50000:  # minimal 50KB
+                                    self.log(f"[Tab {i+1}] ✅ Tersimpan: {filename} ({size/1024/1024:.1f} MB)")
+                                    dl_ok = True
+                                else:
+                                    self.log(f"[Tab {i+1}] ⚠️ File terlalu kecil ({size} bytes), coba metode lain", "WARN")
+                                    os.remove(save_path)
+                            else:
+                                self.log(f"[Tab {i+1}] ⚠️ HTTP {resp.status_code}, coba klik tombol Unduh", "WARN")
+                        except Exception as e:
+                            self.log(f"[Tab {i+1}] ⚠️ requests error: {e}, coba tombol Unduh", "WARN")
+
+                        # Fallback: klik tombol Unduh lalu file watcher
+                        if not dl_ok:
+                            dl_time = time.time()
+                            try:
+                                driver.execute_script("""
+                                    const b = document.querySelector('button[aria-label="Unduh"],button[aria-label="Download"]');
+                                    if (b) {
+                                        ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev =>
+                                            b.dispatchEvent(new MouseEvent(ev, {bubbles:true})));
+                                    }
+                                """)
+                                self.log(f"[Tab {i+1}] 🖱️ Tombol Unduh diklik (fallback)")
+                            except: pass
+
+                            downloads_dir = os.path.expanduser("~/Downloads")
+                            for _ in range(60):
+                                time.sleep(1)
+                                if self._stop.is_set(): break
+                                for chk in [output_dir, downloads_dir]:
+                                    mp4s = glob.glob(os.path.join(chk, "*.mp4"))
+                                    new  = [f for f in mp4s if os.path.getmtime(f) > dl_time - 2]
+                                    if new and not glob.glob(os.path.join(chk, "*.crdownload")):
+                                        newest = max(new, key=os.path.getmtime)
+                                        if os.path.getsize(newest) > 50000:
+                                            if chk != output_dir or newest != save_path:
+                                                shutil.move(newest, save_path)
+                                            self.log(f"[Tab {i+1}] ✅ File {filename} ({os.path.getsize(save_path)/1024/1024:.1f} MB)")
+                                            dl_ok = True
+                                            break
+                                if dl_ok: break
+
+                        if dl_ok:
+                            downloaded_in_cycle.append(save_path)
                             tab_status[i] = "done"
                             self.set_tab_status(i, 100, "success")
                         else:
+                            self.log(f"[Tab {i+1}] ❌ Download gagal", "ERROR")
                             tab_status[i] = "failed"
                             self.set_tab_status(i, 0, "error")
-                        # Update timestamp agar tab berikutnya tidak konflik file
                         tab_start_time = time.time()
 
                 time.sleep(3)  # tunggu sebelum ronde berikutnya

@@ -16,7 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 sys.path.insert(0, r"c:\tiktok_automation")
-from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page, do_upload_file, do_post_video
+from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page
 
 APP_DIR = r"C:\tiktok_automation"
 USER_DATA_BASE = os.path.join(APP_DIR, "user_data")
@@ -25,6 +25,17 @@ PROMPTS_FILE = os.path.join(APP_DIR, "grok_prompts.json")
 DB_FILE = os.path.join(APP_DIR, "gtt_db.json")
 GROK_URL = "https://grok.com/imagine"
 RAW_DIR = os.path.join(APP_DIR, "gtt_raw")
+TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload"
+
+# JS automation files
+GROK_JS_FILE = os.path.join(APP_DIR, "grok_auto.js")
+TIKTOK_JS_FILE = os.path.join(APP_DIR, "tiktok_auto.js")
+
+def inject_js(driver, js_file):
+    """Read and inject a JS file into the current page."""
+    with open(js_file, 'r', encoding='utf-8') as f:
+        js_code = f.read()
+    driver.execute_script(js_code)
 
 logger = logging.getLogger(__name__)
 
@@ -225,266 +236,11 @@ def connect_selenium_grok(port):
     svc = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=svc, options=opts)
 
-def _count_imgs(drv):
-    try:
-        return drv.execute_script("""
-            let c=0;
-            c+=document.querySelectorAll('img[src*="assets.grok.com"]').length;
-            c+=document.querySelectorAll('img[src^="blob:"]').length;
-            c+=document.querySelectorAll('div.group.relative img').length;
-            return c;""")
-    except: return 0
+# ── Legacy Selenium helpers removed — now using grok_auto.js injection ──
+# setup_tab_grok, check_tab_progress are replaced by JS functions:
+#   __grokTabGenerate, __grokTabCheckProgress, __grokTabDownload
 
-def _verify_uploaded(drv, before, timeout=10):
-    for _ in range(timeout*2):
-        try:
-            if _count_imgs(drv) > before: return True
-            has = drv.execute_script("""
-                const g=document.querySelector('div.group.relative');
-                if(g){const r=g.getBoundingClientRect();if(r.width>50&&r.height>50)return true;}
-                return false;""")
-            if has: return True
-        except: pass
-        time.sleep(0.5)
-    return False
-
-def _do_upload(drv, abs_img, before):
-    try:
-        for fi in drv.find_elements(By.CSS_SELECTOR, "input[type='file']"):
-            try:
-                drv.execute_script("arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;position:absolute;top:0;left:0;width:1px;height:1px;';", fi)
-                fi.send_keys(abs_img); time.sleep(3)
-                if _verify_uploaded(drv, before): return True
-            except: pass
-    except: pass
-    try:
-        iid = f"_bf_{int(time.time())}"
-        drv.execute_script(f"""
-            let o=document.getElementById('{iid}');if(o)o.remove();
-            const i=document.createElement('input');i.type='file';i.id='{iid}';i.accept='image/*';
-            i.style.cssText='position:absolute;top:0;left:0;z-index:99999;display:block;width:1px;height:1px;';
-            document.body.appendChild(i);""")
-        time.sleep(0.5)
-        drv.find_element(By.ID, iid).send_keys(abs_img)
-        time.sleep(3)
-        if _verify_uploaded(drv, before): return True
-    except: pass
-    return False
-
-def _do_fill_prompt(drv, p_text):
-    for method in range(3):
-        try:
-            if method == 0:
-                ed = drv.execute_script("""
-                    const e=document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
-                    if(e){e.scrollIntoView({block:'center'});return e;} return null;""")
-                if not ed: continue
-                drv.execute_script("arguments[0].focus();", ed)
-                time.sleep(0.3); ed.click(); time.sleep(0.3)
-                ed.send_keys(Keys.CONTROL+"a"); time.sleep(0.2); ed.send_keys(Keys.DELETE); time.sleep(0.2)
-                drv.execute_script("""
-                    const e=arguments[0];
-                    e.innerHTML='<p>'+arguments[1]+'</p>';
-                    e.dispatchEvent(new Event('input',{bubbles:true}));
-                    e.dispatchEvent(new Event('change',{bubbles:true}));
-                    e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));""", ed, p_text)
-                time.sleep(1)
-            elif method == 1:
-                r = drv.execute_script("""
-                    const e=document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]');
-                    if(!e)return 'nf';
-                    e.focus();e.innerHTML='<p>'+arguments[0]+'</p>';
-                    e.dispatchEvent(new Event('input',{bubbles:true}));
-                    e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
-                    return 'ok';""", p_text)
-                if r != 'ok': continue
-                time.sleep(1)
-            else:
-                ed = WebDriverWait(drv, 20).until(EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, 'div.tiptap.ProseMirror[contenteditable="true"]')))
-                drv.execute_script("arguments[0].scrollIntoView({block:'center'});", ed)
-                time.sleep(1); ed.click(); time.sleep(0.5)
-                ed.send_keys(Keys.CONTROL+"a"); ed.send_keys(Keys.DELETE); time.sleep(0.3)
-                for chunk in [p_text[i:i+50] for i in range(0, len(p_text), 50)]:
-                    ed.send_keys(chunk); time.sleep(0.1)
-                time.sleep(1)
-            actual = drv.execute_script("""return document.querySelector('div.tiptap.ProseMirror[contenteditable="true"]')?.textContent||'';""")
-            if actual.strip(): return True
-        except: pass
-    return False
-
-def setup_tab_grok(driver, image_path, prompt_text, log_fn, tab_idx):
-    prefix = f"[Tab {tab_idx+1}]"
-    image_uploaded = True
-    if image_path and os.path.exists(image_path):
-        abs_image = os.path.abspath(image_path); image_uploaded = False
-        for outer in range(1, 4):
-            if outer > 1:
-                log_fn(f"{prefix} Reload upload attempt {outer}/3...")
-                try: driver.get(GROK_URL); time.sleep(5)
-                except: continue
-            before = _count_imgs(driver)
-            if _do_upload(driver, abs_image, before):
-                image_uploaded = True; log_fn(f"{prefix} Upload OK!"); break
-            log_fn(f"{prefix} Upload {outer} gagal")
-        if not image_uploaded: log_fn(f"{prefix} Upload gagal 3x")
-
-    for fn in [
-        lambda: ActionChains(driver).move_to_element(
-            driver.find_elements(By.CSS_SELECTOR,'button[aria-label="Settings"], button[aria-label="Pengaturan"]')[0]
-        ).click().perform(),
-        lambda: driver.execute_script("""
-            for(const b of document.querySelectorAll('button')){
-                const l=b.getAttribute('aria-label')||'';
-                if(l==='Settings'||l==='Pengaturan'){b.click();return true;}}return false;""")
-    ]:
-        try:
-            fn(); time.sleep(1.5)
-            if driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]'):
-                for item in driver.find_elements(By.CSS_SELECTOR, 'div[role="menuitem"]'):
-                    if "Buat Video" in (item.text or "") or "Make Video" in (item.text or ""):
-                        ActionChains(driver).move_to_element(item).click().perform(); break
-                time.sleep(1); break
-        except: pass
-
-    prompt_ok = False
-    for outer in range(1, 4):
-        if outer > 1:
-            log_fn(f"{prefix} Reload prompt attempt {outer}/3...")
-            try: driver.get(GROK_URL); time.sleep(5)
-            except: continue
-        if _do_fill_prompt(driver, prompt_text):
-            prompt_ok = True; log_fn(f"{prefix} Prompt OK!"); break
-        log_fn(f"{prefix} Prompt {outer} gagal")
-    if not prompt_ok: log_fn(f"{prefix} Prompt gagal 3x"); return False
-
-    try:
-        gen_btn = None
-        for label in ['Buat video','Create video','Generate','Submit']:
-            try:
-                gen_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, f'button[aria-label="{label}"]')))
-                if gen_btn: break
-            except: continue
-        if not gen_btn:
-            try: gen_btn = driver.find_element(By.CSS_SELECTOR, 'button.group[type="button"]')
-            except: pass
-        if gen_btn: gen_btn.click()
-        else:
-            driver.execute_script("""
-                const b=document.querySelector('button[aria-label="Buat video"]')||document.querySelector('button.group[type="button"]');
-                if(b)b.click();""")
-        log_fn(f"{prefix} Generate diklik!"); time.sleep(2); return True
-    except Exception as e:
-        log_fn(f"{prefix} Generate gagal: {e}"); return False
-
-def check_tab_progress(driver):
-    pct_num = 0; is_gen = False
-    try:
-        pt = driver.execute_script("""
-            const spans=document.querySelectorAll('span.tabular-nums');
-            for(const s of spans){const t=s.textContent.trim();if(t.includes('%'))return t;}
-            return '';""")
-        if pt:
-            m = re.search(r'(\d+)', pt)
-            if m: pct_num = int(m.group(1))
-    except: pass
-    try:
-        is_gen = driver.execute_script("""
-            for(const s of document.querySelectorAll('span')){
-                if(s.textContent.includes('Menghasilkan')||s.textContent.includes('Generating'))return true;}
-            return false;""")
-    except: pass
-    try:
-        dl = driver.find_elements(By.CSS_SELECTOR,'button[aria-label="Download"], button[aria-label="Unduh"]')
-        if dl and not is_gen: return "done", 100
-    except: pass
-    if is_gen or pct_num > 0: return "generating", pct_num
-    return "idle", 0
-
-def download_tab_video(driver, output_dir, log_fn, tab_idx, start_time):
-    import requests as req_lib
-    prefix = f"[Tab {tab_idx+1}]"
-    filename = f"gtt_{int(time.time())}_{tab_idx}.mp4"
-    save_path = os.path.join(output_dir, filename)
-    downloads_folder = os.path.expanduser("~/Downloads")
-    try:
-        driver.execute_script("""
-            document.querySelectorAll('div[contenteditable="true"]').forEach(e=>{
-                e.style.pointerEvents='none'; e.style.zIndex='-1'; });
-            document.querySelectorAll('.tiptap,.ProseMirror').forEach(w=>{
-                w.style.pointerEvents='none'; w.style.zIndex='-1'; });""")
-        time.sleep(0.5)
-    except: pass
-    video_url = None
-    try:
-        video_url = driver.execute_script("""
-            for(const v of document.querySelectorAll('video')){
-                if(v.src&&(v.src.startsWith('http')||v.src.startsWith('blob')))return v.src;
-                const s=v.querySelector('source');if(s&&s.src)return s.src;}
-            for(const a of document.querySelectorAll('a[download],a[href*=".mp4"]')){
-                if(a.href)return a.href;}
-            return null;""")
-    except: pass
-    if video_url and video_url.startswith('http') and not video_url.startswith('blob'):
-        log_fn(f"{prefix} URL video, download via requests...")
-        try:
-            cookies = {c['name']:c['value'] for c in driver.get_cookies()}
-            headers = {'User-Agent': driver.execute_script('return navigator.userAgent;'), 'Referer': GROK_URL}
-            resp = req_lib.get(video_url, cookies=cookies, headers=headers, stream=True, timeout=120)
-            if resp.status_code == 200:
-                with open(save_path, 'wb') as vf:
-                    for chunk in resp.iter_content(65536):
-                        if chunk: vf.write(chunk)
-                if os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
-                    sz = os.path.getsize(save_path)/(1024*1024)
-                    log_fn(f"{prefix} Video via requests ({sz:.1f} MB)")
-                    return save_path
-        except Exception as e:
-            log_fn(f"{prefix} requests gagal: {e}")
-    dl_clicked = False
-    for method_name, method_fn in [
-        ("Selenium", lambda: (
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});",
-                driver.find_elements(By.CSS_SELECTOR,'button[aria-label="Download"], button[aria-label="Unduh"]')[0]),
-            time.sleep(0.5),
-            ActionChains(driver).move_to_element(
-                driver.find_elements(By.CSS_SELECTOR,'button[aria-label="Download"], button[aria-label="Unduh"]')[0]
-            ).click().perform())),
-        ("JS", lambda: driver.execute_script("""
-            for(const btn of document.querySelectorAll('button')){
-                const l=btn.getAttribute('aria-label')||'';
-                if(l==='Download'||l==='Unduh'){
-                    btn.scrollIntoView({block:'center'});
-                    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
-                        btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
-                    return true;}} return false;""")),
-        ("Enter", lambda: driver.find_elements(By.CSS_SELECTOR,
-            'button[aria-label="Download"], button[aria-label="Unduh"]')[0].send_keys(Keys.ENTER)),
-    ]:
-        if dl_clicked: break
-        try:
-            result = method_fn()
-            dl_clicked = True
-            log_fn(f"{prefix} Download diklik ({method_name})")
-        except: pass
-    if not dl_clicked:
-        log_fn(f"{prefix} Tidak bisa klik Download"); return None
-    log_fn(f"{prefix} Menunggu file (max 60s)...")
-    for _ in range(60):
-        time.sleep(1)
-        for search_dir in [output_dir, downloads_folder]:
-            try:
-                mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
-                new_files = [f for f in mp4s if os.path.getmtime(f) > start_time]
-                if new_files:
-                    newest = max(new_files, key=os.path.getmtime)
-                    if not glob.glob(os.path.join(search_dir, "*.crdownload")):
-                        if newest != save_path: shutil.move(newest, save_path)
-                        log_fn(f"{prefix} Video diunduh!")
-                        return save_path
-            except: pass
-    log_fn(f"{prefix} Timeout download"); return None
+# ── Legacy download_tab_video removed — now using __grokTabDownload via JS ──
 
 # ═══════════════════════════════════════════════════════════════
 #  VIDEO MERGE (2 raw -> 1 ~20 detik)
@@ -562,26 +318,28 @@ def _stop_chrome_session(chrome_proc, driver, log_fn, ud_num):
 
 def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_event, ud_num):
     """
-    Buka num_tabs tab, generate, download raw video.
+    Buka num_tabs tab, generate via grok_auto.js, download raw video.
     Return list of raw file paths yang berhasil didownload.
+    Uses JS injection: __grokTabGenerate + __grokTabCheckProgress + __grokTabDownload
     """
+    import base64
     tab_handles = []
-    tab_status = {}
+    tab_status = {}  # i -> 'generating' | 'done' | 'failed' | ...
     tab_prog = {}
     batch_start = time.time()
     generated = []
+    downloads_folder = os.path.expanduser("~/Downloads")
 
-    # Phase 1: Setup semua tab (upload gambar + isi prompt + klik generate)
+    # Phase 1: Setup semua tab via JS injection
     for i in range(num_tabs):
         if stop_event.is_set(): break
         img = get_random_bahan_image(bahan_folder)
         if not img:
             log_fn(f"[UD {ud_num}] Tidak ada gambar bahan!"); break
 
-        # Selalu buka tab baru (fresh)
+        # Buka tab baru
         try:
             driver.switch_to.new_window('tab')
-            # Tutup tab lama cuma di iterasi pertama
             if i == 0:
                 old_handles = driver.window_handles
                 if len(old_handles) > 1:
@@ -590,31 +348,66 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                     driver.switch_to.window(driver.window_handles[-1])
         except: pass
         driver.get(GROK_URL)
-        time.sleep(3)
+        time.sleep(4)
 
         tab_handles.append(driver.current_window_handle)
-        ok = setup_tab_grok(driver, img, prompt_text, log_fn, i)
-        tab_status[i] = "generating" if ok else "failed"
+
+        # Inject grok_auto.js
+        try:
+            inject_js(driver, GROK_JS_FILE)
+        except Exception as e:
+            log_fn(f"[UD {ud_num}] [Tab {i+1}] JS inject gagal: {e}")
+            tab_status[i] = "failed"
+            continue
+
+        # Prepare image as base64
+        img_b64 = None
+        img_name = "ref.jpg"
+        if img and os.path.exists(img):
+            with open(img, 'rb') as f:
+                img_b64 = base64.b64encode(f.read()).decode('utf-8')
+            img_name = os.path.basename(img)
+
+        # Call __grokTabGenerate(tabIndex, config)
+        config = {
+            'prompt': prompt_text,
+            'image': img_b64,
+            'imageName': img_name,
+            'mode': 'video',
+        }
+        try:
+            result = driver.execute_script(
+                "return await window.__grokTabGenerate(arguments[0], arguments[1]);",
+                i, config
+            )
+            status = result.get('status', '') if result else ''
+            if status in ('generating', 'running'):
+                tab_status[i] = 'generating'
+                log_fn(f"[UD {ud_num}] [Tab {i+1}] Generate dimulai (JS)")
+            else:
+                tab_status[i] = 'failed'
+                err = result.get('error', 'unknown') if result else 'no result'
+                log_fn(f"[UD {ud_num}] [Tab {i+1}] Setup gagal: {err}")
+        except Exception as e:
+            log_fn(f"[UD {ud_num}] [Tab {i+1}] Generate error: {str(e)[:60]}")
+            tab_status[i] = 'failed'
+
         tab_prog[i] = 0
-        if not ok:
-            log_fn(f"[UD {ud_num}] [Tab {i+1}] Setup gagal")
         time.sleep(1)
 
     if stop_event.is_set():
         return generated
 
-    # Phase 2: Tunggu semua tab selesai generate & download
+    # Phase 2: Poll __grokTabCheckProgress until all done
     timeout_global = time.time()
-    tab_first_seen = {}  # Track kapan tab pertama kali dicek
 
     while not stop_event.is_set():
-        active = [i for i, s in tab_status.items() if s == "generating"]
+        active = [i for i, s in tab_status.items() if s == 'generating']
         if not active:
             break
-        # Global timeout: 10 menit untuk seluruh batch
         if time.time() - timeout_global > 600:
             for i in active:
-                tab_status[i] = "timeout"
+                tab_status[i] = 'timeout'
                 log_fn(f"[UD {ud_num}] [Tab {i+1}] Global timeout!")
             break
 
@@ -622,59 +415,92 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
             if stop_event.is_set(): break
             try:
                 driver.switch_to.window(tab_handles[i])
-                status, pct = check_tab_progress(driver)
+                state = driver.execute_script(
+                    "return window.__grokTabCheckProgress(arguments[0]);", i)
+                if not state:
+                    continue
 
-                # Track waktu pertama kali tab dicek
-                if i not in tab_first_seen:
-                    tab_first_seen[i] = time.time()
+                status = state.get('status', '')
+                pct = state.get('progress', 0)
 
                 if pct != tab_prog.get(i, 0):
                     tab_prog[i] = pct
                     parts = []
                     for ti in range(len(tab_handles)):
-                        s = tab_status.get(ti, "?")
-                        if s == "generating":
+                        s = tab_status.get(ti, '?')
+                        if s == 'generating':
                             parts.append(f"T{ti+1}:{tab_prog.get(ti,0)}%")
-                        elif s == "done":
+                        elif s == 'done':
                             parts.append(f"T{ti+1}:OK")
                         else:
                             parts.append(f"T{ti+1}:ERR")
                     log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
 
-                # Deteksi stuck: tab 0% selama 90 detik 
-                # sementara tab lain sudah progres (ada yang > 10% atau done)
-                if tab_prog.get(i, 0) == 0 and status != "done":
-                    elapsed = time.time() - tab_first_seen.get(i, time.time())
-                    others_progressing = any(
-                        tab_prog.get(ti, 0) > 10 or tab_status.get(ti) == "done"
-                        for ti in range(len(tab_handles)) if ti != i
-                    )
-                    if elapsed > 90 and others_progressing:
-                        tab_status[i] = "stuck"
-                        log_fn(f"[UD {ud_num}] [Tab {i+1}] Stuck 0% selama {int(elapsed)}s, skip!")
-                        continue
+                if status == 'done':
+                    # Download via JS
+                    log_fn(f"[UD {ud_num}] [Tab {i+1}] Generate selesai, download...")
+                    try:
+                        driver.execute_script(
+                            "window.__grokTabDownload(arguments[0]);", i)
+                    except: pass
+                    time.sleep(3)
 
-                if status == "done":
-                    # Download dengan timeout ketat 60 detik
-                    vp = download_tab_video(driver, RAW_DIR, log_fn, i, batch_start)
-                    if vp and os.path.exists(vp) and os.path.getsize(vp) > 10000:
-                        generated.append(vp)
-                        tab_status[i] = "done"
+                    # Wait for .mp4 file to appear
+                    dl_start = time.time()
+                    found_path = None
+                    while time.time() - dl_start < 90:
+                        time.sleep(2)
+                        for search_dir in [RAW_DIR, downloads_folder]:
+                            try:
+                                mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
+                                new_files = [f for f in mp4s if os.path.getmtime(f) > batch_start]
+                                crdownloads = glob.glob(os.path.join(search_dir, "*.crdownload"))
+                                if new_files and not crdownloads:
+                                    newest = max(new_files, key=os.path.getmtime)
+                                    if os.path.getsize(newest) > 10000:
+                                        # Move to RAW_DIR if from Downloads
+                                        dest = os.path.join(RAW_DIR, f"gtt_{int(time.time())}_{i}.mp4")
+                                        if search_dir != RAW_DIR:
+                                            shutil.move(newest, dest)
+                                        else:
+                                            if newest != dest:
+                                                try: shutil.move(newest, dest)
+                                                except: dest = newest
+                                        found_path = dest
+                                        break
+                            except: pass
+                        if found_path: break
+                        # Also check JS state
+                        try:
+                            js_state = driver.execute_script(
+                                "return window.__grokTabCheckProgress(arguments[0]);", i)
+                            if js_state and js_state.get('status') == 'downloaded':
+                                break
+                        except: pass
+
+                    if found_path and os.path.exists(found_path) and os.path.getsize(found_path) > 10000:
+                        generated.append(found_path)
+                        tab_status[i] = 'done'
                         log_fn(f"[UD {ud_num}] [Tab {i+1}] Raw #{len(generated)} OK")
                         batch_start = time.time()
                     else:
-                        tab_status[i] = "dl_fail"
+                        tab_status[i] = 'dl_fail'
                         log_fn(f"[UD {ud_num}] [Tab {i+1}] Download gagal, skip")
+
+                elif status == 'error':
+                    tab_status[i] = 'failed'
+                    log_fn(f"[UD {ud_num}] [Tab {i+1}] Error: {state.get('error','?')}")
+
             except Exception as e:
-                log_fn(f"[UD {ud_num}] [Tab {i+1}] Error: {str(e)[:50]}")
-                tab_status[i] = "error"
+                log_fn(f"[UD {ud_num}] [Tab {i+1}] Poll error: {str(e)[:50]}")
+                tab_status[i] = 'error'
         time.sleep(3)
 
     # Tutup semua extra tab
     _close_all_extra_tabs(driver)
 
-    ok_count = sum(1 for s in tab_status.values() if s == "done")
-    fail_count = sum(1 for s in tab_status.values() if s != "done")
+    ok_count = sum(1 for s in tab_status.values() if s == 'done')
+    fail_count = sum(1 for s in tab_status.values() if s != 'done')
     log_fn(f"[UD {ud_num}] Mini-batch: {ok_count} OK, {fail_count} gagal/skip")
     return generated
 
@@ -855,7 +681,12 @@ def build_tiktok_schedule(video_files, start_dt, interval_hours):
     return schedule
 
 def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
-    """Upload videos to TikTok with scheduling. Returns uploaded count."""
+    """
+    Upload videos to TikTok with scheduling via tiktok_auto.js injection.
+    Selenium handles: Chrome lifecycle, file upload via input[type=file].
+    JS handles: description, hashtags, product, switches, schedule, post button.
+    Returns uploaded count.
+    """
     remaining = [s for s in schedule if s.get("status") not in ("done", "skipped")]
     if not remaining:
         log_fn(f"[UD {ud_num}] Semua sudah diupload."); return 0
@@ -866,14 +697,13 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
     hashtags = ud_cfg.get("hashtags", [])
     nama_produk_radio = ud_cfg.get("nama_produk_radio", "")
     nama_produk_radio_list = ud_cfg.get("nama_produk_radio_list", [])
-    # Backward compat
     if not nama_produk_radio_list and nama_produk_radio:
         nama_produk_radio_list = [nama_produk_radio]
     nama_produk_input = ud_cfg.get("nama_produk_input", "")
     add_product = ud_cfg.get("add_product", True)
     add_sound = ud_cfg.get("add_sound", False)
 
-    clear_chrome_data(tiktok_ud)  # << bersihkan cache & history
+    clear_chrome_data(tiktok_ud)
     chrome_proc = open_chrome_debug(tiktok_ud, tiktok_port)
     driver = None; uploaded = 0
     try:
@@ -888,50 +718,96 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
             try:
                 sched_dt = datetime.strptime(item["schedule"], "%Y-%m-%d %H:%M")
             except:
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Format jadwal error"); 
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Format jadwal error")
                 item["status"] = "skipped"; save_ud_schedule(ud_num, schedule); continue
 
-            # Pick random produk_radio with retry
-            radio_candidates = list(nama_produk_radio_list) if nama_produk_radio_list else ([nama_produk_radio] if nama_produk_radio else [])
-            if radio_candidates:
+            # Pick random produk_radio
+            radio_candidates = list(nama_produk_radio_list) if nama_produk_radio_list else []
+            chosen_radio = None
+            if radio_candidates and add_product:
                 random.shuffle(radio_candidates)
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] 🎲 Produk: {radio_candidates[0][:40]}")
+                chosen_radio = radio_candidates[0]
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] 🎲 Produk: {chosen_radio[:40]}")
 
             log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Upload: {os.path.basename(path)} | {item['schedule']}")
             try:
+                # 1. Navigate to upload page
                 navigate_upload_page(driver, force=(idx > 0))
                 time.sleep(3)
-                do_upload_file(driver, os.path.normpath(path), log_fn)
+
+                # 2. Inject tiktok_auto.js
+                inject_js(driver, TIKTOK_JS_FILE)
+
+                # 3. Upload file via Selenium input[type=file]
+                upload_input = WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+                upload_input.send_keys(os.path.abspath(os.path.normpath(path)))
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] File disuntikkan")
                 time.sleep(5)
+
+                # 4. Build JS config
                 desc_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
+                js_config = {
+                    'description': desc_with_num,
+                    'hashtags': hashtags if hashtags else [],
+                    'location': None,
+                    'productRadio': chosen_radio if add_product else None,
+                    'productTitle': nama_produk_input if add_product else None,
+                    'addSound': add_sound,
+                    'skipSwitches': True,
+                    'schedule': {
+                        'year': sched_dt.year,
+                        'month': sched_dt.month,
+                        'day': sched_dt.day,
+                        'hour': sched_dt.hour,
+                        'minute': sched_dt.minute,
+                    }
+                }
 
-                # Retry produk radio
-                post_ok = False
-                tried = []
-                for radio_try in radio_candidates if radio_candidates else [""]:
+                # 5. Fire JS automation
+                driver.execute_script(
+                    "window.__tiktokUpload(arguments[0]);", js_config)
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] JS automation dimulai")
+
+                # 6. Poll __tiktokGetState() until done/error
+                poll_start = time.time()
+                poll_timeout = 300  # 5 menit max per upload
+                last_step = ''
+                upload_ok = False
+                while time.time() - poll_start < poll_timeout:
+                    if stop_event.is_set(): break
+                    time.sleep(2)
                     try:
-                        do_post_video(driver, desc_with_num, radio_try, nama_produk_input,
-                                      log_fn, sched_dt, stop_event,
-                                      add_sound=add_sound, add_product=add_product,
-                                      skip_switches=True, hashtags=hashtags if hashtags else None)
-                        post_ok = True; break
-                    except Exception as e_post:
-                        tried.append(radio_try)
-                        err_msg = str(e_post).lower()
-                        if any(kw in err_msg for kw in ["radio", "produk", "timeout", "presence", "not found", "xpath"]):
-                            log_fn(f"[UD {ud_num}]   ⚠️ '{radio_try[:30]}' tidak ada, coba lain...")
-                            continue
-                        else:
-                            raise
-                if not post_ok:
-                    raise Exception(f"Semua produk radio gagal: {', '.join(t[:20] for t in tried)}")
+                        state = driver.execute_script(
+                            "return window.__tiktokGetState();")
+                        if not state: continue
+                        status = state.get('status', '')
+                        step_name = state.get('step', '')
+                        msg = state.get('message', '')
 
-                try: os.remove(path)
-                except: pass
-                uploaded += 1
-                item["status"] = "done"
-                save_ud_schedule(ud_num, schedule)
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Upload sukses (saved)")
+                        if step_name != last_step:
+                            last_step = step_name
+                            log_fn(f"[UD {ud_num}]   📌 {msg}")
+
+                        if status == 'done':
+                            upload_ok = True
+                            break
+                        elif status == 'error':
+                            err = state.get('error', 'Unknown')
+                            log_fn(f"[UD {ud_num}] [{idx+1}/{total}] JS error: {err}")
+                            break
+                    except: pass
+                else:
+                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Timeout {int(poll_timeout)}s")
+
+                if upload_ok:
+                    try: os.remove(path)
+                    except: pass
+                    uploaded += 1
+                    item["status"] = "done"
+                    save_ud_schedule(ud_num, schedule)
+                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ✅ Upload sukses")
+
             except Exception as e:
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Error: {e}")
             if idx < total-1 and not stop_event.is_set():
