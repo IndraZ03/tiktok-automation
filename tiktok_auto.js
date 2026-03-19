@@ -448,105 +448,7 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  STEP 6: SWITCHES (Show More, Disclose, Branded, AI-generated)
-    // ═══════════════════════════════════════════════════════════════
-    async function configureSwitches() {
-        log('⚙️ Mengatur switches...');
-        STATE.step = 'switches';
-
-        // Show More / Advanced settings
-        try {
-            const advContainer = $("div[data-e2e='advanced_settings_container']");
-            if (advContainer) {
-                advContainer.scrollIntoView({ block: 'center' });
-                await sleep(500);
-                simulateClick(advContainer);
-                await sleep(2000);
-            }
-        } catch(e) { log(`  ⚠️ Show more: ${e.message}`); }
-
-        // Disclose content
-        try {
-            const discl = $("div[data-e2e='disclose_content_container'] div[class*='Switch__content']");
-            if (discl) { simulateClick(discl); await sleep(1500); }
-        } catch(e) { log(`  ⚠️ Disclose: ${e.message}`); }
-
-        // Branded content
-        try {
-            const branded = document.querySelector(
-                "span:has(+ label), label"
-            );
-            // More reliable: directly find by text
-            const allSpans = $$('span');
-            for (const s of allSpans) {
-                if (s.textContent.includes('Branded content')) {
-                    const label = s.parentElement.querySelector('label') ||
-                                  s.previousElementSibling;
-                    if (label) { simulateClick(label); await sleep(1000); }
-                    break;
-                }
-            }
-        } catch(e) { log(`  ⚠️ Branded: ${e.message}`); }
-
-        // AI-generated
-        try {
-            const aiSwitch = $("div[data-e2e='aigc_container'] div[class*='Switch__content']");
-            if (aiSwitch) { simulateClick(aiSwitch); await sleep(1000); }
-        } catch(e) { log(`  ⚠️ AI-generated: ${e.message}`); }
-
-        log('✅ Switches diatur');
-        return true;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  STEP 7: CONTENT CHECK LITE — Turn OFF if ON
-    // ═══════════════════════════════════════════════════════════════
-    async function disableContentCheckLite() {
-        log('🛡️ Memeriksa Content Check Lite...');
-        STATE.step = 'content_check';
-
-        // Search all text nodes for "content check"
-        const allEls = $$('span, div, label, p');
-        for (const el of allEls) {
-            const txt = (el.textContent || '').toLowerCase().trim();
-            if (txt.includes('content check')) {
-                // Find the nearest Switch toggle
-                const parent = el.closest('div[class*="jsx-"], div[class*="container"], div[class*="row"]')
-                              || el.parentElement;
-                if (!parent) continue;
-
-                const switchEl = parent.querySelector('div[class*="Switch__content"], div[role="switch"]');
-                if (!switchEl) continue;
-
-                const cls = switchEl.className || '';
-                const aria = switchEl.getAttribute('aria-checked') || '';
-                const rootEl = switchEl.closest('div[class*="Switch__root"]');
-                const rootCls = rootEl ? rootEl.className : '';
-
-                const isOn = cls.includes('checked-true') ||
-                             rootCls.includes('checked-true') ||
-                             aria === 'true';
-
-                if (isOn) {
-                    switchEl.scrollIntoView({ block: 'center' });
-                    await sleep(300);
-                    simulateClick(switchEl);
-                    await sleep(1000);
-                    log('✅ Content Check Lite dimatikan');
-                    return true;
-                } else {
-                    log('✅ Content Check Lite sudah OFF');
-                    return true;
-                }
-            }
-        }
-
-        log('ℹ️ Content Check Lite tidak ditemukan');
-        return true;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  STEP 8: ADD SOUND FROM FAVORITES
+    //  STEP 6: ADD SOUND FROM FAVORITES
     // ═══════════════════════════════════════════════════════════════
     async function addSound() {
         log('🔊 Menambahkan sound dari Favorites...');
@@ -612,7 +514,7 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  STEP 9: SET SCHEDULE (Date + Time)
+    //  STEP 7: SET SCHEDULE (Date + Time)
     // ═══════════════════════════════════════════════════════════════
     async function setSchedule(year, month, day, hour, minute) {
         log(`📅 Mengatur jadwal: ${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')} ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`);
@@ -731,6 +633,105 @@
         log('✅ Schedule diatur');
         return true;
     }
+
+      // ═══════════════════════════════════════════════════════════════
+    //  STEP 8: SWITCHES (Show More, Disclose, Branded, AI-generated)
+    // ═══════════════════════════════════════════════════════════════
+    async function configureSwitches() {
+        log('⚙️ Mengatur switches...');
+        STATE.step = 'switches';
+
+        // Show More / Advanced settings
+        try {
+            const advContainer = $("div[data-e2e='advanced_settings_container']");
+            if (advContainer) {
+                advContainer.scrollIntoView({ block: 'center' });
+                await sleep(500);
+                simulateClick(advContainer);
+                await sleep(2000);
+            }
+        } catch(e) { log(`  ⚠️ Show more: ${e.message}`); }
+
+        // Disclose content
+        try {
+            const discl = $("div[data-e2e='disclose_content_container'] div[class*='Switch__content']");
+            if (discl) { simulateClick(discl); await sleep(1500); }
+        } catch(e) { log(`  ⚠️ Disclose: ${e.message}`); }
+
+        // Branded content
+        try {
+            const branded = document.querySelector(
+                "span:has(+ label), label"
+            );
+            // More reliable: directly find by text
+            const allSpans = $$('span');
+            for (const s of allSpans) {
+                if (s.textContent.includes('Branded content')) {
+                    const label = s.parentElement.querySelector('label') ||
+                                  s.previousElementSibling;
+                    if (label) { simulateClick(label); await sleep(1000); }
+                    break;
+                }
+            }
+        } catch(e) { log(`  ⚠️ Branded: ${e.message}`); }
+
+        // AI-generated
+        try {
+            const aiSwitch = $("div[data-e2e='aigc_container'] div[class*='Switch__content']");
+            if (aiSwitch) { simulateClick(aiSwitch); await sleep(1000); }
+        } catch(e) { log(`  ⚠️ AI-generated: ${e.message}`); }
+
+        log('✅ Switches diatur');
+        return true;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  STEP 9: CONTENT CHECK LITE — Turn OFF if ON
+    // ═══════════════════════════════════════════════════════════════
+    async function disableContentCheckLite() {
+        log('🛡️ Memeriksa Content Check Lite...');
+        STATE.step = 'content_check';
+
+        // Search all text nodes for "content check"
+        const allEls = $$('span, div, label, p');
+        for (const el of allEls) {
+            const txt = (el.textContent || '').toLowerCase().trim();
+            if (txt.includes('content check')) {
+                // Find the nearest Switch toggle
+                const parent = el.closest('div[class*="jsx-"], div[class*="container"], div[class*="row"]')
+                              || el.parentElement;
+                if (!parent) continue;
+
+                const switchEl = parent.querySelector('div[class*="Switch__content"], div[role="switch"]');
+                if (!switchEl) continue;
+
+                const cls = switchEl.className || '';
+                const aria = switchEl.getAttribute('aria-checked') || '';
+                const rootEl = switchEl.closest('div[class*="Switch__root"]');
+                const rootCls = rootEl ? rootEl.className : '';
+
+                const isOn = cls.includes('checked-true') ||
+                             rootCls.includes('checked-true') ||
+                             aria === 'true';
+
+                if (isOn) {
+                    switchEl.scrollIntoView({ block: 'center' });
+                    await sleep(300);
+                    simulateClick(switchEl);
+                    await sleep(1000);
+                    log('✅ Content Check Lite dimatikan');
+                    return true;
+                } else {
+                    log('✅ Content Check Lite sudah OFF');
+                    return true;
+                }
+            }
+        }
+
+        log('ℹ️ Content Check Lite tidak ditemukan');
+        return true;
+    }
+
 
     // ═══════════════════════════════════════════════════════════════
     //  STEP 10: CLICK SCHEDULE/POST BUTTON
