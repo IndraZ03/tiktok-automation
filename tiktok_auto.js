@@ -130,9 +130,22 @@
     async function waitForVideoProcessed(timeout = 120000) {
         log('⏳ Menunggu video diproses oleh TikTok...');
         STATE.step = 'processing_video';
+        let selectVideoClicked = false;
 
         const t0 = Date.now();
         while (Date.now() - t0 < timeout) {
+            // Check for "Select video" button and click it
+            if (!selectVideoClicked) {
+                const selectBtn = $("button[data-e2e='select_video_button']");
+                if (selectBtn && isVisible(selectBtn) && selectBtn.getAttribute('aria-disabled') !== 'true') {
+                    log('🎬 Klik "Select video"...');
+                    simulateClick(selectBtn);
+                    selectVideoClicked = true;
+                    await sleep(3000);
+                    continue;
+                }
+            }
+
             // Check if the editor / caption area is ready
             const caption = $("div[role='textbox']") ||
                            $("div.notranslate.public-DraftEditor-content") ||
