@@ -216,32 +216,50 @@
         caption.focus();
         await sleep(300);
 
-        // Move cursor to end
-        const sel = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(caption);
-        range.collapse(false);
-        sel.removeAllRanges();
-        sel.addRange(range);
+        // Move cursor to END using keyboard — more reliable than Selection API
+        caption.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'End', code: 'End', keyCode: 35, ctrlKey: true, bubbles: true
+        }));
+        caption.dispatchEvent(new KeyboardEvent('keyup', {
+            key: 'End', code: 'End', keyCode: 35, ctrlKey: true, bubbles: true
+        }));
+        await sleep(300);
+
+        // Also try Ctrl+End for multi-line editors
+        caption.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'End', code: 'End', keyCode: 35, ctrlKey: true, bubbles: true
+        }));
+        await sleep(300);
 
         for (const tag of hashtags) {
             const clean = tag.replace(/^#/, '').trim();
             if (!clean) continue;
 
-            // Insert space + hashtag
-            document.execCommand('insertText', false, ' #' + clean);
-            await sleep(500);
+            // Type space before hashtag
+            document.execCommand('insertText', false, ' ');
+            await sleep(200);
 
-            // Wait for autocomplete dropdown
+            // Type # character
+            document.execCommand('insertText', false, '#');
+            await sleep(200);
+
+            // Type hashtag name character by character
+            for (const ch of clean) {
+                document.execCommand('insertText', false, ch);
+                await sleep(50);
+            }
             await sleep(1500);
 
-            // Press Tab to select autocomplete if available
+            // Press Tab to accept autocomplete suggestion
             caption.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Tab', code: 'Tab', keyCode: 9, bubbles: true
+            }));
+            caption.dispatchEvent(new KeyboardEvent('keyup', {
                 key: 'Tab', code: 'Tab', keyCode: 9, bubbles: true
             }));
             await sleep(800);
 
-            // Add space after hashtag to separate from next one
+            // Type space to separate from next hashtag
             document.execCommand('insertText', false, ' ');
             await sleep(300);
 
@@ -332,129 +350,112 @@
             }
         }
 
-        // C - Search product
-        log(`  🔍 Mencari produk: ${productRadioName.substring(0, 60)}...`);
-        const searchInput = $("input[placeholder='Search products']");
-        if (searchInput) {
-            // Set value using native setter (works better with React)
-            const nativeSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value').set;
-            nativeSetter.call(searchInput, productRadioName);
-            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-            await sleep(1000);
+        // ── Helper: find product in current table ──
+        function _findProductInTable(targetName) {
+            const sName = targetName.toLowerCase().trim();
+            const rows = $$("tr.product-tb-row");
+            const available = [];
 
-            // Try clicking search icon with multiple methods
-            let searchClicked = false;
+            // Method 1: Match via span.product-name text
+            for (const row of rows) {
+                const nameSpan = row.querySelector("span.product-name");
+                if (!nameSpan) continue;
+                const prodName = (nameSpan.textContent || '').trim();
+                available.push(prodName.substring(0, 60));
 
-            // Method 1: Click the icon wrapper div directly with .click()
-            const iconWrapper = $(".TUXTextInputCore-trailingIconWrapper");
-            if (iconWrapper) {
-                iconWrapper.click();
-                searchClicked = true;
-                log('  🔍 Search icon diklik (method 1: wrapper.click)');
-            }
+                const radio = row.querySelector("input[type='radio']");
+                if (!radio || radio.disabled) continue;
 
-            // Method 2: Click the .product-search-icon div
-            if (!searchClicked) {
-                const searchIconDiv = $(".product-search-icon");
-                if (searchIconDiv) {
-                    searchIconDiv.click();
-                    searchClicked = true;
-                    log('  🔍 Search icon diklik (method 2: icon.click)');
+                const pLower = prodName.toLowerCase();
+                if (pLower === sName || pLower.includes(sName) || sName.includes(pLower)) {
+                    return { radio, prodName, available };
                 }
             }
 
-            // Method 3: Click the SVG inside the icon
-            if (!searchClicked) {
-                const svg = $(".product-search-icon svg") || $(".TUXTextInputCore-trailingIconWrapper svg");
-                if (svg) {
-                    svg.closest('div').click();
-                    searchClicked = true;
-                    log('  🔍 Search icon diklik (method 3: svg parent.click)');
-                }
-            }
-
-            // Method 4: Fallback Enter key
-            if (!searchClicked) {
-                searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
-                }));
-                searchInput.dispatchEvent(new KeyboardEvent('keypress', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
-                }));
-                searchInput.dispatchEvent(new KeyboardEvent('keyup', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
-                }));
-                log('  🔍 Search via Enter key (fallback)');
-            }
-
-            await sleep(3000);
-        }
-
-        // C2 - Wait for product table to load (may take time after search)
-        let productRows = $$("tr.product-tb-row");
-        if (productRows.length === 0) {
-            log('  ⏳ Menunggu tabel produk dimuat...');
-            for (let retry = 0; retry < 5; retry++) {
-                await sleep(2000);
-                productRows = $$("tr.product-tb-row");
-                if (productRows.length > 0) break;
-            }
-        }
-
-        let foundRadio = null;
-        let foundMatch = false;
-        const visibleProducts = [];
-
-        // Search through product table rows
-        const searchName = productRadioName.toLowerCase().trim();
-        for (const row of productRows) {
-            const nameSpan = row.querySelector("span.product-name");
-            if (!nameSpan) continue;
-
-            const prodName = (nameSpan.textContent || '').trim();
-            visibleProducts.push(prodName.substring(0, 60));
-
-            const radio = row.querySelector("input[type='radio'].TUXRadioStandalone-input");
-            if (!radio) continue;
-
-            // Skip disabled radios (Unavailable products)
-            if (radio.disabled || radio.closest('[data-disabled="true"]')) {
-                continue;
-            }
-
-            // Match: exact or contains
-            const prodNameLower = prodName.toLowerCase();
-            if (prodNameLower === searchName || prodNameLower.includes(searchName) || searchName.includes(prodNameLower)) {
-                foundRadio = radio;
-                foundMatch = true;
-                break;
-            }
-        }
-
-        // Fallback: try matching via input[name] attribute (name = product name)
-        if (!foundMatch) {
-            const allRadios = $$("input[type='radio'].TUXRadioStandalone-input");
+            // Method 2: Match via input[name] attribute
+            const allRadios = $$("input[type='radio']");
             for (const r of allRadios) {
                 if (r.disabled) continue;
                 const rName = (r.getAttribute('name') || '').toLowerCase().trim();
-                if (rName === searchName || rName.includes(searchName) || searchName.includes(rName)) {
-                    foundRadio = r;
-                    foundMatch = true;
-                    break;
+                if (rName === sName || rName.includes(sName) || sName.includes(rName)) {
+                    return { radio: r, prodName: r.getAttribute('name'), available };
+                }
+            }
+
+            return { radio: null, prodName: null, available };
+        }
+
+        // C - STEP 1: Check if product is already visible in the table (before searching)
+        log(`  🔍 Mencari produk: ${productRadioName.substring(0, 60)}...`);
+        await sleep(1000);
+        let result = _findProductInTable(productRadioName);
+
+        // C2 - STEP 2: If not found, try searching
+        if (!result.radio) {
+            log('  🔍 Produk belum terlihat, mencoba search...');
+            const searchInput = $("input[placeholder='Search products']");
+            if (searchInput) {
+                // Focus and clear
+                searchInput.focus();
+                searchInput.value = '';
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                await sleep(300);
+
+                // Type product name character by character (React-friendly)
+                for (const ch of productRadioName) {
+                    searchInput.value += ch;
+                    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+                log('  � Nama produk diketik di search');
+                await sleep(1500);
+
+                // Try clicking search icon — all methods
+                const iconWrapper = $(".TUXTextInputCore-trailingIconWrapper");
+                const searchIconDiv = $(".product-search-icon");
+
+                if (iconWrapper) {
+                    // Try simulateClick (full event chain) + native click
+                    simulateClick(iconWrapper);
+                    iconWrapper.click();
+                    log('  🔍 Search icon diklik');
+                } else if (searchIconDiv) {
+                    simulateClick(searchIconDiv);
+                    searchIconDiv.click();
+                    log('  🔍 Search icon diklik (fallback)');
+                } else {
+                    // Fallback: Enter key
+                    for (const evType of ['keydown', 'keypress', 'keyup']) {
+                        searchInput.dispatchEvent(new KeyboardEvent(evType, {
+                            key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                        }));
+                    }
+                    log('  🔍 Search via Enter key');
+                }
+
+                // Wait for search results to load (retry up to 15s)
+                log('  ⏳ Menunggu hasil search...');
+                for (let retry = 0; retry < 5; retry++) {
+                    await sleep(3000);
+                    result = _findProductInTable(productRadioName);
+                    if (result.radio) {
+                        log('  ✅ Produk ditemukan setelah search!');
+                        break;
+                    }
                 }
             }
         }
 
-        if (!foundMatch || !foundRadio) {
-            const availableInfo = visibleProducts.length > 0
-                ? ` Hasil yg muncul: ${visibleProducts.slice(0, 3).join(' | ')}`
+        // C3 - Final check
+        if (!result.radio) {
+            const availableInfo = result.available.length > 0
+                ? ` Hasil yg muncul: ${result.available.slice(0, 3).join(' | ')}`
                 : '';
             throw new Error(`PRODUCT_NOT_FOUND: Produk "${productRadioName}" tidak cocok dengan hasil pencarian.${availableInfo}`);
         }
 
         // Click the radio's TUXRadioStandalone wrapper
+        const foundRadio = result.radio;
         const radioWrapper = foundRadio.closest('.TUXRadioStandalone') || foundRadio.parentElement;
         if (radioWrapper) {
             radioWrapper.scrollIntoView({ block: 'center' });
