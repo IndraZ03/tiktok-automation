@@ -1031,10 +1031,15 @@
         return tabState;
     };
 
-    // ── Klik tombol Unduh (BUTTON ONLY — tidak lewat URL/requests) ──
-    // Python panggil: execute_script("window.__grokTabDownload(idx);")
-    // Lalu poll tiap 2 detik: execute_script("return window.__grokBatchState.tabs[idx];")
-    // sampai status = 'downloaded' atau 'error'
+    // ── Download: Tombol Unduh (PRIMARY) + URL requests (FALLBACK) ──
+    //
+    // PRIMARY: Python panggil execute_script("window.__grokTabDownload(idx);")
+    //   → klik tombol Unduh, lalu Python poll sampai .mp4 muncul
+    //
+    // FALLBACK: Python panggil execute_script("return window.__grokTabGetVideoUrl(idx);")
+    //   → return URL untuk Python download via requests (jika button fail)
+
+    // PRIMARY: Klik tombol Unduh
     window.__grokTabDownload = function(tabIndex) {
         const batch = window.__grokBatchState;
         if (!batch.tabs[tabIndex]) {
@@ -1045,18 +1050,26 @@
 
         (async () => {
             try {
-                // Tunggu tombol Unduh paling akhir (terbaru) muncul di DOM (max 20 detik)
-                const dlBtn = await waitForElement(() => {
-                    const btns = Array.from(document.querySelectorAll('button[aria-label="Unduh"], button[aria-label="Download"]')).filter(b => isVisible(b));
-                    return btns.length > 0 ? btns[btns.length - 1] : null;
-                }, 20000);
+                // Cari tombol Unduh/Download yang visible (poll max 20 detik)
+                let dlBtn = null;
+                const dlStart = Date.now();
+                while (Date.now() - dlStart < 20000) {
+                    const btns = Array.from(document.querySelectorAll(
+                        'button[aria-label="Unduh"], button[aria-label="Download"]'
+                    )).filter(b => isVisible(b));
+                    if (btns.length > 0) {
+                        dlBtn = btns[btns.length - 1]; // Ambil yang terakhir (terbaru)
+                        break;
+                    }
+                    await sleep(500);
+                }
                 
                 if (!dlBtn) throw new Error('Tombol Unduh tidak muncul dalam 20 detik');
 
                 dlBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
                 await sleep(500);
                 
-                // Coba multiple metode klik untuk robustness
+                // Klik dengan multiple metode untuk robustness
                 try { dlBtn.click(); } catch(e) {}
                 simulateClick(dlBtn);
                 log(`[Tab ${tabIndex}] ✅ Tombol Unduh diklik!`);
@@ -1069,11 +1082,44 @@
                 tabState.status = 'error';
                 tabState.error  = e.message;
                 batch.totalFailed++;
-                log(`[Tab ${tabIndex}] ❌ Download error: ${e.message}`);
+                log(`[Tab ${tabIndex}] ❌ Download button error: ${e.message}`);
             }
         })();
 
         return tabState; // return langsung, Python polling
+    };
+
+    // FALLBACK: Return video URL untuk Python download via requests
+    window.__grokTabGetVideoUrl = function(tabIndex) {
+        // 1. Cek video#sd-video src (primary)
+        const sdVideo = document.querySelector('video#sd-video');
+        if (sdVideo && sdVideo.src && sdVideo.src.startsWith('https://') && sdVideo.src.includes('.mp4')) {
+            log(`[Tab ${tabIndex}] 📥 URL ditemukan (sd-video): ${sdVideo.src.substring(0, 80)}...`);
+            return sdVideo.src;
+        }
+        // 2. Cek video#hd-video
+        const hdVideo = document.querySelector('video#hd-video');
+        if (hdVideo && hdVideo.src && hdVideo.src.startsWith('https://') && hdVideo.src.includes('.mp4')) {
+            log(`[Tab ${tabIndex}] 📥 URL ditemukan (hd-video): ${hdVideo.src.substring(0, 80)}...`);
+            return hdVideo.src;
+        }
+        // 3. Fallback: any video with https .mp4 src
+        for (const v of $$('video')) {
+            if (v.src && v.src.startsWith('https://') && v.src.includes('.mp4')) {
+                log(`[Tab ${tabIndex}] 📥 URL ditemukan (fallback video): ${v.src.substring(0, 80)}...`);
+                return v.src;
+            }
+        }
+        // 4. Cek batch state videoUrl
+        const batch = window.__grokBatchState;
+        if (batch.tabs[tabIndex] && batch.tabs[tabIndex].videoUrl && 
+            batch.tabs[tabIndex].videoUrl.startsWith('https://')) {
+            log(`[Tab ${tabIndex}] 📥 URL ditemukan (batch state): ${batch.tabs[tabIndex].videoUrl.substring(0, 80)}...`);
+            return batch.tabs[tabIndex].videoUrl;
+        }
+        // 5. Tidak ada URL
+        log(`[Tab ${tabIndex}] ⚠️ Tidak ada video URL`);
+        return null;
     };
 
     log('🚀 Grok Auto JS injected and ready!');
