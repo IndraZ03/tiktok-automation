@@ -468,33 +468,68 @@
         await sleep(1000);
 
         // D - Click Next (second time - look for primary button)
+        let nextClicked = false;
         const allNextBtns = Array.from($$('button')).filter(b => {
-            const div = b.querySelector('div');
-            return div && div.textContent.trim() === 'Next' && isVisible(b);
+            const t = (b.textContent || '').trim();
+            return t === 'Next' && isVisible(b);
         });
-        const primaryNext = allNextBtns.find(b =>
-            (b.className || '').includes('primary')
-        ) || allNextBtns[allNextBtns.length - 1];
+        const primaryNext = allNextBtns.find(b => (b.className || '').includes('primary')) 
+                         || allNextBtns[allNextBtns.length - 1];
 
         if (primaryNext) {
             primaryNext.scrollIntoView({ block: 'center' });
             await sleep(500);
             simulateClick(primaryNext);
-            await sleep(2000);
+            primaryNext.click();
+            log('  ✅ Tombol Next (setelah radio) diklik');
+        }
+
+        // Verify if the next screen (Product title input) actually loaded
+        // Must ensure we don't accidentally find the "Search products" input!
+        let titleInputLoaded = false;
+        let titleInput = null;
+        for (let i = 0; i < 6; i++) {
+            await sleep(500);
+            titleInput = Array.from($$("input[class*='TUXTextInputCore-input']")).find(el => {
+                const ph = el.getAttribute('placeholder') || '';
+                return !ph.includes('Search') && isVisible(el);
+            });
+            if (titleInput) {
+                titleInputLoaded = true;
+                break;
+            }
+        }
+
+        // Fallback: If Next button failed silently (Title input didn't load), press Enter on the radio wrapper
+        if (!titleInputLoaded && radioWrapper) {
+            log('  ⚠️ Next gagal pindah halaman, mencoba kirim ENTER ke radio...');
+            for (const evType of ['keydown', 'keypress', 'keyup']) {
+                radioWrapper.dispatchEvent(new KeyboardEvent(evType, {
+                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                }));
+            }
+            // Wait for title input to load after pressing Enter
+            for (let i = 0; i < 6; i++) {
+                await sleep(500);
+                titleInput = Array.from($$("input[class*='TUXTextInputCore-input']")).find(el => {
+                    const ph = el.getAttribute('placeholder') || '';
+                    return !ph.includes('Search') && isVisible(el);
+                });
+                if (titleInput) break;
+            }
         }
 
         // E - Product title
-        if (productTitle) {
+        if (productTitle && titleInput) {
             log(`  📝 Mengisi judul produk: ${productTitle}`);
-            const titleInput = $("input[class*='TUXTextInputCore-input']");
-            if (titleInput) {
-                titleInput.focus();
-                titleInput.value = '';
-                titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-                await sleep(200);
-                simulateType(titleInput, productTitle);
-                await sleep(1000);
-            }
+            titleInput.focus();
+            titleInput.value = '';
+            titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+            await sleep(200);
+            simulateType(titleInput, productTitle);
+            await sleep(1000);
+        } else if (productTitle && !titleInput) {
+            log('  ⚠️ Input judul produk tidak ditemukan! Melewati pengisian judul produk.');
         }
 
         // F - Click Add (last - the confirmation button)

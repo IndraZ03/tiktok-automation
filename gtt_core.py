@@ -16,7 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 sys.path.insert(0, r"c:\tiktok_automation")
-from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page
+from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page, do_post_video
 
 APP_DIR = r"C:\tiktok_automation"
 USER_DATA_BASE = os.path.join(APP_DIR, "user_data")
@@ -944,65 +944,33 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] File disuntikkan")
                 time.sleep(5)
 
-                # 4. Build JS config
                 desc_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
-                js_config = {
-                    'description': desc_with_num,
-                    'hashtags': hashtags if hashtags else [],
-                    'location': None,
-                    'productRadio': chosen_radio if add_product else None,
-                    'productTitle': nama_produk_input if add_product else None,
-                    'addSound': add_sound,
-                    'skipSwitches': True,
-                    'schedule': {
-                        'year': sched_dt.year,
-                        'month': sched_dt.month,
-                        'day': sched_dt.day,
-                        'hour': sched_dt.hour,
-                        'minute': sched_dt.minute,
-                    }
-                }
-
-                # 5. Fire JS automation
-                driver.execute_script(
-                    "window.__tiktokUpload(arguments[0]);", js_config)
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] JS automation dimulai")
-
-                # 6. Poll __tiktokGetState() until done/error
-                poll_start = time.time()
-                poll_timeout = 300  # 5 menit max per upload
-                last_step = ''
                 upload_ok = False
-                while time.time() - poll_start < poll_timeout:
-                    if stop_event.is_set(): break
-                    time.sleep(2)
-                    try:
-                        state = driver.execute_script(
-                            "return window.__tiktokGetState();")
-                        if not state: continue
-                        status = state.get('status', '')
-                        step_name = state.get('step', '')
-                        msg = state.get('message', '')
-
-                        if step_name != last_step:
-                            last_step = step_name
-                            log_fn(f"[UD {ud_num}]   📌 {msg}")
-
-                        if status == 'done':
-                            upload_ok = True
-                            break
-                        elif status == 'error':
-                            err = state.get('error', 'Unknown')
-                            log_fn(f"[UD {ud_num}] [{idx+1}/{total}] JS error: {err}")
-                            # If product not found, stop ALL uploads (same product for all)
-                            if 'PRODUCT_NOT_FOUND' in err:
-                                log_fn(f"[UD {ud_num}] ❌ PRODUK TIDAK DITEMUKAN — upload dihentikan!")
-                                log_fn(f"[UD {ud_num}] ℹ️ Cek nama produk di /produk_radio {ud_num}")
-                                stop_event.set()  # Stop everything
-                            break
-                    except: pass
-                else:
-                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Timeout {int(poll_timeout)}s")
+                
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Memulai Selenium automation...")
+                try:
+                    do_post_video(
+                        driver=driver,
+                        deskripsi=desc_with_num,
+                        nama_produk_radio=chosen_radio if add_product else "",
+                        nama_produk_input=nama_produk_input if add_product else "",
+                        log=lambda m, *args: log_fn(f"[UD {ud_num}]   {m}"),
+                        schedule_dt=sched_dt,
+                        stop_event=stop_event,
+                        add_sound=add_sound,
+                        add_product=add_product,
+                        skip_switches=True,
+                        hashtags=hashtags if hashtags else [],
+                        location=None
+                    )
+                    if not stop_event.is_set():
+                        upload_ok = True
+                except Exception as eval_e:
+                    err_str = str(eval_e)
+                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Selenium automation error: {err_str}")
+                    if "Message:" in err_str and "TimeoutException" in str(type(eval_e)):
+                        # TimeoutException usually means product not found or element not loaded
+                        log_fn(f"[UD {ud_num}] ⚠️ Timeout saat mencari elemen (mungkin produk tidak ditemukan).")
 
                 if upload_ok:
                     try: os.remove(path)
