@@ -16,7 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 sys.path.insert(0, r"c:\tiktok_automation")
-from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page, do_post_video
+from tiktok_gui import open_chrome_debug, connect_selenium, navigate_upload_page, do_post_video, inject_video_file
 
 APP_DIR = r"C:\tiktok_automation"
 USER_DATA_BASE = os.path.join(APP_DIR, "user_data")
@@ -288,13 +288,14 @@ def _close_all_extra_tabs(driver):
     except: pass
 
 
-def _start_chrome_session(grok_ud, grok_port, log_fn, ud_num):
+def _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=None):
     """Buka Chrome & connect Selenium. Return (chrome_proc, driver) or (None, None)."""
+    if raw_dir is None: raw_dir = RAW_DIR
     log_fn(f"[UD {ud_num}] Membuka Chrome (port {grok_port})...")
     chrome_proc = open_chrome_grok(grok_ud, grok_port)
     try:
         driver = connect_selenium_grok(grok_port)
-        driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": RAW_DIR})
+        driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": raw_dir})
         log_fn(f"[UD {ud_num}] Chrome terhubung!")
         return chrome_proc, driver
     except Exception as e:
@@ -705,12 +706,13 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
     return generated
 
 
-def _merge_raw_list(raw_list, out_dir, log_fn, stop_event, ud_num):
+def _merge_raw_list(raw_list, out_dir, log_fn, stop_event, ud_num, merge_func=None):
     """Merge pairs of raw videos into 20s clips. Returns merged count."""
     merged_count = 0
     for i in range(0, len(raw_list) - 1, 2):
         if stop_event.is_set(): break
-        mp = merge_video_pair(raw_list[i], raw_list[i + 1], out_dir, log_fn)
+        mf = merge_func if merge_func else merge_video_pair
+        mp = mf(raw_list[i], raw_list[i + 1], out_dir, log_fn)
         if mp:
             merged_count += 1
             log_fn(f"[UD {ud_num}] Merged #{merged_count}: {os.path.basename(mp)}")
@@ -722,7 +724,7 @@ def _merge_raw_list(raw_list, out_dir, log_fn, stop_event, ud_num):
     return merged_count
 
 
-def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, grok_port, log_fn, stop_event, out_dir=None, raw_dir=None):
+def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, grok_port, log_fn, stop_event, out_dir=None, raw_dir=None, merge_func=None):
     """
     Generate 'needed' merged 20s videos for a UD.
     
@@ -747,7 +749,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
     log_fn(f"[UD {ud_num}] Target: {target} merged 20s videos")
     log_fn(f"[UD {ud_num}] Mode: {TABS_PER_BATCH} tab/batch, restart Chrome tiap {RESTART_EVERY_MERGED} merged")
 
-    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=raw_dir)
     if not driver:
         log_fn(f"[UD {ud_num}] Gagal memulai Chrome!")
         return 0
@@ -766,7 +768,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                 if consecutive_fails >= 5:
                     log_fn(f"[UD {ud_num}] 5x gagal berturut, restart Chrome...")
                     _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
-                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=raw_dir)
                     if not driver:
                         log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
                         break
@@ -777,7 +779,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                 # Cek apakah driver masih hidup
                 if driver is None:
                     log_fn(f"[UD {ud_num}] Driver mati, restart Chrome...")
-                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=raw_dir)
                     if not driver:
                         log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
                         break
@@ -813,7 +815,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                     if len(pairs_to_merge) % 2 == 1:
                         raw_pool.append(pairs_to_merge.pop())
 
-                    merged_count = _merge_raw_list(pairs_to_merge, out_dir, log_fn, stop_event, ud_num)
+                    merged_count = _merge_raw_list(pairs_to_merge, out_dir, log_fn, stop_event, ud_num, merge_func=merge_func)
                     total_merged_this_session += merged_count
                     merged_since_restart += merged_count
                     log_fn(f"[UD {ud_num}] Progress: {total_merged_this_session}/{target} merged (stok: {count_stok(ud_num)})")
@@ -824,7 +826,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                 if merged_since_restart >= RESTART_EVERY_MERGED:
                     log_fn(f"[UD {ud_num}] Restart Chrome ({merged_since_restart} merged)...")
                     _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
-                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=raw_dir)
                     if not driver:
                         log_fn(f"[UD {ud_num}] Chrome restart gagal, abort!")
                         break
@@ -838,7 +840,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                 except: pass
                 driver = None
                 time.sleep(5)
-                chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num)
+                chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=raw_dir)
                 if not driver:
                     consecutive_fails += 1
                     log_fn(f"[UD {ud_num}] Restart gagal ({consecutive_fails}/5)")
@@ -852,7 +854,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
         # Handle sisa raw pool (ganjil terakhir) - pindah ke stok langsung
         if raw_pool and not stop_event.is_set():
             if len(raw_pool) >= 2:
-                mc = _merge_raw_list(raw_pool, out_dir, log_fn, stop_event, ud_num)
+                mc = _merge_raw_list(raw_pool, out_dir, log_fn, stop_event, ud_num, merge_func=merge_func)
                 total_merged_this_session += mc
             # single leftover → pindah langsung ke stok
             for leftover in raw_pool:
@@ -939,10 +941,8 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
                 # 2. Inject tiktok_auto.js
                 inject_js(driver, TIKTOK_JS_FILE)
 
-                # 3. Upload file via Selenium input[type=file]
-                upload_input = WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
-                upload_input.send_keys(os.path.abspath(os.path.normpath(path)))
+                # 3. Upload file via robust JS helper
+                inject_video_file(driver, path)
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] File disuntikkan")
                 time.sleep(5)
 
