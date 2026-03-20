@@ -184,698 +184,6 @@ def do_upload_file(driver, file_path, log):
     log(f"✓ File disuntikkan: {os.path.basename(file_path)}")
     time.sleep(5)
 
-def do_post_video(driver, deskripsi, nama_produk_radio, nama_produk_input, log,
-                  schedule_dt, stop_event, add_sound=False, add_product=True,
-                  skip_switches=False, hashtags=None, location=None):
-    """
-    Full posting flow: description, product, switches, sounds, schedule.
-    schedule_dt: datetime object for when to schedule.
-    """
-    wait = WebDriverWait(driver, 20)
-
-    def safe(fn, msg=""):
-        try:
-            fn()
-        except Exception as e:
-            log(f"⚠ {msg}: {e}")
-
-    # ── Turn on ──
-    try:
-        turn_on = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-            (By.XPATH, "//div[contains(@class, 'Button__content') and text()='Turn on']")))
-        turn_on.click(); time.sleep(2)
-    except:
-        pass
-
-    # ── Description ──
-    log("Mengisi deskripsi...")
-    caption = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//div[@role='textbox'] | //div[contains(@class, 'notranslate public-DraftEditor-content')]")))
-    caption.click()
-    caption.send_keys(Keys.CONTROL + "a"); caption.send_keys(Keys.BACKSPACE)
-    caption.send_keys(deskripsi); time.sleep(1)
-
-    # ── Hashtags (typed char-by-char + Tab to confirm autocomplete) ──
-    if hashtags:
-        log(f"Menambahkan {len(hashtags)} hashtag...")
-        for tag in hashtags:
-            tag = tag.strip().lstrip('#')
-            if not tag:
-                continue
-            log(f"  Mengetik #{tag}...")
-            caption.send_keys(' ')
-            time.sleep(0.3)
-            caption.send_keys('#')
-            time.sleep(0.5)
-            for ch in tag:
-                caption.send_keys(ch)
-                time.sleep(0.15)
-            time.sleep(1.5)
-            caption.send_keys(Keys.TAB)
-            time.sleep(1)
-            log(f"  ✓ #{tag} ditambahkan")
-        log("✓ Semua hashtag ditambahkan")
-        time.sleep(1)
-
-    # ── Location ──
-    if location:
-        log(f"📍 Mengisi lokasi: {location}...")
-        try:
-            # Cari input lokasi
-            loc_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located(
-                (By.XPATH, "//input[@placeholder='Search locations' and @role='input']")))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", loc_input)
-            time.sleep(1)
-            loc_input.click()
-            time.sleep(0.5)
-            # Clear dan ketik lokasi
-            loc_input.send_keys(Keys.CONTROL + "a")
-            loc_input.send_keys(Keys.BACKSPACE)
-            time.sleep(0.3)
-            for ch in location:
-                loc_input.send_keys(ch)
-                time.sleep(0.08)
-            log(f"  Menunggu dropdown lokasi muncul...")
-            time.sleep(3)
-            # Klik opsi pertama di dropdown lokasi
-            try:
-                first_option = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-                    (By.XPATH, "//div[@role='option'][1]")))
-                first_option.click()
-                log(f"✓ Lokasi dipilih: {location}", )
-            except:
-                # Fallback: cari option dengan class Select__item
-                try:
-                    first_opt2 = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                        (By.XPATH, "//div[contains(@class,'Select__item')][1]")))
-                    first_opt2.click()
-                    log(f"✓ Lokasi dipilih (fallback): {location}")
-                except Exception as e_loc2:
-                    log(f"⚠ Gagal memilih lokasi dari dropdown: {e_loc2}")
-            time.sleep(1)
-        except Exception as e_loc:
-            log(f"⚠ Gagal mengisi lokasi: {e_loc}")
-    else:
-        log("⏭ Lokasi dilewati (tidak diaktifkan)")
-
-    # ── Add product ──
-    if not add_product:
-        log("⏭ Produk dilewati (tidak diaktifkan)")
-    else:
-      log("Menambahkan produk...")
-    # A – click + Add
-      add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Add']]")))
-      add_btn.click(); time.sleep(2)
-      # B – Next 1
-      n1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='Next']]")))
-      n1.click(); time.sleep(2)
-
-      # B2 – Cek apakah ada tab "My shop", jika ya klik "Showcase products"
-      try:
-          my_shop_tab = driver.find_elements(By.XPATH,
-              "//div[contains(@class,'TUXTabBar-item')]//button[contains(@class,'TUXTabBar-itemTitle')]//div[text()='My shop']")
-          if my_shop_tab and my_shop_tab[0].is_displayed():
-              log("Tab 'My shop' terdeteksi, klik 'Showcase products'...")
-              showcase_tab = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH,
-                  "//div[contains(@class,'TUXTabBar-item')]//button[contains(@class,'TUXTabBar-itemTitle')]//div[text()='Showcase products']")))
-              showcase_tab.click()
-              time.sleep(2)
-              log("✓ Tab 'Showcase products' diklik")
-          else:
-              log("Tab 'My shop' tidak terdeteksi, lanjut...")
-      except Exception as e_tab:
-          log(f"⚠ Cek tab My shop: {e_tab}")
-
-      # C – Search product then select radio button
-      log(f"STEP C: Mencari produk: {nama_produk_radio[:60]}...")
-      
-      # C1 – Cari input search products & ketik nama produk
-      try:
-          search_input = WebDriverWait(driver, 10).until(
-              EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search products']")))
-          search_input.clear()
-          search_input.send_keys(nama_produk_radio)
-          time.sleep(1)
-          log(f"✓ Ketik '{nama_produk_radio[:40]}' di search")
-          
-          # C2 – Klik tombol search (icon svg)
-          try:
-              search_icon = driver.find_element(By.XPATH,
-                  "//div[contains(@class,'product-search-icon')]")
-              search_icon.click()
-              log("✓ Klik search icon")
-          except:
-              # Fallback: tekan Enter
-              search_input.send_keys(Keys.ENTER)
-              log("✓ Tekan Enter untuk search")
-          time.sleep(3)
-      except Exception as e_search:
-          log(f"⚠ Search input tidak ada, langsung pilih radio: {e_search}")
-
-      # C3 – Pilih radio button
-      log(f"STEP C3: Memilih radio: {nama_produk_radio[:60]}...")
-      xpath_produk = f"//input[@type='radio' and @name='{nama_produk_radio}']"
-      radio = wait.until(EC.presence_of_element_located((By.XPATH, xpath_produk)))
-      target_radio_wrapper = radio.find_element(By.XPATH, "./..")
-      driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target_radio_wrapper)
-      time.sleep(1)
-      try:
-          target_radio_wrapper.click()
-          log("Klik wrapper produk (standar)")
-      except:
-          driver.execute_script("arguments[0].click();", target_radio_wrapper)
-          log("Klik wrapper produk (JS)")
-      time.sleep(1)
-      log("✓ Radio button produk dipilih")
-
-      # D – Next 2 (Full logic from upload.py with verification & fallbacks)
-      log("STEP D: Mencoba klik Next tombol kedua...")
-      time.sleep(2)
-      
-      next_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
-      log(f"Ditemukan {len(next_buttons)} tombol Next")
-      
-      target_next = None
-      for i, btn in enumerate(next_buttons):
-          is_vis = btn.is_displayed()
-          is_en = btn.is_enabled()
-          cls = btn.get_attribute("class") or ""
-          aria_dis = btn.get_attribute("aria-disabled")
-          log(f"  Tombol {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}, aria-disabled={aria_dis}")
-          
-          if is_vis and "primary" in cls:
-              target_next = btn
-              log(f"  -> TERPILIH sebagai target")
-      
-      if target_next:
-          log("Tombol target ditemukan, mencoba klik...")
-          driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_next)
-          time.sleep(1)
-          
-          # Method 1: ActionChains
-          try:
-              actions = ActionChains(driver)
-              actions.move_to_element(target_next).click().perform()
-              log("Klik dengan ActionChains berhasil")
-          except Exception as e_ac:
-              log(f"ActionChains gagal: {e_ac}")
-              # Method 2: Regular click
-              try:
-                  target_next.click()
-                  log("Klik biasa berhasil")
-              except:
-                  # Method 3: JavaScript
-                  driver.execute_script("arguments[0].click();", target_next)
-                  log("Klik JavaScript berhasil")
-          
-          time.sleep(2)
-          
-          # VERIFICATION: Check if product input appeared
-          input_produk = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
-          
-          if len(input_produk) > 0 and input_produk[0].is_displayed():
-              log("✓ VERIFIKASI BERHASIL: Input nama produk muncul")
-          else:
-              after_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Next']]")
-              if len(after_buttons) == len(next_buttons):
-                  log("✗ VERIFIKASI GAGAL: Tombol Next masih sama, mencoba alternatif...")
-                  try:
-                      target_radio_wrapper.send_keys(Keys.ENTER)
-                      log("Mengirim ENTER ke radio button")
-                      time.sleep(2)
-                  except:
-                      pass
-                  
-                  input_produk_after = driver.find_elements(By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")
-                  if len(input_produk_after) > 0:
-                      log("✓ Metode alternatif berhasil!")
-                  else:
-                      raise Exception("Tidak bisa klik Next kedua setelah semua percobaan")
-              else:
-                  log("✓ Next kedua berhasil diklik")
-      else:
-          raise Exception("Tombol Next kedua tidak ditemukan")
-
-      # E – Product title input
-      log(f"STEP E: Mengisi judul produk: {nama_produk_input}")
-      pi = wait.until(EC.element_to_be_clickable(
-          (By.XPATH, "//input[contains(@class, 'TUXTextInputCore-input')]")))
-      pi.click()
-      pi.send_keys(Keys.CONTROL + "a"); pi.send_keys(Keys.BACKSPACE)
-      pi.send_keys(nama_produk_input)
-      log(f"✓ Input nama produk diisi dengan: {nama_produk_input}")
-      time.sleep(1)
-
-      # F – Add last (Full logic from upload.py with verification)
-      log("STEP F: Mencoba klik tombol Add terakhir...")
-      time.sleep(2)
-      
-      add_buttons = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
-      log(f"Ditemukan {len(add_buttons)} tombol Add")
-      
-      target_add = None
-      for i, btn in enumerate(add_buttons):
-          is_vis = btn.is_displayed()
-          is_en = btn.is_enabled()
-          cls = btn.get_attribute("class") or ""
-          log(f"  Tombol Add {i+1}: Visible={is_vis}, Enabled={is_en}, Class={cls[:80]}")
-          
-          if is_vis:
-              parent_modal = btn.find_elements(By.XPATH, 
-                  "./ancestor::div[contains(@class,'modal') or contains(@class,'Modal') or contains(@class,'dialog')]")
-              if parent_modal:
-                  log(f"  -> Dalam modal, prioritas tinggi")
-                  target_add = btn
-              elif target_add is None:
-                  target_add = btn
-                  log(f"  -> Target sementara")
-      
-      if target_add:
-          log("Tombol Add target ditemukan, mencoba klik...")
-          driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", target_add)
-          time.sleep(1)
-          
-          try:
-              actions = ActionChains(driver)
-              actions.move_to_element(target_add).click().perform()
-              log("✓ Klik Add dengan ActionChains berhasil")
-          except Exception as e_add:
-              log(f"ActionChains gagal: {e_add}")
-              try:
-                  driver.execute_script("arguments[0].click();", target_add)
-                  log("✓ Klik Add dengan JavaScript berhasil")
-              except Exception as e_add2:
-                  log(f"JavaScript gagal: {e_add2}")
-                  try:
-                      loc = target_add.location
-                      sz = target_add.size
-                      x = loc['x'] + sz['width'] // 2
-                      y = loc['y'] + sz['height'] // 2
-                      ac = ActionChains(driver)
-                      ac.move_by_offset(x, y).click().perform()
-                      ac.move_by_offset(-x, -y).perform()
-                      log("✓ Klik Add dengan koordinat berhasil")
-                  except Exception as e_add3:
-                      raise Exception(f"Semua metode klik Add gagal: {e_add3}")
-          
-          time.sleep(2)
-          
-          # Verification (wrapped in try/except for stale elements after modal close)
-          try:
-              after_add = driver.find_elements(By.XPATH, "//button[.//div[text()='Add']]")
-              visible_after = [b for b in after_add if b.is_displayed()]
-              # Don't reference old add_buttons - they may be stale after modal close
-              if len(visible_after) == 0:
-                  log("✓ VERIFIKASI: Tombol Add hilang (modal tertutup)")
-              else:
-                  success_ind = driver.find_elements(By.XPATH, "//*[contains(text(),'added') or contains(text(),'Added')]")
-                  if success_ind:
-                      log("✓ VERIFIKASI: Indikator produk ditambahkan")
-                  else:
-                      log("⚠ VERIFIKASI: Menunggu modal tertutup...")
-                      time.sleep(2)
-          except Exception:
-              # Stale element = DOM changed = modal closed = success
-              log("✓ VERIFIKASI: DOM berubah (modal tertutup), produk berhasil ditambahkan")
-      else:
-          # Fallback strategies
-          try:
-              alt_add = driver.find_element(By.XPATH, "//button[contains(@class,'primary') and .//div[text()='Add']]")
-              driver.execute_script("arguments[0].click();", alt_add)
-              log("✓ Klik Add dengan selector alternatif")
-          except:
-              try:
-                  footer_add = driver.find_element(By.XPATH, "//div[contains(@class,'footer')]//button[.//div[text()='Add']]")
-                  driver.execute_script("arguments[0].click();", footer_add)
-                  log("✓ Klik Add di footer")
-              except Exception as e_all:
-                  raise Exception(f"Tidak bisa klik tombol Add: {e_all}")
-      
-      time.sleep(2)
-      log("✓ Produk ditambahkan")
-
-    # ── G – Show More & Switches ──
-    if skip_switches:
-        log("⏭ Switches dilewati (tidak diaktifkan)")
-    else:
-        log("Mengatur switches...")
-        safe(lambda: (
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});",
-                wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@data-e2e='advanced_settings_container']")))),
-            time.sleep(1),
-            wait.until(EC.element_to_be_clickable(
-                (By.XPATH, "//div[@data-e2e='advanced_settings_container']"))).click(),
-            time.sleep(2)
-        ), "Show more")
-
-        safe(lambda: (
-            driver.execute_script("arguments[0].click();",
-                wait.until(EC.presence_of_element_located(
-                    (By.XPATH, "//div[@data-e2e='disclose_content_container']//div[contains(@class,'Switch__content')]")))),
-            time.sleep(2)
-        ), "Disclose switch")
-
-        safe(lambda: (
-            driver.execute_script("arguments[0].click();",
-                wait.until(EC.presence_of_element_located(
-                    (By.XPATH, "//span[contains(.,'Branded content')]/preceding-sibling::label")))),
-            time.sleep(1)
-        ), "Branded content")
-
-        safe(lambda: (
-            driver.execute_script("arguments[0].click();",
-                wait.until(EC.presence_of_element_located(
-                    (By.XPATH, "//div[@data-e2e='aigc_container']//div[contains(@class,'Switch__content')]")))),
-            time.sleep(1)
-        ), "AI-generated")
-
-    # ── H, I, J, J2 – Sounds (conditional) ──
-    if add_sound:
-        log("Menambahkan sound...")
-        try:
-            sb = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-button-name='sounds']")))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sb)
-            time.sleep(1); driver.execute_script("arguments[0].click();", sb); time.sleep(3)
-            # Favorites
-            ft = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(
-                (By.XPATH, "//button[@role='tab' and @aria-controls='panel-favorites']")))
-            driver.execute_script("arguments[0].click();", ft); time.sleep(3)
-            # + button
-            plus = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(
-                (By.XPATH, "//button[@data-icon-only='true' and @data-type='stroke' and .//span[@data-icon='PlusBold']]")))
-            driver.execute_script("arguments[0].click();", plus)
-            WebDriverWait(driver, 30).until(
-                lambda d: d.find_element(By.XPATH,
-                    "//button[@data-icon-only='true' and @data-type='stroke' and .//span[@data-icon='PlusBold']]"
-                ).get_attribute("aria-disabled") == "true"
-                or not d.find_element(By.XPATH,
-                    "//button[@data-icon-only='true' and @data-type='stroke' and .//span[@data-icon='PlusBold']]"
-                ).is_enabled()
-            )
-            log("✓ Sound ditambahkan")
-        except Exception as e:
-            log(f"⚠ Sound: {e}")
-
-        # ── J2 – Mute original ──
-        safe(lambda: (
-            driver.execute_script("arguments[0].click();",
-                WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-                    (By.XPATH, "//button[@data-icon-only='true' and @data-type='text' and .//span[@data-icon='VolumeUp']]")))),
-            time.sleep(1)
-        ), "Mute original")
-    else:
-        log("⏭ Sound dilewati (tidak diaktifkan)")
-
-    # ── K – Save (only needed after sounds modal) ──
-    if add_sound:
-        log("Klik Save (menutup sounds modal)...")
-        try:
-            sv = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-                (By.XPATH, "//div[contains(@class,'Button__content') and contains(@class,'type-primary')]//*[text()='Save']/ancestor::button | //button[.//div[contains(@class,'Button__content') and contains(@class,'type-primary') and .//text()='Save']]")))
-            driver.execute_script("arguments[0].click();", sv); time.sleep(3)
-            log("✓ Sounds saved")
-        except:
-            try:
-                sv2 = driver.find_element(By.XPATH, "//div[contains(@class,'Button__content') and contains(.,'Save')]/ancestor::button")
-                driver.execute_script("arguments[0].click();", sv2); time.sleep(3)
-                log("✓ Sounds saved (fallback)")
-            except Exception as e_sv:
-                log(f"⚠ Save sounds gagal: {e_sv}")
-
-    # ── Content Check Lite ── Jika toggle ON, klik agar menjadi OFF
-    try:
-        log("Memeriksa Content Check Lite...")
-        content_check_clicked = False
-
-        # Strategy 1: Cari teks 'Content check lite' lalu klik Switch__content di sebelahnya
-        try:
-            switch_divs = driver.find_elements(
-                By.XPATH,
-                "//span[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'content check')]"
-                "/ancestor::div[1]//div[contains(@class,'Switch__content')]"
-            )
-            if not switch_divs:
-                switch_divs = driver.find_elements(
-                    By.XPATH,
-                    "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'content check')]"
-                    "/ancestor::div[position()<=5]//div[contains(@class,'Switch')]"
-                )
-            for sd in switch_divs:
-                cls = sd.get_attribute("class") or ""
-                aria = sd.get_attribute("aria-checked") or ""
-                parent = sd.find_elements(By.XPATH, "./ancestor::div[contains(@class,'Switch__root')][1]")
-                parent_cls = parent[0].get_attribute("class") if parent else ""
-                is_on = ("checked-true" in cls or "checked-true" in parent_cls
-                         or aria == "true")
-                log(f"  Switch ditemukan: class={cls[:60]}, aria-checked={aria}, is_on={is_on}")
-                if is_on:
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sd)
-                    time.sleep(0.5)
-                    driver.execute_script("arguments[0].click();", sd)
-                    time.sleep(1)
-                    content_check_clicked = True
-                    log("✓ Content Check Lite dimatikan (Strategy 1).")
-                    break
-        except Exception as e1:
-            log(f"  Strategy 1 gagal: {e1}")
-
-        # Strategy 2: Cari semua switch yang ON lalu cocokkan dengan teks 'content check'
-        if not content_check_clicked:
-            try:
-                all_on_switches = driver.find_elements(
-                    By.XPATH,
-                    "//div[contains(@class,'Switch__root--checked-true')]//div[contains(@class,'Switch__content')]"
-                    " | //div[@aria-checked='true' and contains(@class,'Switch')]"
-                )
-                for sw in all_on_switches:
-                    # Cek apakah ada teks 'content check' di container parent
-                    containers = sw.find_elements(
-                        By.XPATH,
-                        "./ancestor::div[position()<=5]"
-                    )
-                    for cont in containers:
-                        txt = (cont.text or "").lower()
-                        if "content check" in txt:
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sw)
-                            time.sleep(0.5)
-                            driver.execute_script("arguments[0].click();", sw)
-                            time.sleep(1)
-                            content_check_clicked = True
-                            log("✓ Content Check Lite dimatikan (Strategy 2).")
-                            break
-                    if content_check_clicked:
-                        break
-            except Exception as e2:
-                log(f"  Strategy 2 gagal: {e2}")
-
-        # Strategy 3: Gunakan JavaScript untuk cari dan klik
-        if not content_check_clicked:
-            try:
-                result = driver.execute_script("""
-                    var spans = document.querySelectorAll('span, div, label, p');
-                    for (var i = 0; i < spans.length; i++) {
-                        var txt = (spans[i].textContent || '').toLowerCase().trim();
-                        if (txt.includes('content check')) {
-                            var parent = spans[i].closest('div[class*="jsx-"], div[class*="container"], div[class*="row"], div[class*="setting"]') || spans[i].parentElement;
-                            if (!parent) continue;
-                            // Cari switch di dalam parent
-                            var switchEl = parent.querySelector('div[class*="Switch__content"], div[class*="switch"], div[role="switch"], input[role="switch"]');
-                            if (!switchEl) {
-                                // Cari di sibling
-                                var siblings = parent.querySelectorAll('div[class*="Switch"]');
-                                if (siblings.length > 0) switchEl = siblings[0];
-                            }
-                            if (switchEl) {
-                                var cls = switchEl.className || '';
-                                var aria = switchEl.getAttribute('aria-checked') || '';
-                                var rootEl = switchEl.closest('div[class*="Switch__root"]');
-                                var rootCls = rootEl ? rootEl.className : '';
-                                if (cls.includes('checked-true') || rootCls.includes('checked-true') || aria === 'true') {
-                                    switchEl.scrollIntoView({block: 'center'});
-                                    switchEl.click();
-                                    return 'clicked';
-                                } else {
-                                    return 'already_off';
-                                }
-                            }
-                        }
-                    }
-                    return 'not_found';
-                """)
-                if result == 'clicked':
-                    time.sleep(1)
-                    content_check_clicked = True
-                    log("✓ Content Check Lite dimatikan (Strategy 3 - JS).")
-                elif result == 'already_off':
-                    content_check_clicked = True
-                    log("Content Check Lite sudah OFF (Strategy 3 - JS).")
-                else:
-                    log("Content Check Lite tidak ditemukan (Strategy 3 - JS).")
-            except Exception as e3:
-                log(f"  Strategy 3 gagal: {e3}")
-
-        if not content_check_clicked:
-            log("Content Check Lite sudah OFF atau tidak ditemukan.")
-    except Exception as e:
-        log(f"⚠ Content Check Lite: {e}")
-
-    # ── L – Schedule ──
-    log("Mengatur schedule...")
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-        (By.XPATH, "//*[contains(text(),'When to post')]")))
-    time.sleep(1)
-
-    sr = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//input[@name='postSchedule' and @value='schedule']/ancestor::label")))
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sr)
-    time.sleep(1); driver.execute_script("arguments[0].click();", sr); time.sleep(2)
-
-    # ── Time picker ──
-    target_hour = f"{schedule_dt.hour:02d}"
-    target_min_val = (schedule_dt.minute // 5) * 5
-    target_min = f"{target_min_val:02d}"
-    log(f"Setting time to {target_hour}:{target_min}")
-
-    ti = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//div[contains(@class,'TUXTextInputCore')]//input[@readonly and contains(@value,':')]")))
-    driver.execute_script("arguments[0].click();", ti); time.sleep(2)
-
-    # Hour
-    try:
-        hs = WebDriverWait(driver, 5).until(EC.presence_of_element_located(
-            (By.XPATH, f"//div[contains(@class,'tiktok-timepicker-time-picker-container')]//span[contains(@class,'tiktok-timepicker-left') and text()='{target_hour}']")))
-        hs.click(); log(f"✓ Jam {target_hour}")
-    except:
-        try:
-            hc = driver.find_element(By.XPATH, "//div[contains(@class,'tiktok-timepicker-time-picker-container')]//div[contains(@class,'tiktok-timepicker-time-scroll-container')][1]")
-            driver.execute_script("arguments[0].scrollTop=0;", hc); time.sleep(1)
-            hs2 = driver.find_element(By.XPATH, f"//span[contains(@class,'tiktok-timepicker-left') and text()='{target_hour}']")
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", hs2); time.sleep(.5)
-            hs2.click(); log(f"✓ Jam {target_hour} (scroll)")
-        except Exception as eh:
-            log(f"⚠ Jam gagal: {eh}")
-    time.sleep(1)
-
-    # Minute
-    try:
-        ms = WebDriverWait(driver, 5).until(EC.presence_of_element_located(
-            (By.XPATH, f"//div[contains(@class,'tiktok-timepicker-time-picker-container')]//span[contains(@class,'tiktok-timepicker-right') and text()='{target_min}']")))
-        ms.click(); log(f"✓ Menit {target_min}")
-    except:
-        try:
-            mcs = driver.find_elements(By.XPATH, "//div[contains(@class,'tiktok-timepicker-time-picker-container')]//div[contains(@class,'tiktok-timepicker-time-scroll-container')]")
-            if len(mcs) >= 2:
-                driver.execute_script("arguments[0].scrollTop=0;", mcs[1]); time.sleep(1)
-            ms2 = driver.find_element(By.XPATH, f"//span[contains(@class,'tiktok-timepicker-right') and text()='{target_min}']")
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", ms2); time.sleep(.5)
-            ms2.click(); log(f"✓ Menit {target_min} (scroll)")
-        except Exception as em:
-            log(f"⚠ Menit gagal: {em}")
-    time.sleep(1)
-
-    driver.execute_script("document.body.click();"); time.sleep(1)
-
-    # ── Date picker ──
-    target_day = str(schedule_dt.day)
-    target_date_str = schedule_dt.strftime("%Y-%m-%d")
-    log(f"Setting date to {target_date_str} (day {target_day})")
-
-    di_list = driver.find_elements(By.XPATH, "//div[contains(@class,'TUXTextInputCore')]//input[@readonly]")
-    for di in di_list:
-        v = di.get_attribute("value") or ""
-        if "-" in v and len(v) == 10 and di.is_displayed():
-            driver.execute_script("arguments[0].click();", di); time.sleep(2); break
-
-    # Check if we need to navigate to correct month
-    try:
-        month_title = driver.find_element(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'month-title')]")
-        cal_month = month_title.text.strip()
-        target_month = schedule_dt.strftime("%B")
-        # Navigate forward if needed
-        while cal_month != target_month:
-            next_arrow = driver.find_elements(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'arrow')]")
-            if len(next_arrow) >= 2:
-                next_arrow[1].click(); time.sleep(1)
-            cal_month = driver.find_element(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'month-title')]").text.strip()
-    except:
-        pass
-
-    try:
-        ds = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-            (By.XPATH, f"//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'day') and contains(@class,'valid') and text()='{target_day}']")))
-        ds.click(); log(f"✓ Tanggal {target_date_str}")
-    except:
-        try:
-            spans = driver.find_elements(By.XPATH, "//div[contains(@class,'calendar-wrapper')]//span[contains(@class,'day')]")
-            for s in spans:
-                if s.text.strip() == target_day and s.is_displayed():
-                    sc = s.get_attribute("class") or ""
-                    if "header" not in sc:
-                        s.click(); log(f"✓ Tanggal {target_date_str} (fallback)"); break
-        except Exception as ed:
-            log(f"⚠ Date gagal: {ed}")
-    time.sleep(2)
-    log("✓ Schedule diatur!")
-
-    # ── Post / Schedule button ──
-    log("Klik tombol Schedule...")
-    time.sleep(2)
-
-    # Specifically target the button that contains text 'Schedule' (not 'Save Draft')
-    # The Schedule button has: data-e2e="post_video_button", type-primary, text='Schedule'
-    schedule_clicked = False
-    try:
-        sch_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[@data-e2e='post_video_button' and .//div[contains(text(),'Schedule')]]")))
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sch_btn)
-        time.sleep(1)
-        driver.execute_script("arguments[0].click();", sch_btn)
-        schedule_clicked = True
-        log("✓ Tombol Schedule diklik")
-    except Exception as e_sch:
-        log(f"⚠ Selector utama gagal: {e_sch}, mencoba fallback...")
-        # Fallback: find by text content 'Schedule' with primary type
-        try:
-            sch_btn2 = driver.find_element(
-                By.XPATH, "//button[contains(@class,'type-primary') and .//div[contains(text(),'Schedule')]]")
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sch_btn2)
-            time.sleep(1)
-            driver.execute_script("arguments[0].click();", sch_btn2)
-            schedule_clicked = True
-            log("✓ Tombol Schedule diklik (fallback)")
-        except:
-            # Last resort: find all buttons, pick the one with text Schedule
-            all_btns = driver.find_elements(By.XPATH, "//button")
-            for b in all_btns:
-                try:
-                    if b.text.strip() == "Schedule" and b.is_displayed():
-                        driver.execute_script("arguments[0].click();", b)
-                        schedule_clicked = True
-                        log("✓ Tombol Schedule diklik (text match)")
-                        break
-                except:
-                    continue
-
-    # Tunggu sebentar agar halaman bereaksi (popup muncul atau langsung terkirim)
-    time.sleep(3)
-
-    # Confirm popup — HANYA cari di dalam dialog/modal, agar tidak klik ulang
-    # tombol Schedule yang sama
-    if schedule_clicked:
-        try:
-            # Cek apakah ada dialog/modal konfirmasi
-            confirm_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                (By.XPATH,
-                 "//div[contains(@class,'modal') or contains(@class,'Modal') or contains(@class,'dialog') or contains(@class,'Dialog') or @role='dialog']"
-                 "//button[.//div[text()='Schedule' or text()='Confirm']]")))
-            driver.execute_script("arguments[0].click();", confirm_btn)
-            log("✓ Konfirmasi popup diklik")
-        except:
-            # Tidak ada popup konfirmasi, mungkin langsung terjadwal
-            log("ℹ Tidak ada popup konfirmasi (langsung terjadwal)")
-
-    log("✓ Video berhasil di-schedule!")
-    time.sleep(3)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1415,7 +723,11 @@ class TikTokSchedulerApp:
                     navigate_upload_page(self.driver, force=(idx > 0))
                     time.sleep(3)
 
-                    # 2. Upload file via Selenium (input[type=file])
+                    # 2. Inject tiktok_auto.js
+                    inject_tiktok_js(self.driver)
+                    self._log("✓ JS injected", "info")
+
+                    # 3. Upload file via Selenium (input[type=file])
                     self._log(f"Uploading {video_name}...")
                     wait = WebDriverWait(self.driver, 30)
                     upload_input = wait.until(
@@ -1424,26 +736,68 @@ class TikTokSchedulerApp:
                     self._log(f"✓ File disuntikkan: {video_name}", "success")
                     time.sleep(5)
 
-                    # 3. Selenium automation
-                    self._log("▶ Selenium automation dimulai...", "info")
-                    do_post_video(
-                        driver=self.driver,
-                        deskripsi=desc,
-                        nama_produk_radio=product_radio,
-                        nama_produk_input=product_title,
-                        log=lambda m: self._log(m, "info"),
-                        schedule_dt=current_dt,
-                        stop_event=self.stop_event,
-                        add_sound=add_sound,
-                        add_product=add_product,
-                        skip_switches=skip_switches,
-                        hashtags=hashtags,
-                        location=location_text
+                    # 4. Build config for JS
+                    js_config = {
+                        'description': desc,
+                        'hashtags': hashtags if hashtags else [],
+                        'location': location_text,
+                        'productRadio': product_radio if add_product else None,
+                        'productTitle': product_title if add_product else None,
+                        'addSound': add_sound,
+                        'skipSwitches': skip_switches,
+                        'schedule': {
+                            'year': current_dt.year,
+                            'month': current_dt.month,
+                            'day': current_dt.day,
+                            'hour': current_dt.hour,
+                            'minute': current_dt.minute,
+                        }
+                    }
+
+                    # 5. Fire JS automation (async, returns immediately)
+                    self.driver.execute_script(
+                        "window.__tiktokUpload(arguments[0]);",
+                        js_config
                     )
-                    
-                    if not self.stop_event.is_set():
-                        self._log(f"✓ {video_name} berhasil di-schedule!", "success")
-                        mark_uploaded(folder_name, video_name, db)
+                    self._log("▶ JS automation dimulai...", "info")
+
+                    # 6. Poll __tiktokGetState() until done/error
+                    poll_start = time.time()
+                    poll_timeout = 300  # 5 menit max per upload
+                    last_step = ''
+                    while time.time() - poll_start < poll_timeout:
+                        if self.stop_event.is_set():
+                            break
+                        time.sleep(2)
+                        try:
+                            state = self.driver.execute_script(
+                                "return window.__tiktokGetState();")
+                            if not state:
+                                continue
+                            status = state.get('status', '')
+                            step_name = state.get('step', '')
+                            progress = state.get('progress', 0)
+                            msg = state.get('message', '')
+
+                            if step_name != last_step:
+                                last_step = step_name
+                                self._log(f"  📌 {msg}")
+
+                            if status == 'done':
+                                self._log(f"✓ {video_name} berhasil di-schedule!", "success")
+                                mark_uploaded(folder_name, video_name, db)
+                                break
+                            elif status == 'error':
+                                err = state.get('error', 'Unknown')
+                                self._log(f"❌ JS error: {err}", "error")
+                                if "PRODUCT_NOT_FOUND" in err:
+                                    self._log("⛔ Menghentikan semua upload karena produk tidak ditemukan.", "error")
+                                    self.stop_event.set()
+                                break
+                        except Exception as poll_e:
+                            pass
+                    else:
+                        self._log(f"⏰ Timeout {int(poll_timeout)}s pada {video_name}", "error")
 
                 except Exception as e:
                     self._log(f"❌ Error pada {video_name}: {e}", "error")
