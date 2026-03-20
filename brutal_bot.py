@@ -781,7 +781,8 @@ def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
         log_fn=log_fn,
         stop_event=stop_event,
         out_dir=BRUTAL_STOK_DIR,
-        raw_dir=BRUTAL_RAW_DIR
+        raw_dir=BRUTAL_RAW_DIR,
+        merge_func=merge_video_pair
     )
     
     merged = glob.glob(os.path.join(BRUTAL_STOK_DIR, "*.mp4"))

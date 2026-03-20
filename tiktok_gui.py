@@ -176,11 +176,32 @@ def navigate_upload_page(driver, force=False):
         driver.refresh()
         time.sleep(5)
 
-def do_upload_file(driver, file_path, log):
+def inject_video_file(driver, file_path):
     wait = WebDriverWait(driver, 30)
+    upload_script = """
+        let ipts = document.querySelectorAll('input[type="file"]');
+        for(let i=0; i<ipts.length; i++) {
+            if(ipts[i].accept && ipts[i].accept.includes('video')) return ipts[i];
+        }
+        let btn = document.querySelector('button[data-e2e="select_video_button"]') || document.querySelector('button[aria-label="Select video"]');
+        if (btn) {
+            let p = btn.parentElement;
+            for(let i=0; i<5 && p; i++) {
+                let f = p.querySelector('input[type="file"]');
+                if (f) return f;
+                p = p.parentElement;
+            }
+        }
+        return ipts.length ? ipts[ipts.length - 1] : null;
+    """
+    upload_input = wait.until(lambda d: d.execute_script(upload_script))
+    if not upload_input:
+        raise Exception("Elemen input upload video tidak ditemukan!")
+    upload_input.send_keys(os.path.abspath(os.path.normpath(file_path)))
+
+def do_upload_file(driver, file_path, log):
     log("Mencari elemen upload...")
-    upload_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
-    upload_input.send_keys(file_path)
+    inject_video_file(driver, file_path)
     log(f"✓ File disuntikkan: {os.path.basename(file_path)}")
     time.sleep(5)
 
@@ -1415,12 +1436,9 @@ class TikTokSchedulerApp:
                     navigate_upload_page(self.driver, force=(idx > 0))
                     time.sleep(3)
 
-                    # 2. Upload file via Selenium (input[type=file])
+                    # 2. Upload file via Selenium robust helper
                     self._log(f"Uploading {video_name}...")
-                    wait = WebDriverWait(self.driver, 30)
-                    upload_input = wait.until(
-                        EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
-                    upload_input.send_keys(os.path.abspath(video_path))
+                    inject_video_file(self.driver, video_path)
                     self._log(f"✓ File disuntikkan: {video_name}", "success")
                     time.sleep(5)
 
