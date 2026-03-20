@@ -767,92 +767,25 @@ def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
         needed = stok_needed()
         if needed <= 0:
             log_fn(f"Stok sudah penuh setelah merge sisa ({count_stok()}/{MAX_STOK})")
-            return leftover_merged
-    # needed = jumlah video final yang dibutuhkan, raw harus 2x lipat (2 raw = 1 merged)
-    target = needed * 2
-    log_fn(f"Target generate: {target} raw -> {needed} video 20 detik")
-    generated_raw = []; failed = 0
+            return glob.glob(os.path.join(BRUTAL_STOK_DIR, "*.mp4"))
 
-    chrome_proc = open_chrome_grok(BRUTAL_UD, BRUTAL_PORT)
-    driver = None
-    try:
-        driver = connect_selenium_grok(BRUTAL_PORT)
-        driver.execute_cdp_cmd("Page.setDownloadBehavior",{"behavior":"allow","downloadPath":BRUTAL_RAW_DIR})
-        remaining = target
-        while remaining > 0 and not stop_event.is_set():
-            batch = min(remaining, 10)
-            log_fn(f"=== Batch: {batch} tab (sisa {remaining}) ===")
-            tab_handles = []; tab_status = {}; tab_prog = {}
-            batch_start = time.time()
-            for i in range(batch):
-                if stop_event.is_set(): break
-                img = get_random_bahan_image(folder_name)
-                if not img: log_fn("Tidak ada gambar!"); break
-                if i == 0: driver.get(GROK_URL); time.sleep(3)
-                else: driver.switch_to.new_window('tab'); driver.get(GROK_URL); time.sleep(3)
-                tab_handles.append(driver.current_window_handle)
-                ok = setup_tab_grok(driver, img, prompt_text, log_fn, i)
-                tab_status[i] = "generating" if ok else "failed"
-                tab_prog[i] = 0
-                if not ok: failed += 1
-                time.sleep(1)
-            if stop_event.is_set(): break
-            timeout_start = time.time()
-            while not stop_event.is_set():
-                active = [i for i,s in tab_status.items() if s=="generating"]
-                if not active: break
-                if time.time()-timeout_start > 600:
-                    for i in active: tab_status[i]="failed"; failed+=1
-                    break
-                for i in active:
-                    if stop_event.is_set(): break
-                    try:
-                        driver.switch_to.window(tab_handles[i])
-                        status, pct = check_tab_progress(driver)
-                        if pct != tab_prog.get(i,0):
-                            tab_prog[i]=pct
-                            parts=[f"T{ti+1}:{tab_prog.get(ti,0) if tab_status.get(ti)=='generating' else ('OK' if tab_status.get(ti)=='done' else 'ERR')}" for ti in range(len(tab_handles))]
-                            log_fn("Progress: "+' | '.join(parts))
-                        if status=="done":
-                            vp = download_tab_video(driver, BRUTAL_RAW_DIR, log_fn, i, batch_start)
-                            if vp and os.path.exists(vp):
-                                generated_raw.append(vp); tab_status[i]="done"
-                                log_fn(f"[Tab {i+1}] Raw #{len(generated_raw)}")
-                                batch_start = time.time()
-                            else: tab_status[i]="failed"; failed+=1
-                    except Exception as e: log_fn(f"[Tab {i+1}] {str(e)[:60]}")
-                time.sleep(3)
-            remaining = target - len(generated_raw)
-            for h in driver.window_handles[1:]:
-                try: driver.switch_to.window(h); driver.close()
-                except: pass
-            try: driver.switch_to.window(driver.window_handles[0])
-            except: pass
-            time.sleep(2)
-    finally:
-        try:
-            if driver: driver.quit()
-        except: pass
-        try: chrome_proc.terminate()
-        except: pass
-
-    log_fn(f"Merge {len(generated_raw)} raw video...")
-    merged = []
-    for i in range(0, len(generated_raw)-1, 2):
-        if stop_event.is_set(): break
-        mp = merge_video_pair(generated_raw[i], generated_raw[i+1], BRUTAL_STOK_DIR, log_fn)
-        if mp:
-            merged.append(mp)
-            for vp in [generated_raw[i], generated_raw[i+1]]:
-                try:
-                    if os.path.exists(vp): os.remove(vp)
-                except: pass
-    if len(generated_raw) % 2 == 1:
-        leftover = generated_raw[-1]
-        dest = os.path.join(BRUTAL_STOK_DIR, os.path.basename(leftover))
-        try: shutil.move(leftover, dest); merged.append(dest)
-        except: pass
-    log_fn(f"Stok tersimpan: {len(merged)} video")
+    # Gunakan pipeline robust dari gtt_core yang menjalankan grok_auto.js
+    import gtt_core
+    merged_count = gtt_core.generate_stok_for_ud(
+        ud_num="Brutal",
+        needed=needed,
+        prompt_text=prompt_text,
+        bahan_folder=folder_name,
+        grok_ud=BRUTAL_UD,
+        grok_port=BRUTAL_PORT,
+        log_fn=log_fn,
+        stop_event=stop_event,
+        out_dir=BRUTAL_STOK_DIR,
+        raw_dir=BRUTAL_RAW_DIR
+    )
+    
+    merged = glob.glob(os.path.join(BRUTAL_STOK_DIR, "*.mp4"))
+    log_fn(f"Stok generate selesai. Stok total tersimpan: {len(merged)} video")
     return merged
 
 

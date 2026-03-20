@@ -425,9 +425,10 @@ def _setup_single_tab(driver, tab_index, bahan_folder, prompt_text, log_fn, ud_n
         return handle, 'failed'
 
 
-def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num):
+def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num, raw_dir=None):
     """Download video dari tab yang sudah selesai generate.
     Return path file jika berhasil, None jika gagal."""
+    if raw_dir is None: raw_dir = RAW_DIR
     downloads_folder = os.path.expanduser("~/Downloads")
 
     log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] Generate selesai, download...")
@@ -444,7 +445,7 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num):
 
     while time.time() - dl_start < 45:
         time.sleep(2)
-        for search_dir in [RAW_DIR, downloads_folder]:
+        for search_dir in [raw_dir, downloads_folder]:
             try:
                 mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
                 new_files = [f for f in mp4s if os.path.getmtime(f) > batch_start]
@@ -453,8 +454,8 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num):
                 if new_files and not crdownloads:
                     newest = max(new_files, key=os.path.getmtime)
                     if os.path.getsize(newest) > 10000:
-                        dest = os.path.join(RAW_DIR, f"gtt_{int(time.time())}_{tab_index}.mp4")
-                        if search_dir != RAW_DIR:
+                        dest = os.path.join(raw_dir, f"gtt_{int(time.time())}_{tab_index}.mp4")
+                        if search_dir != raw_dir:
                             shutil.move(newest, dest)
                         else:
                             if newest != dest:
@@ -549,7 +550,7 @@ def _open_new_grok_tab(driver, log_fn, ud_num, tab_num):
         return None
 
 
-def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_event, ud_num):
+def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_event, ud_num, raw_dir=None):
     """
     Buka num_tabs tab, generate via grok_auto.js, download raw video.
     Return list of raw file paths yang berhasil didownload.
@@ -674,7 +675,7 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                     log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
 
                 if status == 'done':
-                    found_path = _download_tab_video(driver, i, batch_start, log_fn, ud_num)
+                    found_path = _download_tab_video(driver, i, batch_start, log_fn, ud_num, raw_dir=raw_dir)
 
                     if found_path and os.path.exists(found_path) and os.path.getsize(found_path) > 10000:
                         generated.append(found_path)
@@ -721,7 +722,7 @@ def _merge_raw_list(raw_list, out_dir, log_fn, stop_event, ud_num):
     return merged_count
 
 
-def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, grok_port, log_fn, stop_event):
+def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, grok_port, log_fn, stop_event, out_dir=None, raw_dir=None):
     """
     Generate 'needed' merged 20s videos for a UD.
     
@@ -733,8 +734,9 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
     5. Restart Chrome tiap 5 merged
     6. Loop sampai stok = target
     """
-    out_dir = stok_dir(ud_num)
-    os.makedirs(RAW_DIR, exist_ok=True)
+    if out_dir is None: out_dir = stok_dir(ud_num)
+    if raw_dir is None: raw_dir = RAW_DIR
+    os.makedirs(raw_dir, exist_ok=True)
     target = needed
     batch_num = 0
     total_merged_this_session = 0
@@ -788,7 +790,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                 log_fn(f"[UD {ud_num}] ── Batch {batch_num} ── {tabs_this_batch} tab (butuh {still_needed} merged, raw pool: {len(raw_pool)})")
 
                 # Generate mini-batch
-                new_raw = _run_mini_batch(driver, tabs_this_batch, bahan_folder, prompt_text, log_fn, stop_event, ud_num)
+                new_raw = _run_mini_batch(driver, tabs_this_batch, bahan_folder, prompt_text, log_fn, stop_event, ud_num, raw_dir=raw_dir)
 
                 if not new_raw and not raw_pool:
                     consecutive_fails += 1
