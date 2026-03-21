@@ -34,7 +34,7 @@ APP_DIR        = r"C:\tiktok_automation"
 BAHAN_DIR      = os.path.join(APP_DIR, "bahan")
 OUTPUT_DIR     = os.path.join(APP_DIR, "grok_output")
 MERGED_DIR     = os.path.join(APP_DIR, "grok_output_merged")
-MERGED_DIR     = os.path.join(APP_DIR, "grok_output_merged")
+SOUND_DIR      = os.path.join(APP_DIR, "grok_sound")
 PROMPTS_FILE   = os.path.join(APP_DIR, "grok_prompts.json")
 SETTINGS_FILE  = os.path.join(APP_DIR, "grok_imagine_settings.json")
 
@@ -112,6 +112,86 @@ def is_allowed(uid):
 
 def escape_html(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SOUND MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+def list_sounds() -> list:
+    """List all sound files (.mp3, .wav, .m4a, .ogg) in SOUND_DIR."""
+    os.makedirs(SOUND_DIR, exist_ok=True)
+    exts = ('.mp3', '.wav', '.m4a', '.ogg')
+    return sorted([f for f in os.listdir(SOUND_DIR) if f.lower().endswith(exts)])
+
+def get_random_sound() -> str | None:
+    """Pick random sound file from SOUND_DIR. Returns full path or None."""
+    sounds = list_sounds()
+    if not sounds:
+        return None
+    return os.path.join(SOUND_DIR, random.choice(sounds))
+
+def replace_video_sound(video_path: str, log_fn=None) -> str | None:
+    """
+    Mute video's original audio and replace with random sound from SOUND_DIR.
+    Returns path to the processed video (replaces original), or None on failure.
+    """
+    sound_path = get_random_sound()
+    if not sound_path:
+        if log_fn:
+            log_fn("⚠️ Tidak ada file sound di folder grok_sound")
+        return None
+
+    sound_name = os.path.basename(sound_path)
+    if log_fn:
+        log_fn(f"🎵 Mengganti sound: {sound_name[:50]}")
+
+    dir_name = os.path.dirname(video_path)
+    base_name = os.path.basename(video_path)
+    temp_path = os.path.join(dir_name, f"_temp_sound_{base_name}")
+
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", sound_path,
+            "-c:v", "copy",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest",
+            temp_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            if log_fn:
+                log_fn(f"⚠️ FFmpeg error: {result.stderr[:100]}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
+
+        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+            os.remove(video_path)
+            shutil.move(temp_path, video_path)
+            if log_fn:
+                log_fn(f"✅ Sound diganti! ({sound_name[:40]})")
+            return video_path
+        else:
+            if log_fn:
+                log_fn("⚠️ File output FFmpeg kosong")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
+    except subprocess.TimeoutExpired:
+        if log_fn:
+            log_fn("⚠️ FFmpeg timeout (120s)")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
+    except Exception as e:
+        if log_fn:
+            log_fn(f"⚠️ Error ganti sound: {str(e)[:80]}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1503,13 +1583,17 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                         vid_b = merge_buffer.pop(0)
                         merged_path = gtt_core.merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
                         if merged_path:
+                            # Ganti sound merged video dengan random sound
+                            sound_enabled = bot_settings.get("tiktok_sound", True)
+                            if sound_enabled and list_sounds():
+                                replace_video_sound(merged_path, log_fn)
                             merged_count += 1
                             send_video_tg(merged_path)
                             for _vp in (vid_a, vid_b):
                                 try:
                                     if os.path.exists(_vp): os.remove(_vp)
                                 except: pass
-                            log_fn(f"?? Merged #{merged_count} dikirim", "success")
+                            log_fn(f"🎬 Merged #{merged_count} dikirim", "success")
                         else:
                             log_fn("?? Merge gagal, kirim video terpisah", "warn")
                             send_video_tg(vid_a)
@@ -1547,6 +1631,7 @@ def main_menu_kb(uid=None):
     rows = [
         [InlineKeyboardButton("📁 Kelola Bahan", callback_data="bahan_menu"),
          InlineKeyboardButton("📝 Kelola Prompt", callback_data="prompt_menu")],
+        [InlineKeyboardButton("🎵 Kelola Sound", callback_data="sound_menu")],
     ]
     if is_running:
         rows.append([InlineKeyboardButton("⏹ Stop Generate", callback_data="stop_gen")])
@@ -2037,6 +2122,89 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML)
         return
 
+    # ══════════════════════════════════════
+    #  SOUND MENU
+    # ══════════════════════════════════════
+    if data == "sound_menu":
+        sounds = list_sounds()
+        sound_on = bot_settings.get("tiktok_sound", True)
+        status = "🟢 <b>ON</b>" if sound_on else "🔴 <b>OFF</b>"
+        text = (
+            f"🎵 <b>Kelola Sound</b>\n\n"
+            f"📂 Folder: <code>{escape_html(SOUND_DIR)}</code>\n"
+            f"🔊 Status: {status}\n\n"
+        )
+        if sounds:
+            for s in sounds:
+                sz = os.path.getsize(os.path.join(SOUND_DIR, s)) / (1024*1024)
+                text += f"  🎵 <code>{escape_html(s)}</code> ({sz:.1f} MB)\n"
+        else:
+            text += "<i>Belum ada file sound.</i>\n"
+        text += f"\n📊 Total: {len(sounds)} sound\n"
+        text += "\nJika ada lebih dari 1 sound, akan dipilih secara <b>random</b> untuk setiap video merged."
+
+        toggle_label = "🔇 Matikan Sound" if sound_on else "🔊 Nyalakan Sound"
+        rows = [
+            [InlineKeyboardButton(toggle_label, callback_data="sound_toggle")],
+            [InlineKeyboardButton("➕ Tambah Sound", callback_data="sound_add")],
+        ]
+        for s in sounds[:20]:
+            cb = f"sound_del_{s}"
+            if len(cb) > 64:
+                cb = cb[:64]
+            rows.append([InlineKeyboardButton(f"🗑 {s[:35]}", callback_data=cb)])
+        rows.append([InlineKeyboardButton("🏠 Menu", callback_data="refresh")])
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows),
+                                   parse_mode=ParseMode.HTML)
+        return
+
+    if data == "sound_toggle":
+        current = bot_settings.get("tiktok_sound", True)
+        bot_settings["tiktok_sound"] = not current
+        save_bot_settings(bot_settings)
+        new_state = "🟢 ON" if bot_settings["tiktok_sound"] else "🔴 OFF"
+        await q.edit_message_text(
+            f"🔊 Sound sekarang: <b>{new_state}</b>",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🎵 Kembali", callback_data="sound_menu")],
+                 [InlineKeyboardButton("🏠 Menu", callback_data="refresh")]]),
+            parse_mode=ParseMode.HTML)
+        return
+
+    if data == "sound_add":
+        ctx.user_data["waiting_for"] = "sound_file"
+        await q.edit_message_text(
+            "🎵 <b>Tambah Sound</b>\n\n"
+            "Kirim file audio (MP3/WAV/M4A/OGG) yang ingin ditambahkan.\n"
+            "Bisa kirim beberapa file sekaligus.\n\n"
+            "Atau kirim /cancel untuk batal.",
+            parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("sound_del_"):
+        sound_name = data[len("sound_del_"):]
+        sound_path = os.path.join(SOUND_DIR, sound_name)
+        try:
+            if os.path.isfile(sound_path):
+                os.remove(sound_path)
+                await q.edit_message_text(
+                    f"🗑 Sound <code>{escape_html(sound_name)}</code> dihapus!",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🎵 Kembali", callback_data="sound_menu")]]),
+                    parse_mode=ParseMode.HTML)
+            else:
+                await q.edit_message_text(
+                    f"⚠️ File tidak ditemukan: <code>{escape_html(sound_name)}</code>",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🎵 Kembali", callback_data="sound_menu")]]),
+                    parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await q.edit_message_text(f"❌ Gagal hapus: {e}",
+                                       reply_markup=InlineKeyboardMarkup(
+                                           [[InlineKeyboardButton("🎵 Kembali", callback_data="sound_menu")]]),
+                                       parse_mode=ParseMode.HTML)
+        return
+
 
 # ═══════════════════════════════════════════════════════════════
 #  TEXT MESSAGE HANDLER (for conversations)
@@ -2170,6 +2338,61 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  AUDIO HANDLER (for adding sounds to grok_sound folder)
+# ═══════════════════════════════════════════════════════════════
+async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_allowed(uid):
+        return
+
+    waiting = ctx.user_data.get("waiting_for")
+    if waiting != "sound_file":
+        return
+
+    os.makedirs(SOUND_DIR, exist_ok=True)
+
+    try:
+        doc = update.message.document or update.message.audio or update.message.voice
+        if not doc:
+            await update.message.reply_text("⚠️ Kirim file audio (MP3/WAV/M4A/OGG).")
+            return
+
+        orig_name = getattr(doc, 'file_name', None) or f"sound_{int(time.time())}.mp3"
+        ext = orig_name.rsplit('.', 1)[-1].lower() if '.' in orig_name else 'mp3'
+        allowed_exts = ('mp3', 'wav', 'm4a', 'ogg')
+        if ext not in allowed_exts:
+            await update.message.reply_text(
+                f"⚠️ Format <code>.{ext}</code> tidak didukung.\n"
+                f"Format yang didukung: {', '.join(allowed_exts)}",
+                parse_mode=ParseMode.HTML)
+            return
+
+        # Save with original name, avoid duplicates
+        save_name = orig_name
+        save_path = os.path.join(SOUND_DIR, save_name)
+        counter = 1
+        while os.path.exists(save_path):
+            name_part = orig_name.rsplit('.', 1)[0]
+            save_name = f"{name_part}_{counter}.{ext}"
+            save_path = os.path.join(SOUND_DIR, save_name)
+            counter += 1
+
+        file = await doc.get_file()
+        await file.download_to_drive(save_path)
+
+        sounds_count = len(list_sounds())
+        sz = os.path.getsize(save_path) / (1024*1024)
+        await update.message.reply_text(
+            f"✅ Sound disimpan!\n\n"
+            f"🎵 File: <code>{escape_html(save_name)}</code> ({sz:.1f} MB)\n"
+            f"📊 Total sound: <b>{sounds_count}</b>\n\n"
+            "Kirim file audio lagi atau /cancel untuk selesai.",
+            parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal simpan audio: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════
 async def post_init(application):
@@ -2198,6 +2421,7 @@ def main():
     # Text handler for conversations (folder name, prompt name/text)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
+    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, handle_audio))
 
     print("🎬 Grok Imagine Bot is running...")
     app.run_polling()
