@@ -34,6 +34,7 @@ APP_DIR        = r"C:\tiktok_automation"
 BAHAN_DIR      = os.path.join(APP_DIR, "bahan")
 OUTPUT_DIR     = os.path.join(APP_DIR, "grok_output")
 MERGED_DIR     = os.path.join(APP_DIR, "grok_output_merged")
+MERGED_DIR     = os.path.join(APP_DIR, "grok_output_merged")
 PROMPTS_FILE   = os.path.join(APP_DIR, "grok_prompts.json")
 SETTINGS_FILE  = os.path.join(APP_DIR, "grok_imagine_settings.json")
 
@@ -1357,11 +1358,10 @@ def download_tab_video(driver, output_dir, log_fn, tab_idx, start_time):
 #  GENERATION LOOP (runs in thread)
 # ═══════════════════════════════════════════════════════════════
 def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_name, stop_event):
-    """
-    Loop that generates `count` videos (or infinite if count=0).
-    If count >= 10: uses MULTI-TAB mode (up to 10 tabs simultaneously).
-    Otherwise: single-tab sequential mode.
-    """
+    import asyncio, os, time, threading
+    from telegram.constants import ParseMode
+    import gtt_core
+
     def send(text):
         asyncio.run_coroutine_threadsafe(
             bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
@@ -1371,50 +1371,43 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
             try:
                 with open(path, 'rb') as vf:
                     await bot.send_video(chat_id, video=vf,
-                                         caption=f"🎬 Video dari folder <b>{escape_html(folder_name)}</b>",
+                                         caption=f"?? Video dari folder <b>{escape_html(folder_name)}</b>",
                                          parse_mode=ParseMode.HTML,
                                          supports_streaming=True)
-                # Hapus file setelah berhasil dikirim
                 try:
                     if os.path.exists(path):
                         os.remove(path)
-                except Exception as del_e:
+                except Exception:
                     pass
-            except Exception as e:
+            except Exception:
                 pass
         asyncio.run_coroutine_threadsafe(_send(), main_loop)
 
-    # Load prompt
     prompts = load_prompts()
     prompt_text = prompts.get(prompt_name)
     if not prompt_text:
-        send(f"❌ Prompt <code>{escape_html(prompt_name)}</code> tidak ditemukan!")
+        send(f"? Prompt <code>{escape_html(prompt_name)}</code> tidak ditemukan!")
         active_gen_tasks.pop(uid, None)
         return
 
-    # Check bahan folder
     images = list_bahan_images(folder_name)
     if not images:
-        send(f"❌ Folder <code>{escape_html(folder_name)}</code> kosong atau tidak ada!")
+        send(f"? Folder <code>{escape_html(folder_name)}</code> kosong atau tidak ada!")
         active_gen_tasks.pop(uid, None)
         return
 
     infinite = (count == 0)
-    target = "∞" if infinite else str(count)
-    use_multi = (not infinite and count >= 10)
-    mode_label = "Multi-Tab" if use_multi else "Single-Tab"
-
-    # Merge settings
+    target = "8" if infinite else str(count)
     merge_dur = bot_settings.get("merge_duration", 20)
     merge_enabled = (merge_dur == 20)
-    merge_buffer = []  # buffer of video paths waiting to be merged
+    merge_buffer = []
 
-    merge_mode_str = "🎬 Mode: <b>Gabung 2 video (20 dtk)</b>" if merge_enabled else "🎬 Mode: <b>Tanpa gabung (10 dtk)</b>"
+    merge_mode_str = "?? Mode: <b>Gabung 2 video (20 dtk)</b>" if merge_enabled else "?? Mode: <b>Tanpa gabung (10 dtk)</b>"
     send(
-        f"🚀 <b>Generasi dimulai! ({mode_label})</b>\n\n"
-        f"📁 Folder: <code>{escape_html(folder_name)}</code> ({len(images)} gambar)\n"
-        f"📝 Prompt: <code>{escape_html(prompt_name)}</code>\n"
-        f"🎯 Target: <b>{target}</b> video\n"
+        f"?? <b>Generasi dimulai! (grok_auto.js mode)</b>\n\n"
+        f"?? Folder: <code>{escape_html(folder_name)}</code> ({len(images)} gambar)\n"
+        f"?? Prompt: <code>{escape_html(prompt_name)}</code>\n"
+        f"?? Target: <b>{target}</b> video raw\n"
         f"{merge_mode_str}\n\n"
         f"Gunakan /stop untuk menghentikan."
     )
@@ -1423,395 +1416,132 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     failed = 0
     merged_count = 0
 
-    # ═════════════════════════════════════════════════
-    #  MULTI-TAB MODE (count >= 10)
-    # ═════════════════════════════════════════════════
-    if use_multi:
-        ud = bot_settings.get("user_data_dir", DEFAULT_USER_DATA)
-        pt = bot_settings.get("port", DEFAULT_PORT)
+    ud = bot_settings.get("user_data_dir", DEFAULT_USER_DATA)
+    pt = bot_settings.get("port", DEFAULT_PORT)
 
-        log_lines = []
-        log_lock = threading.Lock()
-        log_done = threading.Event()
+    log_lines = []
+    log_lock = threading.Lock()
+    log_done = threading.Event()
 
-        def log_fn(msg, tag=None):
-            ts = datetime.now().strftime("%H:%M:%S")
-            icon = {"success": "✅", "error": "❌", "warn": "⚠️", "info": "ℹ️"}.get(tag, "▪️")
+    def log_fn(msg, tag=None):
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        icon = {"success": "?", "error": "?", "warn": "??", "info": "??"}.get(tag, "??")
+        with log_lock:
+            log_lines.append(f"<code>[{ts}]</code> {icon} {msg}")
+
+    log_msg_future = asyncio.run_coroutine_threadsafe(
+        bot.send_message(chat_id,
+                         f"?? <b>Live Log</b>\n\n<i>Memulai Chrome...</i>",
+                         parse_mode=ParseMode.HTML), main_loop)
+    try:
+        log_msg = log_msg_future.result(timeout=10)
+        log_msg_id = log_msg.message_id
+    except:
+        log_msg_id = None
+
+    async def _live_log_updater():
+        last_text = ""
+        while not log_done.is_set():
             with log_lock:
-                log_lines.append(f"<code>[{ts}]</code> {icon} {msg}")
-
-        # Send live log message
-        log_msg_future = asyncio.run_coroutine_threadsafe(
-            bot.send_message(chat_id,
-                f"🎬 <b>Multi-Tab Live Log</b>\n\n<i>Memulai...</i>",
-                parse_mode=ParseMode.HTML), main_loop)
-        try:
-            log_msg = log_msg_future.result(timeout=10)
-            log_msg_id = log_msg.message_id
-        except:
-            log_msg_id = None
-
-        # Live log updater
-        async def _live_log_updater():
-            last_text = ""
-            while not log_done.is_set():
-                with log_lock:
-                    body = "\n".join(log_lines[-20:]) if log_lines else "<i>Menunggu...</i>"
-                text = f"🎬 <b>Multi-Tab Live Log</b>\n✅ {generated}/{target} | ❌ {failed}\n\n{body}"
-                if text != last_text and log_msg_id:
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=chat_id, message_id=log_msg_id,
-                            text=text[:4096], parse_mode=ParseMode.HTML)
-                        last_text = text
-                    except:
-                        pass
-                await asyncio.sleep(2)
-            # Final update
-            with log_lock:
-                body = "\n".join(log_lines[-25:]) if log_lines else ""
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=log_msg_id,
-                    text=f"🎬 <b>Multi-Tab Log Selesai</b>\n✅ {generated}/{target} | ❌ {failed}\n\n{body}"[:4096],
-                    parse_mode=ParseMode.HTML)
-            except:
-                pass
-
-        log_task = asyncio.run_coroutine_threadsafe(_live_log_updater(), main_loop)
-
-        driver = None
-        chrome_proc = None
-        try:
-            # Open Chrome once
-            log_fn("🌐 Membuka Chrome...")
-            chrome_proc = open_chrome_grok(ud, pt)
-            driver = connect_selenium_grok(pt)
-            driver.execute_cdp_cmd("Page.setDownloadBehavior",
-                                   {"behavior": "allow", "downloadPath": OUTPUT_DIR})
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-            remaining = count - generated
-
-            while remaining > 0 and not stop_event.is_set():
-                batch_size = min(remaining, 10)
-                log_fn(f"═══ Batch baru: {batch_size} tab (sisa {remaining}) ═══")
-
-                # ── Phase 1: Setup each tab & click Generate ──
-                tab_handles = []
-                tab_status = {}   # idx -> "generating" | "done" | "failed"
-                tab_progress = {} # idx -> pct
-                tab_start_time = time.time()
-
-                for i in range(batch_size):
-                    if stop_event.is_set():
-                        break
-
-                    image_path = get_random_bahan_image(folder_name)
-                    if not image_path:
-                        log_fn("❌ Tidak ada gambar lagi!")
-                        break
-
-                    # Open new tab (or use first tab for i=0)
-                    if i == 0:
-                        # Use current tab
-                        driver.get(GROK_URL)
-                        time.sleep(3)
-                    else:
-                        driver.switch_to.new_window('tab')
-                        driver.get(GROK_URL)
-                        time.sleep(3)
-
-                    handle = driver.current_window_handle
-                    tab_handles.append(handle)
-
-                    log_fn(f"[Tab {i+1}] 🌐 Halaman dimuat")
-
-                    ok = setup_tab_grok(driver, image_path, prompt_text, log_fn, i)
-                    if ok:
-                        tab_status[i] = "generating"
-                        tab_progress[i] = 0
-                    else:
-                        tab_status[i] = "failed"
-                        tab_progress[i] = 0
-                        failed += 1
-
-                    # Small delay before next tab
-                    time.sleep(1)
-
-                if stop_event.is_set():
-                    break
-
-                # ── Phase 2: Round-Robin monitoring ──
-                log_fn("═══ Monitoring Progress (Round-Robin) ═══")
-                timeout_start = time.time()
-                MAX_TIMEOUT = 600  # 10 minutes per batch
-
-                while not stop_event.is_set():
-                    # Check if all tabs are done/failed
-                    active_tabs = [i for i, s in tab_status.items()
-                                   if s == "generating"]
-                    if not active_tabs:
-                        log_fn("✅ Semua tab selesai!")
-                        break
-
-                    if time.time() - timeout_start > MAX_TIMEOUT:
-                        log_fn("⏰ Timeout 10 menit, menyelesaikan batch...")
-                        for i in active_tabs:
-                            tab_status[i] = "failed"
-                            failed += 1
-                        break
-
-                    for i in active_tabs:
-                        if stop_event.is_set():
-                            break
-                        try:
-                            driver.switch_to.window(tab_handles[i])
-                            status, pct = check_tab_progress(driver)
-
-                            if pct != tab_progress.get(i, 0):
-                                tab_progress[i] = pct
-                                # Build progress summary
-                                progress_parts = []
-                                for ti in range(len(tab_handles)):
-                                    s = tab_status.get(ti, "?")
-                                    p = tab_progress.get(ti, 0)
-                                    if s == "done":
-                                        progress_parts.append(f"T{ti+1}:✅")
-                                    elif s == "failed":
-                                        progress_parts.append(f"T{ti+1}:❌")
-                                    else:
-                                        progress_parts.append(f"T{ti+1}:{p}%")
-                                log_fn(f"📊 {' | '.join(progress_parts)}")
-
-                            if status == "done":
-                                log_fn(f"[Tab {i+1}] ✅ Video selesai! Mengunduh...")
-                                video_path = download_tab_video(
-                                    driver, OUTPUT_DIR, log_fn, i, tab_start_time)
-                                if video_path and os.path.exists(video_path):
-                                    generated += 1
-                                    tab_status[i] = "done"
-                                    sz = os.path.getsize(video_path) / (1024*1024)
-                                    log_fn(f"[Tab {i+1}] 📦 {sz:.1f} MB ({generated}/{target})")
-
-                                    if merge_enabled:
-                                        merge_buffer.append(video_path)
-                                        if len(merge_buffer) >= 2:
-                                            vid_a, vid_b = merge_buffer.pop(0), merge_buffer.pop(0)
-                                            merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
-                                            if merged_path:
-                                                merged_count += 1
-                                                send_video_tg(merged_path)  # hapus merged setelah kirim
-                                                # Hapus source videos
-                                                for _vp in (vid_a, vid_b):
-                                                    try:
-                                                        if os.path.exists(_vp): os.remove(_vp)
-                                                    except: pass
-                                                log_fn(f"🎬 Merged #{merged_count} dikirim ke Telegram")
-                                            else:
-                                                log_fn(f"⚠️ Merge gagal, kirim video terpisah")
-                                                send_video_tg(vid_a)  # hapus vid_a setelah kirim
-                                                send_video_tg(vid_b)  # hapus vid_b setelah kirim
-                                        else:
-                                            log_fn(f"⏳ Buffer merge: {len(merge_buffer)}/2")
-                                    else:
-                                        send_video_tg(video_path)  # hapus setelah kirim
-
-                                    # Update download timestamp so next tabs don't conflict
-                                    tab_start_time = time.time()
-                                else:
-                                    tab_status[i] = "failed"
-                                    failed += 1
-                                    log_fn(f"[Tab {i+1}] ❌ Download gagal")
-                        except Exception as e:
-                            log_fn(f"[Tab {i+1}] ⚠️ Error: {str(e)[:80]}")
-
-                    time.sleep(3)  # Wait before next round
-
-                # ── Phase 3: Cleanup tabs for next batch ──
-                remaining = count - generated
-                if remaining > 0 and not stop_event.is_set():
-                    log_fn(f"🔄 Menutup tab lama, sisa target: {remaining}")
-                    # Close all tabs except first
-                    all_handles = driver.window_handles
-                    for h in all_handles[1:]:
-                        try:
-                            driver.switch_to.window(h)
-                            driver.close()
-                        except:
-                            pass
-                    driver.switch_to.window(driver.window_handles[0])
-                    time.sleep(2)
-
-        except Exception as e:
-            log_fn(f"❌ Error fatal: {str(e)[:150]}")
-        finally:
-            log_done.set()
-            time.sleep(3)
-            try:
-                if driver:
-                    driver.quit()
-            except:
-                pass
-            try:
-                if chrome_proc:
-                    chrome_proc.terminate()
-            except:
-                pass
-
-    # ═════════════════════════════════════════════════
-    #  SINGLE-TAB MODE (count < 10 or infinite)
-    # ═════════════════════════════════════════════════
-    else:
-        idx = 0
-        while not stop_event.is_set():
-            if not infinite and generated >= count:
-                break
-
-            idx += 1
-            image_path = get_random_bahan_image(folder_name)
-            if not image_path:
-                send("❌ Tidak ada gambar lagi di folder bahan!")
-                break
-
-            send(
-                f"🎬 <b>[Video {idx}]</b> Generating...\n"
-                f"📷 Gambar: <code>{escape_html(os.path.basename(image_path))}</code>"
-            )
-
-            log_lines = []
-            log_lock = threading.Lock()
-            log_done = threading.Event()
-
-            def log_fn(msg, tag=None):
-                ts = datetime.now().strftime("%H:%M:%S")
-                icon = {"success": "✅", "error": "❌", "warn": "⚠️", "info": "ℹ️"}.get(tag, "▪️")
-                with log_lock:
-                    log_lines.append(f"<code>[{ts}]</code> {icon} {msg}")
-
-            # Send initial log message and start live updater
-            log_msg_future = asyncio.run_coroutine_threadsafe(
-                bot.send_message(
-                    chat_id,
-                    f"🎬 <b>[Video {idx}] Live Log</b>\n\n<i>Memulai...</i>",
-                    parse_mode=ParseMode.HTML),
-                main_loop)
-            try:
-                log_msg = log_msg_future.result(timeout=10)
-                log_msg_id = log_msg.message_id
-            except:
-                log_msg_id = None
-
-            # Live log updater in async
-            async def _live_log_updater():
-                last_text = ""
-                while not log_done.is_set():
-                    with log_lock:
-                        body = "\n".join(log_lines[-15:]) if log_lines else "<i>Menunggu...</i>"
-                    text = f"🎬 <b>[Video {idx}] Live Log</b>\n\n{body}"
-                    if text != last_text and log_msg_id:
-                        try:
-                            await bot.edit_message_text(
-                                chat_id=chat_id, message_id=log_msg_id,
-                                text=text[:4096], parse_mode=ParseMode.HTML)
-                            last_text = text
-                        except:
-                            pass
-                    await asyncio.sleep(2)
-                # Final update
-                with log_lock:
-                    body = "\n".join(log_lines[-20:]) if log_lines else ""
+                body = "\n".join(log_lines[-20:]) if log_lines else "<i>Menunggu...</i>"
+            text = f"?? <b>Live Log</b>\n? {generated}/{target} | ? {failed}\n\n{body}"
+            if text != last_text and log_msg_id:
                 try:
                     await bot.edit_message_text(
                         chat_id=chat_id, message_id=log_msg_id,
-                        text=f"🎬 <b>[Video {idx}] Log Selesai</b>\n\n{body}"[:4096],
-                        parse_mode=ParseMode.HTML)
-                except:
-                    pass
+                        text=text[:4096], parse_mode=ParseMode.HTML)
+                    last_text = text
+                except: pass
+            await asyncio.sleep(2)
+        with log_lock:
+            body = "\n".join(log_lines[-25:]) if log_lines else ""
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=log_msg_id,
+                text=f"?? <b>Senyap Log Selesai</b>\n? {generated}/{target} | ? {failed}\n\n{body}"[:4096],
+                parse_mode=ParseMode.HTML)
+        except: pass
 
-            log_task = asyncio.run_coroutine_threadsafe(_live_log_updater(), main_loop)
+    log_task = asyncio.run_coroutine_threadsafe(_live_log_updater(), main_loop)
 
-            video_path = generate_one_video_grok(
-                image_path, prompt_text, log_fn, stop_event, OUTPUT_DIR,
-                user_data_dir=bot_settings.get("user_data_dir"),
-                port=bot_settings.get("port"))
+    chrome_proc, driver = gtt_core._start_chrome_session(ud, pt, log_fn, "Imagine", raw_dir=OUTPUT_DIR)
+    
+    if not driver:
+        log_done.set()
+        send("? Gagal connect Chrome!")
+        active_gen_tasks.pop(uid, None)
+        return
 
-            # Stop live log updater
-            log_done.set()
-            time.sleep(3)  # Let final update happen
-
-            if stop_event.is_set():
+    try:
+        while not stop_event.is_set():
+            if not infinite and generated >= count:
                 break
-
-            if video_path and os.path.exists(video_path):
+            
+            remaining = 10 if infinite else min(10, count - generated)
+            if remaining <= 0: break
+            
+            batch_size = remaining
+            log_fn(f"--- Batch: {batch_size} tab (sisa {remaining if not infinite else '8'}) ---")
+            
+            new_raw = gtt_core._run_mini_batch(driver, batch_size, folder_name, prompt_text, log_fn, stop_event, "Imagine", raw_dir=OUTPUT_DIR)
+            
+            if not new_raw:
+                failed += batch_size
+                time.sleep(5)
+                continue
+            
+            for video_path in new_raw:
                 generated += 1
-                send(
-                    f"✅ <b>[Video {idx}] Berhasil!</b> ({generated}/{target})"
-                )
+                sz = os.path.getsize(video_path) / (1024*1024)
+                log_fn(f"?? {sz:.1f} MB ({generated}/{target})")
 
                 if merge_enabled:
                     merge_buffer.append(video_path)
                     if len(merge_buffer) >= 2:
-                        vid_a, vid_b = merge_buffer.pop(0), merge_buffer.pop(0)
-                        send(f"🎬 Menggabungkan 2 video...")
-                        merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
+                        vid_a = merge_buffer.pop(0)
+                        vid_b = merge_buffer.pop(0)
+                        merged_path = gtt_core.merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
                         if merged_path:
                             merged_count += 1
-                            send(f"✅ Merged #{merged_count} berhasil!")
-                            send_video_tg(merged_path)  # hapus merged setelah kirim
-                            # Hapus source videos
+                            send_video_tg(merged_path)
                             for _vp in (vid_a, vid_b):
                                 try:
                                     if os.path.exists(_vp): os.remove(_vp)
                                 except: pass
+                            log_fn(f"?? Merged #{merged_count} dikirim", "success")
                         else:
-                            send(f"⚠️ Merge gagal, kirim video terpisah")
-                            send_video_tg(vid_a)  # hapus vid_a setelah kirim
-                            send_video_tg(vid_b)  # hapus vid_b setelah kirim
-                    else:
-                        send(f"⏳ Buffer merge: {len(merge_buffer)}/2 (menunggu video berikutnya)")
+                            log_fn("?? Merge gagal, kirim video terpisah", "warn")
+                            send_video_tg(vid_a)
+                            send_video_tg(vid_b)
                 else:
-                    # Send video to Telegram immediately, hapus setelah kirim
                     send_video_tg(video_path)
-                time.sleep(3)
-            else:
-                failed += 1
-                send(
-                    f"❌ <b>[Video {idx}] Gagal!</b>"
-                )
+    finally:
+        log_done.set()
+        time.sleep(2)
+        gtt_core._stop_chrome_session(chrome_proc, driver, log_fn, "Imagine")
 
-            if not infinite and generated >= count:
-                break
-
-            if not stop_event.is_set():
-                send("⏳ Menunggu 10 detik sebelum video berikutnya...")
-                for _ in range(10):
-                    if stop_event.is_set():
-                        break
-                    time.sleep(1)
-
-    # Handle remaining buffer (if odd number or stopped mid-way)
     if merge_enabled and merge_buffer:
-        send(f"🎬 Sisa {len(merge_buffer)} video di buffer, dikirim tanpa merge")
+        send(f"?? Sisa {len(merge_buffer)} video di buffer, dikirim tanpa merge")
         for vp in merge_buffer:
             if os.path.exists(vp):
                 send_video_tg(vp)
         merge_buffer.clear()
 
-    # Final summary
-    merge_info = f"\n🎬 Merged: <b>{merged_count}</b> video" if merge_enabled else ""
+    merge_info = f"\n?? Merged: <b>{merged_count}</b> video" if merge_enabled else ""
     send(
-        f"🏁 <b>Generasi selesai!</b>\n\n"
-        f"✅ Berhasil: <b>{generated}</b>\n"
-        f"❌ Gagal: <b>{failed}</b>{merge_info}\n"
-        f"📁 Folder: <code>{escape_html(folder_name)}</code>"
+        f"?? <b>Generasi selesai!</b>\n\n"
+        f"? Berhasil: <b>{generated}</b>\n"
+        f"? Gagal: <b>{failed}</b>{merge_info}\n"
+        f"?? Folder: <code>{escape_html(folder_name)}</code>"
     )
     active_gen_tasks.pop(uid, None)
 
 
-# ═══════════════════════════════════════════════════════════════
+
+# ---------------------------------------------------------------
 #  TELEGRAM HANDLERS
-# ═══════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------
 def main_menu_kb(uid=None):
     is_running = bool(uid and active_gen_tasks.get(uid))
     rows = [
