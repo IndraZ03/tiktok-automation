@@ -936,127 +936,138 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     add_sound = settings.get("add_sound", False)
     prompt_text = load_prompts().get(prompt_name,"")
 
-    if not prompt_text:
-        sendmsg(f"Prompt <code>{escape_html(prompt_name)}</code> tidak ditemukan!")
-        log_done.set(); full_auto_task.pop(uid,None); return
-    if not folder_name or not list_bahan_images(folder_name):
-        sendmsg(f"Folder bahan <code>{escape_html(folder_name)}</code> kosong!")
-        log_done.set(); full_auto_task.pop(uid,None); return
+    try:
+        if not prompt_text:
+            sendmsg(f"Prompt <code>{escape_html(prompt_name)}</code> tidak ditemukan!")
+            return
+        if not folder_name or not list_bahan_images(folder_name):
+            sendmsg(f"Folder bahan <code>{escape_html(folder_name)}</code> kosong!")
+            return
 
-    # ── STEP 1: Generate stok ──
-    needed = stok_needed()
-    if needed <= 0:
-        log_fn(f"Stok sudah penuh ({count_stok()}/{MAX_STOK}), skip generate")
-        sendmsg(f"Stok penuh ({count_stok()}/{MAX_STOK}), langsung ke schedule.")
-    else:
-        sendmsg(f"<b>Pipeline dimulai!</b>\nStok: {count_stok()}/{MAX_STOK}\nGenerate: {needed} video")
-        log_fn(f"STEP 1: Generate {needed} stok")
-        try:
-            merged = generate_stok(needed, prompt_text, folder_name, log_fn, stop_event)
-            log_fn(f"Generate selesai: {len(merged)} video")
-            sendmsg(f"Generate selesai! Stok: {count_stok()}/{MAX_STOK}")
-        except Exception as gen_err:
-            from gtt_core import GrokRateLimitError
-            if isinstance(gen_err, GrokRateLimitError):
-                log_fn("🚫 RATE LIMIT! Generate dihentikan.")
-                sendmsg(
-                    "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
-                    "Grok sudah mencapai batas generate.\n"
-                    "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
-                    "Pipeline <b>dihentikan otomatis</b>.\n"
-                    f"Stok saat ini: <b>{count_stok()}/{MAX_STOK}</b>")
-                log_done.set(); full_auto_task.pop(uid, None); return
-            raise
-
-    if stop_event.is_set():
-        sendmsg("Pipeline dihentikan setelah generate."); log_done.set(); full_auto_task.pop(uid,None); return
-
-    stok_files = list_stok()[:MAX_STOK]
-    if not stok_files:
-        sendmsg("Tidak ada stok video!"); log_done.set(); full_auto_task.pop(uid,None); return
-
-    upload_kwargs = dict(
-        deskripsi=deskripsi, hashtags=hashtags,
-        nama_produk_radio=nama_produk_radio,
-        nama_produk_input=nama_produk_input,
-        add_product=add_product, add_sound=add_sound,
-        nama_produk_radio_list=nama_produk_radio_list
-    )
-    total_uploaded = 0
-
-    # ── STEP 2: BATCH 1 — Schedule & upload 30 video mulai jam 02:00 ──
-    batch1_files = stok_files[:BATCH1_COUNT]
-    batch2_files = stok_files[BATCH1_COUNT:BATCH1_COUNT + BATCH2_COUNT]
-
-    log_fn(f"STEP 2: Batch 1 — {len(batch1_files)} video mulai jam {SCHEDULE_START_HOUR:02d}:00")
-    today_02 = datetime.now().replace(hour=SCHEDULE_START_HOUR, minute=0, second=0, microsecond=0)
-    # Jika jam 02:00 sudah lewat hari ini, gunakan besok
-    if datetime.now() >= today_02:
-        today_02 += timedelta(days=1)
-    base1 = today_02 + timedelta(minutes=random.randint(0, 15))
-    schedule_batch1 = generate_schedule(batch1_files, base_date=base1)
-    save_schedule(schedule_batch1)
-
-    preview1 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch1)])
-    sendmsg(f"<b>Batch 1 ({len(schedule_batch1)} video):</b>\n{preview1}\n\nMulai upload Batch 1...")
-
-    if stop_event.is_set():
-        sendmsg("Pipeline dihentikan sebelum upload."); log_done.set(); full_auto_task.pop(uid,None); return
-
-    log_fn("STEP 3: Upload Batch 1")
-    uploaded1 = upload_schedule_tiktok(schedule_batch1, log_fn=log_fn, stop_event=stop_event, **upload_kwargs)
-    total_uploaded += uploaded1
-    log_fn(f"Batch 1 selesai: {uploaded1}/{len(schedule_batch1)}")
-    sendmsg(f"<b>Batch 1 selesai!</b> {uploaded1}/{len(schedule_batch1)} uploaded")
-
-    if stop_event.is_set() or not batch2_files:
-        if not batch2_files:
-            sendmsg(f"<b>Pipeline selesai!</b>\nTotal: <b>{total_uploaded}/{len(stok_files)}</b>")
+        # ── STEP 1: Generate stok ──
+        needed = stok_needed()
+        if needed <= 0:
+            log_fn(f"Stok sudah penuh ({count_stok()}/{MAX_STOK}), skip generate")
+            sendmsg(f"Stok penuh ({count_stok()}/{MAX_STOK}), langsung ke schedule.")
         else:
-            sendmsg("Pipeline dihentikan setelah Batch 1.")
-        log_done.set(); full_auto_task.pop(uid,None); return
+            sendmsg(f"<b>Pipeline dimulai!</b>\nStok: {count_stok()}/{MAX_STOK}\nGenerate: {needed} video")
+            log_fn(f"STEP 1: Generate {needed} stok")
+            try:
+                merged = generate_stok(needed, prompt_text, folder_name, log_fn, stop_event)
+                log_fn(f"Generate selesai: {len(merged)} video")
+                sendmsg(f"Generate selesai! Stok: {count_stok()}/{MAX_STOK}")
+            except Exception as gen_err:
+                from gtt_core import GrokRateLimitError
+                if isinstance(gen_err, GrokRateLimitError):
+                    log_fn("🚫 RATE LIMIT! Generate dihentikan.")
+                    sendmsg(
+                        "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                        "Grok sudah mencapai batas generate.\n"
+                        "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                        "Pipeline <b>dihentikan otomatis</b>.\n"
+                        f"Stok saat ini: <b>{count_stok()}/{MAX_STOK}</b>")
+                else:
+                    log_fn(f"❌ Error Generate: {type(gen_err).__name__}: {str(gen_err)[:80]}")
+                    sendmsg(f"❌ Pipeline dihentikan karena error: {type(gen_err).__name__}\n{str(gen_err)[:200]}")
+                return
 
-    # ── STEP 4: Tunggu sampai waktu schedule video ke-30 ──
-    last_batch1_time_str = schedule_batch1[-1]["schedule"]
-    last_batch1_dt = datetime.strptime(last_batch1_time_str, "%Y-%m-%d %H:%M")
-    now = datetime.now()
-    if now < last_batch1_dt:
-        wait_secs = (last_batch1_dt - now).total_seconds()
-        h = int(wait_secs // 3600); m = int((wait_secs % 3600) // 60)
-        log_fn(f"STEP 4: Menunggu sampai {last_batch1_time_str} ({h}j {m}m lagi)...")
-        sendmsg(f"<b>Menunggu Batch 2...</b>\nWaktu video ke-{len(schedule_batch1)}: <code>{last_batch1_time_str}</code>\n({h} jam {m} menit lagi)")
-        elapsed = 0
-        while elapsed < wait_secs and not stop_event.is_set():
-            time.sleep(min(60, wait_secs - elapsed))
-            elapsed += 60
-    else:
-        log_fn(f"Waktu video ke-{len(schedule_batch1)} sudah lewat, langsung Batch 2")
+        if stop_event.is_set():
+            sendmsg("Pipeline dihentikan setelah generate.")
+            return
 
-    if stop_event.is_set():
-        sendmsg("Pipeline dihentikan sebelum Batch 2."); log_done.set(); full_auto_task.pop(uid,None); return
+        stok_files = list_stok()[:MAX_STOK]
+        if not stok_files:
+            sendmsg("Tidak ada stok video!")
+            return
 
-    # ── STEP 5: BATCH 2 — Schedule & upload 20 video dari datetime.now() ──
-    log_fn(f"STEP 5: Batch 2 — {len(batch2_files)} video mulai dari sekarang")
-    base2 = datetime.now() + timedelta(minutes=random.randint(5, 15))
-    schedule_batch2 = generate_schedule(batch2_files, base_date=base2)
-    # Gabungkan schedule untuk save
-    full_schedule = schedule_batch1 + schedule_batch2
-    save_schedule(full_schedule)
+        upload_kwargs = dict(
+            deskripsi=deskripsi, hashtags=hashtags,
+            nama_produk_radio=nama_produk_radio,
+            nama_produk_input=nama_produk_input,
+            add_product=add_product, add_sound=add_sound,
+            nama_produk_radio_list=nama_produk_radio_list
+        )
+        total_uploaded = 0
 
-    preview2 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch2)])
-    sendmsg(f"<b>Batch 2 ({len(schedule_batch2)} video):</b>\n{preview2}\n\nMulai upload Batch 2...")
+        # ── STEP 2: BATCH 1 — Schedule & upload 30 video mulai jam 02:00 ──
+        batch1_files = stok_files[:BATCH1_COUNT]
+        batch2_files = stok_files[BATCH1_COUNT:BATCH1_COUNT + BATCH2_COUNT]
 
-    log_fn("STEP 6: Upload Batch 2")
-    uploaded2 = upload_schedule_tiktok(schedule_batch2, log_fn=log_fn, stop_event=stop_event, **upload_kwargs)
-    total_uploaded += uploaded2
-    log_fn(f"Batch 2 selesai: {uploaded2}/{len(schedule_batch2)}")
+        log_fn(f"STEP 2: Batch 1 — {len(batch1_files)} video mulai jam {SCHEDULE_START_HOUR:02d}:00")
+        today_02 = datetime.now().replace(hour=SCHEDULE_START_HOUR, minute=0, second=0, microsecond=0)
+        
+        # Jika jadwal hari ini sudah terlewat > 10 jam, base_date = besok (safety).
+        if datetime.now() > today_02 + timedelta(hours=10):
+            today_02 += timedelta(days=1)
+            
+        schedule_batch1 = generate_schedule(batch1_files, base_date=today_02)
+        save_schedule(schedule_batch1)
+        preview1 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch1)])
+        sendmsg(f"<b>Batch 1 ({len(schedule_batch1)} video):</b>\n{preview1}\n\nMulai upload Batch 1...")
 
-    log_fn(f"Pipeline Complete: {total_uploaded}/{len(stok_files)}")
-    sendmsg(f"<b>Pipeline selesai!</b>\nBatch 1: <b>{uploaded1}/{len(schedule_batch1)}</b>\n"
-            f"Batch 2: <b>{uploaded2}/{len(schedule_batch2)}</b>\n"
-            f"Total: <b>{total_uploaded}/{len(stok_files)}</b>\nSisa stok: <b>{count_stok()}</b>")
-    log_done.set()
-    full_auto_task.pop(uid, None)
+        if stop_event.is_set():
+            sendmsg("Pipeline dihentikan sebelum upload.")
+            return
+
+        log_fn("STEP 3: Upload Batch 1")
+        uploaded1 = upload_schedule_tiktok(schedule_batch1, log_fn=log_fn, stop_event=stop_event, **upload_kwargs)
+        total_uploaded += uploaded1
+        log_fn(f"Batch 1 selesai: {uploaded1}/{len(schedule_batch1)}")
+        sendmsg(f"<b>Batch 1 selesai!</b> {uploaded1}/{len(schedule_batch1)} uploaded")
+
+        if stop_event.is_set() or not batch2_files:
+            if not batch2_files:
+                sendmsg(f"<b>Pipeline selesai!</b>\nTotal: <b>{total_uploaded}/{len(stok_files)}</b>")
+            else:
+                sendmsg("Pipeline dihentikan setelah Batch 1.")
+            return
+
+        # ── STEP 4: Tunggu sampai waktu schedule video ke-30 ──
+        last_batch1_time_str = schedule_batch1[-1]["schedule"]
+        last_batch1_dt = datetime.strptime(last_batch1_time_str, "%Y-%m-%d %H:%M")
+        now = datetime.now()
+        if now < last_batch1_dt:
+            wait_secs = (last_batch1_dt - now).total_seconds()
+            h = int(wait_secs // 3600); m = int((wait_secs % 3600) // 60)
+            log_fn(f"STEP 4: Menunggu sampai {last_batch1_time_str} ({h}j {m}m lagi)...")
+            sendmsg(f"<b>Menunggu Batch 2...</b>\nWaktu video ke-{len(schedule_batch1)}: <code>{last_batch1_time_str}</code>\n({h} jam {m} menit lagi)")
+            elapsed = 0
+            while elapsed < wait_secs and not stop_event.is_set():
+                time.sleep(min(60, wait_secs - elapsed))
+                elapsed += 60
+        else:
+            log_fn(f"Waktu video ke-{len(schedule_batch1)} sudah lewat, langsung Batch 2")
+
+        if stop_event.is_set():
+            sendmsg("Pipeline dihentikan sebelum Batch 2.")
+            return
+
+        # ── STEP 5: BATCH 2 — Schedule & upload 20 video dari datetime.now() ──
+        log_fn(f"STEP 5: Batch 2 — {len(batch2_files)} video mulai dari sekarang")
+        base2 = datetime.now() + timedelta(minutes=random.randint(5, 15))
+        schedule_batch2 = generate_schedule(batch2_files, base_date=base2)
+        # Gabungkan schedule untuk save
+        full_schedule = schedule_batch1 + schedule_batch2
+        save_schedule(full_schedule)
+
+        preview2 = "\n".join([f"  {i+1}. <code>{s['schedule']}</code>" for i,s in enumerate(schedule_batch2)])
+        sendmsg(f"<b>Batch 2 ({len(schedule_batch2)} video):</b>\n{preview2}\n\nMulai upload Batch 2...")
+
+        log_fn("STEP 6: Upload Batch 2")
+        uploaded2 = upload_schedule_tiktok(schedule_batch2, log_fn=log_fn, stop_event=stop_event, **upload_kwargs)
+        total_uploaded += uploaded2
+        log_fn(f"Batch 2 selesai: {uploaded2}/{len(schedule_batch2)}")
+
+        log_fn(f"Pipeline Complete: {total_uploaded}/{len(stok_files)}")
+        sendmsg(f"<b>Pipeline selesai!</b>\nBatch 1: <b>{uploaded1}/{len(schedule_batch1)}</b>\n"
+                f"Batch 2: <b>{uploaded2}/{len(schedule_batch2)}</b>\n"
+                f"Total: <b>{total_uploaded}/{len(stok_files)}</b>\nSisa stok: <b>{count_stok()}</b>")
+    except Exception as e:
+        log_fn(f"❌ Pipeline terhenti karena error: {type(e).__name__} - {str(e)[:50]}")
+        sendmsg(f"❌ <b>Pipeline terhenti karena error!</b>\n<code>{type(e).__name__}: {str(e)[:100]}</code>")
+    finally:
+        log_done.set()
+        full_auto_task.pop(uid, None)
 
 
 def run_full_auto_daemon(uid, chat_id, bot, main_loop, stop_event):
@@ -1406,11 +1417,14 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             asyncio.run_coroutine_threadsafe(_upd2(), main_loop)
             try:
                 merged = generate_stok(needed, prompt_text, s.get("folder_name",""), _log2, stop_evt)
+                ld2.set()
+                asyncio.run_coroutine_threadsafe(
+                    bot.send_message(chat_id,f"Generate selesai! {len(merged)} video.\nStok: {count_stok()}/{MAX_STOK}",parse_mode=ParseMode.HTML),main_loop)
             except Exception as gen_err:
+                ld2.set()
                 from gtt_core import GrokRateLimitError
                 if isinstance(gen_err, GrokRateLimitError):
                     _log2("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
-                    ld2.set()
                     asyncio.run_coroutine_threadsafe(
                         bot.send_message(chat_id,
                             "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
@@ -1419,13 +1433,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             "Generate <b>dihentikan otomatis</b>.\n"
                             f"Stok saat ini: <b>{count_stok()}/{MAX_STOK}</b>",
                             parse_mode=ParseMode.HTML), main_loop)
-                    active_gen_task.pop(uid, None)
-                    return
-                raise  # Re-raise non-rate-limit errors
-            ld2.set()
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(chat_id,f"Generate selesai! {len(merged)} video.\nStok: {count_stok()}/{MAX_STOK}",parse_mode=ParseMode.HTML),main_loop)
-            active_gen_task.pop(uid, None)
+                else:
+                    _log2(f"❌ Error: {type(gen_err).__name__}: {str(gen_err)[:80]}")
+                    asyncio.run_coroutine_threadsafe(
+                        bot.send_message(chat_id,f"❌ Generate error: {type(gen_err).__name__}\n{str(gen_err)[:200]}",parse_mode=ParseMode.HTML),main_loop)
+            finally:
+                ld2.set()  # safety: pastikan live log updater berhenti
+                active_gen_task.pop(uid, None)
         t = threading.Thread(target=_gen, daemon=True)
         active_gen_task[uid] = {"stop": stop_evt, "thread": t}; t.start()
         await q.edit_message_text(f"<b>Generate dimulai!</b>\nTarget: {needed*2} video raw -> {needed} video 20 detik",
