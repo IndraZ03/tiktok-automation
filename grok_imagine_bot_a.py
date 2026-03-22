@@ -1135,6 +1135,25 @@ def check_tab_progress(driver):
     pct_num = 0
     is_generating = False
 
+    # Check rate limit FIRST
+    try:
+        is_rate_limited = driver.execute_script("""
+            const allText = document.querySelectorAll('span, div, p');
+            for (const el of allText) {
+                const t = (el.textContent || '').trim();
+                if (t.includes('Rate limit reached') || t.includes('Batas laju tercapai')) return true;
+            }
+            for (const el of document.querySelectorAll('button, span, div')) {
+                const t = (el.textContent || '').trim();
+                if (t.includes('Upgrade to SuperGrok') || t.includes('SuperGrok Heavy')) return true;
+            }
+            return false;
+        """)
+        if is_rate_limited:
+            return "rate_limited", 0
+    except:
+        pass
+
     # Read percentage
     try:
         pct_text = driver.execute_script("""
@@ -1461,6 +1480,18 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
             
             new_raw = gtt_core._run_mini_batch(driver, batch_size, folder_name, prompt_text, log_fn, stop_event, "Imagine", raw_dir=OUTPUT_DIR)
             
+            # Check rate limit sentinel
+            if new_raw == '__RATE_LIMITED__':
+                log_fn("🚫 RATE LIMIT REACHED! Grok meminta upgrade ke SuperGrok.", "error")
+                send(
+                    "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                    "Grok sudah mencapai batas generate.\n"
+                    "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                    "Generate <b>dihentikan otomatis</b>."
+                )
+                stop_event.set()
+                break
+
             if not new_raw:
                 failed += batch_size
                 time.sleep(5)

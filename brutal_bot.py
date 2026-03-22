@@ -771,6 +771,8 @@ def generate_stok(needed, prompt_text, folder_name, log_fn, stop_event):
 
     # Gunakan pipeline robust dari gtt_core yang menjalankan grok_auto.js
     import gtt_core
+    from gtt_core import GrokRateLimitError
+    # GrokRateLimitError dibiarkan propagate ke caller (run_full_pipeline / _gen)
     merged_count = gtt_core.generate_stok_for_ud(
         ud_num="Brutal",
         needed=needed,
@@ -949,9 +951,22 @@ def run_full_pipeline(uid, chat_id, bot, main_loop, stop_event):
     else:
         sendmsg(f"<b>Pipeline dimulai!</b>\nStok: {count_stok()}/{MAX_STOK}\nGenerate: {needed} video")
         log_fn(f"STEP 1: Generate {needed} stok")
-        merged = generate_stok(needed, prompt_text, folder_name, log_fn, stop_event)
-        log_fn(f"Generate selesai: {len(merged)} video")
-        sendmsg(f"Generate selesai! Stok: {count_stok()}/{MAX_STOK}")
+        try:
+            merged = generate_stok(needed, prompt_text, folder_name, log_fn, stop_event)
+            log_fn(f"Generate selesai: {len(merged)} video")
+            sendmsg(f"Generate selesai! Stok: {count_stok()}/{MAX_STOK}")
+        except Exception as gen_err:
+            from gtt_core import GrokRateLimitError
+            if isinstance(gen_err, GrokRateLimitError):
+                log_fn("🚫 RATE LIMIT! Generate dihentikan.")
+                sendmsg(
+                    "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                    "Grok sudah mencapai batas generate.\n"
+                    "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                    "Pipeline <b>dihentikan otomatis</b>.\n"
+                    f"Stok saat ini: <b>{count_stok()}/{MAX_STOK}</b>")
+                log_done.set(); full_auto_task.pop(uid, None); return
+            raise
 
     if stop_event.is_set():
         sendmsg("Pipeline dihentikan setelah generate."); log_done.set(); full_auto_task.pop(uid,None); return
@@ -1389,7 +1404,24 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         except: pass
                     await asyncio.sleep(3)
             asyncio.run_coroutine_threadsafe(_upd2(), main_loop)
-            merged = generate_stok(needed, prompt_text, s.get("folder_name",""), _log2, stop_evt)
+            try:
+                merged = generate_stok(needed, prompt_text, s.get("folder_name",""), _log2, stop_evt)
+            except Exception as gen_err:
+                from gtt_core import GrokRateLimitError
+                if isinstance(gen_err, GrokRateLimitError):
+                    _log2("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
+                    ld2.set()
+                    asyncio.run_coroutine_threadsafe(
+                        bot.send_message(chat_id,
+                            "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                            "Grok sudah mencapai batas generate.\n"
+                            "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                            "Generate <b>dihentikan otomatis</b>.\n"
+                            f"Stok saat ini: <b>{count_stok()}/{MAX_STOK}</b>",
+                            parse_mode=ParseMode.HTML), main_loop)
+                    active_gen_task.pop(uid, None)
+                    return
+                raise  # Re-raise non-rate-limit errors
             ld2.set()
             asyncio.run_coroutine_threadsafe(
                 bot.send_message(chat_id,f"Generate selesai! {len(merged)} video.\nStok: {count_stok()}/{MAX_STOK}",parse_mode=ParseMode.HTML),main_loop)

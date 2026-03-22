@@ -193,7 +193,7 @@ class AutomationEngine:
                 subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, timeout=5)
                 self.log(f"Chrome PID {pid} dimatikan ✓")
             if not pids:
-                subprocess.run(["taskkill", "/IM", "chrome.exe", "/F"], capture_output=True, timeout=5)
+#                 subprocess.run(["taskkill", "/IM", "chrome.exe", "/F"], capture_output=True, timeout=5)
         except Exception as e:
             self.log(f"Gagal matikan Chrome: {e}", "WARN")
 

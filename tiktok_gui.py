@@ -100,12 +100,6 @@ def kill_chrome_on_port(port):
                                    capture_output=True, timeout=10)
     except:
         pass
-    # Also kill any chrome.exe using the same user-data-dir
-    try:
-        subprocess.run(['taskkill', '/IM', 'chrome.exe', '/F'],
-                       capture_output=True, timeout=10)
-    except:
-        pass
     time.sleep(2)
 
 def open_chrome_debug(user_data_dir, port):

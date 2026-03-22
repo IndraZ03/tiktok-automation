@@ -39,6 +39,11 @@ def inject_js(driver, js_file):
 
 logger = logging.getLogger(__name__)
 
+class GrokRateLimitError(Exception):
+    """Raised when Grok rate limit is reached ("Rate limit reached / Upgrade to SuperGrok")."""
+    pass
+
+
 def resolve_ud_path(val):
     val = val.strip()
     if not val: return ""
@@ -688,6 +693,16 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                         log_fn(f"[UD {ud_num}] [Tab {i+1}] ❌ Download gagal → akan buat tab pengganti")
                         retry_tabs.append(i)
 
+                elif status == 'rate_limited':
+                    tab_status[i] = 'rate_limited'
+                    log_fn(f"[UD {ud_num}] [Tab {i+1}] 🚫 RATE LIMIT REACHED! Grok meminta upgrade ke SuperGrok.")
+                    # Set semua tab yang masih generating ke rate_limited
+                    for ai in active:
+                        if tab_status.get(ai) == 'generating':
+                            tab_status[ai] = 'rate_limited'
+                    # Break inner loop — akan break outer loop juga
+                    break
+
                 elif status == 'error':
                     tab_status[i] = 'failed'
                     log_fn(f"[UD {ud_num}] [Tab {i+1}] Error: {state.get('error','?')}")
@@ -697,8 +712,17 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                 tab_status[i] = 'error'
         time.sleep(3)
 
+        # Cek apakah ada rate limit — langsung keluar
+        if any(s == 'rate_limited' for s in tab_status.values()):
+            break
+
     # Tutup semua extra tab
     _close_all_extra_tabs(driver)
+
+    # Cek rate limit — propagate ke caller
+    if any(s == 'rate_limited' for s in tab_status.values()):
+        log_fn(f"[UD {ud_num}] 🚫 Rate limit terdeteksi! Generate dihentikan.")
+        return '__RATE_LIMITED__'  # Sentinel value
 
     ok_count = sum(1 for s in tab_status.values() if s == 'done')
     fail_count = sum(1 for s in tab_status.values() if s != 'done')
@@ -793,6 +817,11 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
 
                 # Generate mini-batch
                 new_raw = _run_mini_batch(driver, tabs_this_batch, bahan_folder, prompt_text, log_fn, stop_event, ud_num, raw_dir=raw_dir)
+
+                # Cek rate limit sentinel
+                if new_raw == '__RATE_LIMITED__':
+                    log_fn(f"[UD {ud_num}] 🚫 Rate limit terdeteksi! Menghentikan generate...")
+                    raise GrokRateLimitError("Grok rate limit reached. Generate dihentikan.")
 
                 if not new_raw and not raw_pool:
                     consecutive_fails += 1

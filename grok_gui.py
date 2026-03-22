@@ -250,7 +250,7 @@ class AutomationEngine:
             else:
                 # Fallback: kill by image name (only if no other approach worked)
                 result2 = subprocess.run(
-                    ["taskkill", "/IM", "chrome.exe", "/F"],
+#                     ["taskkill", "/IM", "chrome.exe", "/F"],
                     capture_output=True, text=True, timeout=5
                 )
                 self.log("Chrome dimatikan (fallback taskkill) ✓")

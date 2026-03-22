@@ -521,6 +521,35 @@
         return null;
     }
 
+    // Returns true if Grok rate limit has been reached.
+    // Detects: "Rate limit reached" text + "Upgrade to SuperGrok" button
+    function _isRateLimitReached() {
+        // Method 1: Check for "Rate limit reached" text in any visible element
+        const allText = document.querySelectorAll('span, div, p');
+        for (const el of allText) {
+            const t = (el.textContent || '').trim();
+            if (t.includes('Rate limit reached') || t.includes('Batas laju tercapai')) {
+                return true;
+            }
+        }
+        // Method 2: Check for "Upgrade to SuperGrok" button/text
+        for (const el of document.querySelectorAll('button, span, div')) {
+            const t = (el.textContent || '').trim();
+            if (t.includes('Upgrade to SuperGrok') || t.includes('SuperGrok Heavy')) {
+                return true;
+            }
+        }
+        // Method 3: Check for the specific data-title div structure
+        const dataTitle = document.querySelector('div[data-title]');
+        if (dataTitle) {
+            const inner = (dataTitle.textContent || '').trim();
+            if (inner.includes('Rate limit') || inner.includes('Upgrade')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Returns true if the download button (Unduh) is visible.
     function _isDownloadButtonVisible() {
         const btns = Array.from(document.querySelectorAll('button[aria-label="Unduh"], button[aria-label="Download"]')).filter(b => isVisible(b));
@@ -541,6 +570,15 @@
 
         while (Date.now() - start < timeoutMs) {
             if (STATE.status === 'cancelled') return false;
+
+            // ─ Check rate limit ─
+            if (_isRateLimitReached()) {
+                log('🚫 RATE LIMIT REACHED! Grok meminta upgrade ke SuperGrok.');
+                STATE.status = 'rate_limited';
+                STATE.error = 'Rate limit reached';
+                return false;
+            }
+
 
             const isGenerating = _isGeneratingOverlayVisible();
             const pctNum = _readGeneratingPercent();
@@ -963,6 +1001,14 @@
         // Pertahankan status terminal
         if (tabState.status === 'done' || tabState.status === 'downloaded' ||
             tabState.status === 'error') {
+            return tabState;
+        }
+
+        // 0. Cek rate limit DULU sebelum cek apapun
+        if (_isRateLimitReached()) {
+            log(`[Tab ${tabIndex}] 🚫 RATE LIMIT REACHED! Grok meminta upgrade ke SuperGrok.`);
+            tabState.status = 'rate_limited';
+            tabState.error = 'Rate limit reached';
             return tabState;
         }
 
