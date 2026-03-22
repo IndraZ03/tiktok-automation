@@ -93,7 +93,7 @@ def clear_chrome_data(user_data_dir):
 def kill_chrome():
     """Kill all Chrome processes."""
     try:
-        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], 
+#         subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], 
                        capture_output=True, timeout=10)
         time.sleep(2)
     except:
