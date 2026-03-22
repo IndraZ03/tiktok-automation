@@ -1390,11 +1390,21 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     if data == "gen_now":
-        if active_gen_task.get(uid): await q.answer("Generate sudah berjalan!", show_alert=True); return
+        if active_gen_task.get(uid):
+            await q.answer("Generate sudah berjalan!", show_alert=True)
+            return
         s = load_settings(); needed = stok_needed()
-        if needed <= 0: await q.answer(f"Stok sudah penuh ({MAX_STOK})!", show_alert=True); return
+        if needed <= 0:
+            await q.answer(f"Stok sudah penuh ({MAX_STOK})!", show_alert=True)
+            await q.edit_message_text(f"⚠️ <b>Generate dibatalkan!</b>\n\nStok sudah penuh ({MAX_STOK}/{MAX_STOK}).\nBot tidak butuh generate raw video lagi.",
+                                      parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+            return
         prompt_text = load_prompts().get(s.get("prompt_name",""),"")
-        if not prompt_text: await q.answer("Prompt belum diset!", show_alert=True); return
+        if not prompt_text:
+            await q.answer("Prompt belum diset!", show_alert=True)
+            await q.edit_message_text("⚠️ <b>Generate dibatalkan!</b>\n\nPrompt untuk generate belum diatur. Silakan set prompt di menu Settings.",
+                                      parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+            return
         stop_evt = threading.Event()
         log_lines2 = []; ll2 = threading.Lock(); ld2 = threading.Event()
         def _log2(m):
