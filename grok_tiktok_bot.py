@@ -16,7 +16,7 @@ from gtt_core import (
     load_ud_schedule, save_ud_schedule,
     load_prompts, save_prompts, list_bahan_folders, list_bahan_images,
     escape_html, generate_stok_for_ud, build_tiktok_schedule, upload_tiktok_batch,
-    resolve_ud_path,
+    resolve_ud_path, GrokRateLimitError,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -143,8 +143,20 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
             updater_t = threading.Thread(target=_gen_updater, daemon=True)
             updater_t.start()
 
-            generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                 grok_ud, grok_port, log_fn, stop_event)
+            try:
+                generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
+                                     grok_ud, grok_port, log_fn, stop_event)
+            except GrokRateLimitError:
+                gen_done.set()
+                updater_t.join(timeout=3)
+                send(
+                    "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                    f"UD {ud_num}: Grok sudah mencapai batas generate.\n"
+                    "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                    "Generate <b>dihentikan otomatis</b>.\n"
+                    f"Stok saat ini: <b>{count_stok(ud_num)}</b>\n\n"
+                    "Bot akan lanjut ke jadwal UD berikutnya.")
+                continue
             gen_done.set()
             updater_t.join(timeout=3)
             send(f"<b>UD {ud_num}:</b> Generate selesai! Stok: {count_stok(ud_num)}")
@@ -679,6 +691,24 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
                                      grok_ud, grok_port, lg, stop_evt)
+            except GrokRateLimitError:
+                lg("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
+                stop_evt.set()
+                try:
+                    with log_lock:
+                        final_text = (
+                            f"🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                            f"UD {ud_num}: Grok sudah mencapai batas generate.\n"
+                            f"Pesan: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                            f"Generate <b>dihentikan otomatis</b>.\n"
+                            f"Stok saat ini: <b>{count_stok(ud_num)}</b>")
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop)
+                except: pass
+                active_gen_task.pop(uid, None)
+                return
             except Exception as e:
                 lg(f"Error {type(e).__name__}: {str(e)[:40]}")
             finally:
@@ -829,6 +859,24 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
                                      grok_ud, grok_port, lg, stop_evt)
+            except GrokRateLimitError:
+                lg("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
+                stop_evt.set()
+                try:
+                    with log_lock:
+                        final_text = (
+                            f"🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                            f"UD {ud_num}: Grok sudah mencapai batas generate.\n"
+                            f"Pesan: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                            f"Generate <b>dihentikan otomatis</b>.\n"
+                            f"Stok saat ini: <b>{count_stok(ud_num)}</b>")
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop)
+                except: pass
+                active_gen_task.pop(uid, None)
+                return
             except Exception as e:
                 lg(f"Error {type(e).__name__}: {str(e)[:40]}")
             finally:
