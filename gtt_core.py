@@ -861,9 +861,11 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                         break
                     merged_since_restart = 0
 
+            except GrokRateLimitError:
+                raise
             except Exception as e:
                 # Chrome crash / koneksi putus → restart otomatis
-                log_fn(f"[UD {ud_num}] ⚠️ Chrome error: {str(e)[:80]}")
+                log_fn(f"[UD {ud_num}] ⚠️ Chrome error: {type(e).__name__} - {str(e)[:80]}")
                 log_fn(f"[UD {ud_num}] Auto-restart Chrome...")
                 try: _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
                 except: pass
