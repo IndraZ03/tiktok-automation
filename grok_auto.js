@@ -522,32 +522,55 @@
     }
 
     // Returns true if Grok rate limit has been reached.
-    // Detects: "Rate limit reached" text + "Upgrade to SuperGrok" button
+    // ⚠️ TEMPORARILY DISABLED — always returns false to prevent false positives.
+    // Uncomment the body below to re-enable rate limit detection.
     function _isRateLimitReached() {
-        // Method 1: Check for "Rate limit reached" text in any visible element
-        const allText = document.querySelectorAll('span, div, p');
-        for (const el of allText) {
-            const t = (el.textContent || '').trim();
-            if (t.includes('Rate limit reached') || t.includes('Batas laju tercapai')) {
+        return false; // <<< DISABLED SEMENTARA
+
+        /*
+        let hasRateLimitText = false;
+        let hasUpgradeText = false;
+
+        function checkLeafElements(selector, testFn) {
+            for (const el of document.querySelectorAll(selector)) {
+                if (!isVisible(el)) continue;
+                const ownText = Array.from(el.childNodes)
+                    .filter(n => n.nodeType === Node.TEXT_NODE)
+                    .map(n => n.textContent.trim())
+                    .join(' ');
+                const fullText = (el.innerText || el.textContent || '').trim();
+                const textToCheck = fullText.length < 200 ? fullText : ownText;
+                if (textToCheck && testFn(textToCheck)) return true;
+            }
+            return false;
+        }
+
+        hasRateLimitText = checkLeafElements('span, p, h1, h2, h3, div', t =>
+            t.includes('Rate limit reached') || t.includes('Batas laju tercapai')
+        );
+
+        hasUpgradeText = checkLeafElements('button, a, span, div', t =>
+            t.includes('Upgrade to SuperGrok') || t.includes('SuperGrok Heavy')
+        );
+
+        if (hasRateLimitText && hasUpgradeText) {
+            log('🚫 Rate limit CONFIRMED: both "Rate limit reached" and "Upgrade to SuperGrok" detected');
+            return true;
+        }
+
+        const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], [data-state="open"]');
+        for (const dialog of dialogs) {
+            if (!isVisible(dialog)) continue;
+            const dialogText = (dialog.innerText || '').trim();
+            if ((dialogText.includes('Rate limit reached') || dialogText.includes('Batas laju tercapai')) &&
+                (dialogText.includes('Upgrade to SuperGrok') || dialogText.includes('SuperGrok'))) {
+                log('🚫 Rate limit CONFIRMED via dialog/modal detection');
                 return true;
             }
         }
-        // Method 2: Check for "Upgrade to SuperGrok" button/text
-        for (const el of document.querySelectorAll('button, span, div')) {
-            const t = (el.textContent || '').trim();
-            if (t.includes('Upgrade to SuperGrok') || t.includes('SuperGrok Heavy')) {
-                return true;
-            }
-        }
-        // Method 3: Check for the specific data-title div structure
-        const dataTitle = document.querySelector('div[data-title]');
-        if (dataTitle) {
-            const inner = (dataTitle.textContent || '').trim();
-            if (inner.includes('Rate limit') || inner.includes('Upgrade')) {
-                return true;
-            }
-        }
+
         return false;
+        */
     }
 
     // Returns true if the download button (Unduh) is visible.
