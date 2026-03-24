@@ -1485,8 +1485,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if active_upload_task.get(uid): await q.answer("Upload sudah berjalan!", show_alert=True); return
         s = load_settings(); stop_evt = threading.Event()
 
-        # Generate schedule mulai dari sekarang + random 5-15 menit
-        base_now = datetime.now() + timedelta(minutes=random.randint(5, 15))
+        # Generate schedule mulai dari sekarang + 30 menit
+        base_now = datetime.now() + timedelta(minutes=30)
         schedule = generate_schedule(stok_files, base_date=base_now)
         save_schedule(schedule)
 
