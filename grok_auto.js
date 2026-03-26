@@ -991,6 +991,7 @@
             }
 
             tabState.status = 'generating';
+            tabState._config = config;  // Store config for stall retry (re-fill prompt)
             log(`[Tab ${tabIndex}] ✅ Generate started`);
             return tabState;
 
@@ -1011,15 +1012,24 @@
             batch.tabs[tabIndex] = {
                 tabIndex, status: 'unknown', progress: 0,
                 videoUrl: null, generatingOccurred: false, preferClicked: false,
-                firstCheckTs: Date.now(), retryCount: 0, retrying: false
+                firstCheckTs: Date.now(), retryCount: 0, retrying: false,
+                lastProgressTs: Date.now(), lastProgressPct: -1, stallRetryCount: 0
             };
         }
         const tabState = batch.tabs[tabIndex];
 
-        // Init firstCheckTs jika belum ada (backward compat)
+        // Init fields jika belum ada (backward compat)
         if (!tabState.firstCheckTs) tabState.firstCheckTs = Date.now();
         if (tabState.retryCount === undefined) tabState.retryCount = 0;
         if (tabState.retrying === undefined) tabState.retrying = false;
+        if (tabState.lastProgressTs === undefined) tabState.lastProgressTs = Date.now();
+        if (tabState.lastProgressPct === undefined) tabState.lastProgressPct = -1;
+        if (tabState.stallRetryCount === undefined) tabState.stallRetryCount = 0;
+
+        const MAX_RETRIES = 3;           // max retries for no-overlay
+        const MAX_STALL_RETRIES = 3;     // max retries for stalled progress (0%)
+        const STALL_TIMEOUT_MS = 45000;  // 45s tanpa perubahan progress → stall
+        const NO_OVERLAY_TIMEOUT_MS = 30000; // 30s tanpa overlay → retry
 
         // Pertahankan status terminal
         if (tabState.status === 'done' || tabState.status === 'downloaded' ||
@@ -1045,22 +1055,91 @@
             tabState.retrying = false;  // reset retry flag
             tabState.status   = 'generating';
             tabState.progress = pctNum;
+
+            // ── CEK DULU: mungkin sudah jadi meski progress 0% ──
+            // Kadang overlay "Generating" masih terlihat tapi video sudah selesai
+            // atau progress tidak muncul tapi video sudah bisa di-download
+            const doneUrl = _getFinishedVideoUrl();
+            const dlReady = _isDownloadButtonVisible();
+            if (doneUrl || dlReady) {
+                tabState.status   = 'done';
+                tabState.progress = 100;
+                tabState.videoUrl = doneUrl || tabState.videoUrl;
+                log(`[Tab ${tabIndex}] ✅ DONE (video sudah jadi meski progress ${pctNum}%)`);
+                return tabState;
+            }
+
+            // ── STALL DETECTION ──
+            // Jika overlay muncul tapi progress tetap 0% selama 45s → re-fill prompt & klik ulang
+            if (pctNum > 0 && pctNum !== tabState.lastProgressPct) {
+                // Progress berubah → reset stall timer
+                tabState.lastProgressPct = pctNum;
+                tabState.lastProgressTs = Date.now();
+            } else if (pctNum === 0 && tabState.generatingOccurred) {
+                // Overlay visible tapi pct masih 0%
+                const stallElapsed = Date.now() - tabState.lastProgressTs;
+                if (stallElapsed > STALL_TIMEOUT_MS && tabState.stallRetryCount < MAX_STALL_RETRIES && !tabState.retrying) {
+                    tabState.stallRetryCount++;
+                    tabState.retrying = true;
+                    log(`[Tab ${tabIndex}] ⚠️ Progress stuck di 0% selama ${Math.round(stallElapsed/1000)}s. Re-fill prompt & generate ulang (stall retry ${tabState.stallRetryCount}/${MAX_STALL_RETRIES})...`);
+
+                    // Fire-and-forget async: isi prompt lagi lalu klik generate
+                    (async () => {
+                        try {
+                            const config = tabState._config;
+                            if (config && config.prompt) {
+                                const filled = await fillPrompt(config.prompt);
+                                if (filled) {
+                                    log(`[Tab ${tabIndex}] 📝 Prompt re-filled`);
+                                } else {
+                                    log(`[Tab ${tabIndex}] ⚠️ Prompt re-fill gagal, coba generate saja...`);
+                                }
+                                await sleep(500);
+                            }
+                            const clicked = await clickGenerate();
+                            if (clicked) {
+                                log(`[Tab ${tabIndex}] 🔄 Generate re-clicked setelah stall (retry ${tabState.stallRetryCount})`);
+                                tabState.generatingOccurred = false;
+                                tabState.lastProgressTs = Date.now();
+                                tabState.lastProgressPct = -1;
+                            } else {
+                                log(`[Tab ${tabIndex}] ⚠️ Generate re-click gagal`);
+                            }
+                        } catch(e) {
+                            log(`[Tab ${tabIndex}] ⚠️ Stall retry error: ${e.message}`);
+                        }
+                        tabState.retrying = false;
+                    })();
+
+                    return tabState;
+                }
+            }
+
             return tabState;
         }
 
-        // ── AUTO-RETRY GENERATE ──
+        // ── AUTO-RETRY GENERATE (no overlay detected) ──
         // Jika 30 detik lewat dan overlay belum pernah muncul,
-        // klik Generate lagi (max 3 retries)
+        // isi prompt lagi + klik Generate (max 3 retries)
         if (!tabState.generatingOccurred && !tabState.retrying) {
             const elapsed = Date.now() - tabState.firstCheckTs;
-            if (elapsed > 30000 && tabState.retryCount < 3) {
+            if (elapsed > NO_OVERLAY_TIMEOUT_MS && tabState.retryCount < MAX_RETRIES) {
                 tabState.retryCount++;
                 tabState.retrying = true;
-                log(`[Tab ${tabIndex}] ⚠️ Overlay belum muncul setelah ${Math.round(elapsed/1000)}s. Klik Generate ulang (retry ${tabState.retryCount}/3)...`);
+                log(`[Tab ${tabIndex}] ⚠️ Overlay belum muncul setelah ${Math.round(elapsed/1000)}s. Re-fill prompt & generate ulang (retry ${tabState.retryCount}/${MAX_RETRIES})...`);
 
-                // Fire-and-forget async: klik generate lalu reset timer
+                // Fire-and-forget async: isi prompt lagi + klik generate
                 (async () => {
                     try {
+                        // Re-fill prompt
+                        const config = tabState._config;
+                        if (config && config.prompt) {
+                            const filled = await fillPrompt(config.prompt);
+                            if (filled) {
+                                log(`[Tab ${tabIndex}] 📝 Prompt re-filled`);
+                            }
+                            await sleep(500);
+                        }
                         const clicked = await clickGenerate();
                         if (clicked) {
                             log(`[Tab ${tabIndex}] 🔄 Generate re-clicked (retry ${tabState.retryCount})`);
@@ -1080,19 +1159,15 @@
         }
 
         // 2. Cek selesai — overlay pernah terlihat ATAU sudah cukup lama menunggu
-        //    Dulu: 60 detik timeout → terlalu lama jika video sudah selesai saat cek tab lain
-        //    Sekarang: 10 detik cukup untuk menghindari false-positive dari video history
         const shouldCheckDone = tabState.generatingOccurred || 
             (Date.now() - tabState.firstCheckTs > 10000);
 
         if (shouldCheckDone) {
 
             // Handle optional "Skip" or "I prefer this" / "Saya lebih suka ini" step
-            // When Grok offers 2 video options, click Skip to bypass selection
             if (!tabState.preferClicked) {
                 const allBtns = Array.from(document.querySelectorAll('button'));
 
-                // Priority 1: Click "Skip" button
                 const skipBtn = allBtns.find(b => {
                     const text = (b.textContent || '').trim();
                     return text === 'Skip' && isVisible(b);
@@ -1107,7 +1182,6 @@
                     return tabState;
                 }
 
-                // Priority 2: Click "I prefer this" / "Saya lebih suka ini"
                 const preferBtn = allBtns.find(b => {
                     const text = (b.textContent || '').trim().toLowerCase();
                     return text.includes('prefer this') || text.includes('suka ini');
@@ -1122,13 +1196,11 @@
                     return tabState;
                 }
             } else {
-                // Already clicked Skip/Prefer, wait for the result
                 const stillHasChoiceBtns = Array.from(document.querySelectorAll('button')).some(b => {
                     const text = (b.textContent || '').trim().toLowerCase();
                     return text === 'skip' || text.includes('prefer this') || text.includes('suka ini');
                 });
                 if (stillHasChoiceBtns) {
-                    // Choice UI still visible, keep waiting
                     tabState.status = 'generating';
                     tabState.progress = 99;
                     return tabState;
@@ -1148,7 +1220,6 @@
                 }
             }
         }
-        // else: tetap 'running'/'unknown' sampai overlay pernah terlihat atau 60s timeout
 
         return tabState;
     };

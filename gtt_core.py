@@ -969,49 +969,57 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
                 navigate_upload_page(driver, force=(idx > 0))
                 time.sleep(3)
 
-                # 2. Inject tiktok_auto.js
-                inject_js(driver, TIKTOK_JS_FILE)
-
-                # 3. Upload file via robust JS helper
+                # 2. Upload file via input[type=file]
                 inject_video_file(driver, path)
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] File disuntikkan")
                 time.sleep(5)
 
                 desc_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
-                upload_ok = False
-                
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Memulai Selenium automation...")
-                try:
-                    do_post_video(
-                        driver=driver,
-                        deskripsi=desc_with_num,
-                        nama_produk_radio=chosen_radio if add_product else "",
-                        nama_produk_input=nama_produk_input if add_product else "",
-                        log=lambda m, *args: log_fn(f"[UD {ud_num}]   {m}"),
-                        schedule_dt=sched_dt,
-                        stop_event=stop_event,
-                        add_sound=add_sound,
-                        add_product=add_product,
-                        skip_switches=True,
-                        hashtags=hashtags if hashtags else [],
-                        location=None
-                    )
-                    if not stop_event.is_set():
-                        upload_ok = True
-                except Exception as eval_e:
-                    err_str = str(eval_e)
-                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Selenium automation error: {err_str}")
-                    if "Message:" in err_str and "TimeoutException" in str(type(eval_e)):
-                        # TimeoutException usually means product not found or element not loaded
-                        log_fn(f"[UD {ud_num}] ⚠️ Timeout saat mencari elemen (mungkin produk tidak ditemukan).")
 
-                if upload_ok:
+                # 3. Post video with produk radio retry (like brutal_bot)
+                post_ok = False
+                tried_radios = []
+                candidates_to_try = list(radio_candidates) if (radio_candidates and add_product) else [""]
+
+                for radio_try in candidates_to_try:
+                    if stop_event.is_set(): break
+                    try:
+                        do_post_video(
+                            driver=driver,
+                            deskripsi=desc_with_num,
+                            nama_produk_radio=radio_try if add_product else "",
+                            nama_produk_input=nama_produk_input if add_product else "",
+                            log=lambda m, *args: log_fn(f"[UD {ud_num}]   {m}"),
+                            schedule_dt=sched_dt,
+                            stop_event=stop_event,
+                            add_sound=add_sound,
+                            add_product=add_product,
+                            skip_switches=True,
+                            hashtags=hashtags if hashtags else [],
+                            location=None
+                        )
+                        post_ok = True
+                        break
+                    except Exception as e_post:
+                        tried_radios.append(radio_try)
+                        err_msg = str(e_post).lower()
+                        # Jika error karena produk tidak ditemukan, coba nama lain
+                        if any(kw in err_msg for kw in ["radio", "produk", "timeout", "presence", "not found", "xpath"]):
+                            log_fn(f"[UD {ud_num}]   ⚠️ Produk '{radio_try[:30]}' tidak ditemukan, coba lain...")
+                            continue
+                        else:
+                            # Error lain (bukan soal produk), langsung raise
+                            raise
+
+                if post_ok and not stop_event.is_set():
                     try: os.remove(path)
                     except: pass
                     uploaded += 1
                     item["status"] = "done"
                     save_ud_schedule(ud_num, schedule)
                     log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ✅ Upload sukses")
+                elif tried_radios and not post_ok:
+                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ❌ Semua produk radio gagal ({len(tried_radios)} dicoba)")
 
             except Exception as e:
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Error: {e}")
