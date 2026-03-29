@@ -1045,29 +1045,84 @@
             return tabState;
         }
 
-        // 1. Cek overlay generating (presisi)
+        // ════════════════════════════════════════════════════════════
+        // 1. SELALU CEK APAKAH VIDEO SUDAH SELESAI — SEBELUM APAPUN
+        //    Ini KRITIS karena tab awal sering selesai saat kita sibuk
+        //    setup tab lain, overlay sudah hilang & progress tetap 0%
+        // ════════════════════════════════════════════════════════════
+        {
+            // Handle "Skip" / "I prefer this" choice buttons (2 video options)
+            if (!tabState.preferClicked) {
+                const allBtns = Array.from(document.querySelectorAll('button'));
+
+                const skipBtn = allBtns.find(b => {
+                    const text = (b.textContent || '').trim();
+                    return text === 'Skip' && isVisible(b);
+                });
+
+                if (skipBtn) {
+                    log(`[Tab ${tabIndex}] ⏭ Menerima 2 opsi video. Klik "Skip"...`);
+                    simulateClick(skipBtn);
+                    tabState.preferClicked = true;
+                    tabState.status = 'generating';
+                    tabState.progress = 99;
+                    return tabState;
+                }
+
+                const preferBtn = allBtns.find(b => {
+                    const text = (b.textContent || '').trim().toLowerCase();
+                    return text.includes('prefer this') || text.includes('suka ini');
+                });
+
+                if (preferBtn) {
+                    log(`[Tab ${tabIndex}] 💡 Menerima 2 opsi video. Klik "I prefer this"...`);
+                    simulateClick(preferBtn);
+                    tabState.preferClicked = true;
+                    tabState.status = 'generating';
+                    tabState.progress = 99;
+                    return tabState;
+                }
+            } else {
+                // Sudah klik prefer/skip, tunggu sampai button hilang
+                const stillHasChoiceBtns = Array.from(document.querySelectorAll('button')).some(b => {
+                    const text = (b.textContent || '').trim().toLowerCase();
+                    return text === 'skip' || text.includes('prefer this') || text.includes('suka ini');
+                });
+                if (stillHasChoiceBtns) {
+                    tabState.status = 'generating';
+                    tabState.progress = 99;
+                    return tabState;
+                }
+            }
+
+            // Cek apakah video sudah jadi (download button visible / video URL ada)
+            const finishedUrl = _getFinishedVideoUrl();
+            const dlVisible   = _isDownloadButtonVisible();
+            if (finishedUrl || dlVisible) {
+                tabState.status   = 'done';
+                tabState.progress = 100;
+                tabState.videoUrl = finishedUrl || tabState.videoUrl;
+                if (!tabState.generatingOccurred) {
+                    log(`[Tab ${tabIndex}] ✅ DONE (overlay missed — video sudah selesai saat cek tab lain)`);
+                } else {
+                    log(`[Tab ${tabIndex}] ✅ DONE (confirmed after generating observed)`);
+                }
+                return tabState;
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════
+        // 2. Cek overlay generating (presisi)
+        // ════════════════════════════════════════════════════════════
         const isGenerating = _isGeneratingOverlayVisible();
         const pctNum       = _readGeneratingPercent();
 
         if (isGenerating || pctNum > 0) {
             // Tandai bahwa overlay pernah terlihat
             tabState.generatingOccurred = true;
-            tabState.retrying = false;  // reset retry flag
+            tabState.retrying = false;
             tabState.status   = 'generating';
             tabState.progress = pctNum;
-
-            // ── CEK DULU: mungkin sudah jadi meski progress 0% ──
-            // Kadang overlay "Generating" masih terlihat tapi video sudah selesai
-            // atau progress tidak muncul tapi video sudah bisa di-download
-            const doneUrl = _getFinishedVideoUrl();
-            const dlReady = _isDownloadButtonVisible();
-            if (doneUrl || dlReady) {
-                tabState.status   = 'done';
-                tabState.progress = 100;
-                tabState.videoUrl = doneUrl || tabState.videoUrl;
-                log(`[Tab ${tabIndex}] ✅ DONE (video sudah jadi meski progress ${pctNum}%)`);
-                return tabState;
-            }
 
             // ── STALL DETECTION ──
             // Jika overlay muncul tapi progress tetap 0% selama 45s → re-fill prompt & klik ulang
@@ -1083,7 +1138,6 @@
                     tabState.retrying = true;
                     log(`[Tab ${tabIndex}] ⚠️ Progress stuck di 0% selama ${Math.round(stallElapsed/1000)}s. Re-fill prompt & generate ulang (stall retry ${tabState.stallRetryCount}/${MAX_STALL_RETRIES})...`);
 
-                    // Fire-and-forget async: isi prompt lagi lalu klik generate
                     (async () => {
                         try {
                             const config = tabState._config;
@@ -1118,9 +1172,11 @@
             return tabState;
         }
 
-        // ── AUTO-RETRY GENERATE (no overlay detected) ──
-        // Jika 30 detik lewat dan overlay belum pernah muncul,
-        // isi prompt lagi + klik Generate (max 3 retries)
+        // ════════════════════════════════════════════════════════════
+        // 3. AUTO-RETRY GENERATE (no overlay detected, no video done)
+        //    Sampai di sini artinya: overlay TIDAK visible DAN video BELUM jadi
+        //    Jika 30 detik lewat → isi prompt lagi + klik Generate
+        // ════════════════════════════════════════════════════════════
         if (!tabState.generatingOccurred && !tabState.retrying) {
             const elapsed = Date.now() - tabState.firstCheckTs;
             if (elapsed > NO_OVERLAY_TIMEOUT_MS && tabState.retryCount < MAX_RETRIES) {
@@ -1128,10 +1184,8 @@
                 tabState.retrying = true;
                 log(`[Tab ${tabIndex}] ⚠️ Overlay belum muncul setelah ${Math.round(elapsed/1000)}s. Re-fill prompt & generate ulang (retry ${tabState.retryCount}/${MAX_RETRIES})...`);
 
-                // Fire-and-forget async: isi prompt lagi + klik generate
                 (async () => {
                     try {
-                        // Re-fill prompt
                         const config = tabState._config;
                         if (config && config.prompt) {
                             const filled = await fillPrompt(config.prompt);
@@ -1149,75 +1203,11 @@
                     } catch(e) {
                         log(`[Tab ${tabIndex}] ⚠️ Generate retry error: ${e.message}`);
                     }
-                    // Reset timer untuk retry berikutnya
                     tabState.firstCheckTs = Date.now();
                     tabState.retrying = false;
                 })();
 
                 return tabState;
-            }
-        }
-
-        // 2. Cek selesai — overlay pernah terlihat ATAU sudah cukup lama menunggu
-        const shouldCheckDone = tabState.generatingOccurred || 
-            (Date.now() - tabState.firstCheckTs > 10000);
-
-        if (shouldCheckDone) {
-
-            // Handle optional "Skip" or "I prefer this" / "Saya lebih suka ini" step
-            if (!tabState.preferClicked) {
-                const allBtns = Array.from(document.querySelectorAll('button'));
-
-                const skipBtn = allBtns.find(b => {
-                    const text = (b.textContent || '').trim();
-                    return text === 'Skip' && isVisible(b);
-                });
-
-                if (skipBtn) {
-                    log(`[Tab ${tabIndex}] ⏭ Menerima 2 opsi video. Klik "Skip"...`);
-                    simulateClick(skipBtn);
-                    tabState.preferClicked = true;
-                    tabState.status = 'generating';
-                    tabState.progress = 99;
-                    return tabState;
-                }
-
-                const preferBtn = allBtns.find(b => {
-                    const text = (b.textContent || '').trim().toLowerCase();
-                    return text.includes('prefer this') || text.includes('suka ini');
-                });
-
-                if (preferBtn) {
-                    log(`[Tab ${tabIndex}] 💡 Menerima 2 opsi video. Klik "I prefer this"...`);
-                    simulateClick(preferBtn);
-                    tabState.preferClicked = true;
-                    tabState.status = 'generating';
-                    tabState.progress = 99;
-                    return tabState;
-                }
-            } else {
-                const stillHasChoiceBtns = Array.from(document.querySelectorAll('button')).some(b => {
-                    const text = (b.textContent || '').trim().toLowerCase();
-                    return text === 'skip' || text.includes('prefer this') || text.includes('suka ini');
-                });
-                if (stillHasChoiceBtns) {
-                    tabState.status = 'generating';
-                    tabState.progress = 99;
-                    return tabState;
-                }
-            }
-
-            const finishedUrl = _getFinishedVideoUrl();
-            const dlVisible   = _isDownloadButtonVisible();
-            if (finishedUrl || dlVisible) {
-                tabState.status   = 'done';
-                tabState.progress = 100;
-                tabState.videoUrl = finishedUrl || tabState.videoUrl;
-                if (!tabState.generatingOccurred) {
-                    log(`[Tab ${tabIndex}] ✅ DONE (overlay missed — video sudah selesai saat cek tab lain)`);
-                } else {
-                    log(`[Tab ${tabIndex}] ✅ DONE (confirmed after generating observed)`);
-                }
             }
         }
 
