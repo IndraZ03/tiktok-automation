@@ -545,25 +545,20 @@
 
     // Returns the generated video URL from video#sd-video (done state).
     function _getFinishedVideoUrl() {
-        // Primary: video#sd-video with real assets.grok.com src
-        // DOM: <video id="sd-video" src="https://assets.grok.com/.../generated_video.mp4?cache=1" style="visibility: visible;">
-        const sdVideo = $('video#sd-video');
-        if (sdVideo && sdVideo.src && sdVideo.src.includes('assets.grok.com') && sdVideo.src.includes('.mp4')) {
-            // Pastikan video visible (bukan placeholder)
-            const style = sdVideo.getAttribute('style') || '';
-            if (style.includes('visibility: visible') || !style.includes('visibility: hidden')) {
-                return sdVideo.src;
-            }
-        }
-        // Also try video#hd-video
-        const hdVideo = $('video#hd-video');
-        if (hdVideo && hdVideo.src && hdVideo.src.includes('assets.grok.com') && hdVideo.src.includes('.mp4')) {
-            return hdVideo.src;
-        }
-        // Fallback: any video with assets.grok.com or generated_video.mp4
-        for (const v of $$('video')) {
-            if (v.src && v.src.startsWith('https://') && v.src.includes('.mp4')) {
-                return v.src;
+        // Find ALL videos to ensure we only return the LAST (newest) matching one
+        const allVideos = Array.from(document.querySelectorAll('video'));
+        if (allVideos.length === 0) return null;
+        
+        // Loop backwards to find the newest response
+        for (let i = allVideos.length - 1; i >= 0; i--) {
+            const v = allVideos[i];
+            if (v.src && v.src.includes('assets.grok.com') && v.src.includes('.mp4')) {
+                // Pastikan video visible (bukan placeholder dari generating state)
+                const style = v.getAttribute('style') || '';
+                // check visibility
+                if (isVisible(v) && (!style.includes('visibility: hidden'))) {
+                    return v.src;
+                }
             }
         }
         return null;
@@ -574,116 +569,47 @@
     // Uncomment the body below to re-enable rate limit detection.
     function _isRateLimitReached() {
         return false; // <<< DISABLED SEMENTARA
-
-        /*
-        let hasRateLimitText = false;
-        let hasUpgradeText = false;
-
-        function checkLeafElements(selector, testFn) {
-            for (const el of document.querySelectorAll(selector)) {
-                if (!isVisible(el)) continue;
-                const ownText = Array.from(el.childNodes)
-                    .filter(n => n.nodeType === Node.TEXT_NODE)
-                    .map(n => n.textContent.trim())
-                    .join(' ');
-                const fullText = (el.innerText || el.textContent || '').trim();
-                const textToCheck = fullText.length < 200 ? fullText : ownText;
-                if (textToCheck && testFn(textToCheck)) return true;
-            }
-            return false;
-        }
-
-        hasRateLimitText = checkLeafElements('span, p, h1, h2, h3, div', t =>
-            t.includes('Rate limit reached') || t.includes('Batas laju tercapai')
-        );
-
-        hasUpgradeText = checkLeafElements('button, a, span, div', t =>
-            t.includes('Upgrade to SuperGrok') || t.includes('SuperGrok Heavy')
-        );
-
-        if (hasRateLimitText && hasUpgradeText) {
-            log('🚫 Rate limit CONFIRMED: both "Rate limit reached" and "Upgrade to SuperGrok" detected');
-            return true;
-        }
-
-        const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], [data-state="open"]');
-        for (const dialog of dialogs) {
-            if (!isVisible(dialog)) continue;
-            const dialogText = (dialog.innerText || '').trim();
-            if ((dialogText.includes('Rate limit reached') || dialogText.includes('Batas laju tercapai')) &&
-                (dialogText.includes('Upgrade to SuperGrok') || dialogText.includes('SuperGrok'))) {
-                log('🚫 Rate limit CONFIRMED via dialog/modal detection');
-                return true;
-            }
-        }
-
-        return false;
-        */
     }
 
     // Returns true if the download button (Unduh/Download) is visible.
     // Detects via: aria-label OR SVG download icon path inside button
     function _isDownloadButtonVisible() {
-        // Method 1: button with aria-label
-        const ariaButtons = Array.from(document.querySelectorAll(
-            'button[aria-label="Unduh"], button[aria-label="Download"]'
-        )).filter(b => isVisible(b));
-        if (ariaButtons.length > 0) return true;
-
-        // Method 2: button containing SVG download icon
-        // The download button in Grok has an SVG with a path like:
-        //   d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" (download tray)
-        //   d="M7 10l5 5 5-5" (arrow down) or d="M12 3v12" (line)
-        // Locate article buttons with SVG that has download-like paths
-        const articleBtns = Array.from(document.querySelectorAll(
-            'main article button, [role="article"] button'
-        )).filter(b => isVisible(b));
-        for (const btn of articleBtns) {
-            const svgPaths = btn.querySelectorAll('svg path');
-            if (svgPaths.length === 0) continue;
-            const pathData = Array.from(svgPaths).map(p => p.getAttribute('d') || '').join(' ');
-            // Download icon typically has: line going down + tray at bottom
-            if (pathData.includes('21 15') && pathData.includes('v4') && pathData.includes('M7 10')) {
-                return true;
-            }
-            if (pathData.includes('M12') && pathData.includes('l5 5') && pathData.includes('v4')) {
-                return true;
-            }
-        }
-
-        // Method 3: check if video#sd-video exists with valid src (video done = download possible)
-        const sdVideo = $('video#sd-video');
-        if (sdVideo && sdVideo.src && sdVideo.src.includes('assets.grok.com') && sdVideo.src.includes('.mp4')) {
-            return true;
-        }
-
-        return false;
+        return _findDownloadButton() !== null;
     }
 
-    // Helper: find the actual download button element for clicking
+    // Helper: find the actual download button element for clicking (NEWEST only)
     function _findDownloadButton() {
-        // Method 1: aria-label buttons
-        const ariaButtons = Array.from(document.querySelectorAll(
-            'button[aria-label="Unduh"], button[aria-label="Download"]'
-        )).filter(b => isVisible(b));
-        if (ariaButtons.length > 0) return ariaButtons[ariaButtons.length - 1];
-
-        // Method 2: SVG icon buttons in article
+        // Karena ada history chat, kita HANYA peduli tombol pada response TERAKHIR
         const articleBtns = Array.from(document.querySelectorAll(
             'main article button, [role="article"] button'
         )).filter(b => isVisible(b));
-        for (const btn of articleBtns) {
-            const svgPaths = btn.querySelectorAll('svg path');
-            if (svgPaths.length === 0) continue;
-            const pathData = Array.from(svgPaths).map(p => p.getAttribute('d') || '').join(' ');
-            if (pathData.includes('21 15') && pathData.includes('v4') && pathData.includes('M7 10')) {
+
+        // Iterate backwards (dari yang terbaru di bawah)
+        for (let i = articleBtns.length - 1; i >= 0; i--) {
+            const btn = articleBtns[i];
+            
+            // Method 1: aria-label
+            const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+            if (aria === 'unduh' || aria === 'download') {
                 return btn;
             }
-            if (pathData.includes('M12') && pathData.includes('l5 5') && pathData.includes('v4')) {
-                return btn;
+
+            // Method 2: SVG icon
+            const svgPaths = btn.querySelectorAll('svg path');
+            if (svgPaths.length > 0) {
+                const pathData = Array.from(svgPaths).map(p => p.getAttribute('d') || '').join(' ');
+                if (pathData.includes('21 15') && pathData.includes('v4') && pathData.includes('M7 10')) {
+                    return btn;
+                }
+                if (pathData.includes('M12') && pathData.includes('l5 5') && pathData.includes('v4')) {
+                    return btn;
+                }
             }
         }
 
+        // Method 3: jika URL video jadi ada, setidaknya kita anggap state "ada download" = true
+        // Ini tidak mereturn button, jadi hanya fallback untuk `_isDownloadButtonVisible` yang mereturn true (boolean check).
+        // Fungsi ini mereturn null bila gak ada tombol, sehingga kita biarkan _getFinishedVideoUrl di tempat lain yang mendownloadnya
         return null;
     }
 
@@ -1087,6 +1013,13 @@
                 return tabState;
             }
 
+            // Snapshot semua video URL yang sudah ada SEBELUM generate diklik
+            // Ini untuk membedakan video lama (history) vs video baru (hasil generate)
+            tabState.initialVideoUrls = Array.from(document.querySelectorAll('video'))
+                .map(v => v.src)
+                .filter(s => s && s.includes('assets.grok.com') && s.includes('.mp4'));
+            log(`[Tab ${tabIndex}] 📸 Snapshot ${tabState.initialVideoUrls.length} existing video URLs`);
+
             // Click generate
             const clicked = await clickGenerate();
             if (!clicked) {
@@ -1204,15 +1137,34 @@
             const finishedUrl = _getFinishedVideoUrl();
             const dlVisible   = _isDownloadButtonVisible();
             if (finishedUrl || dlVisible) {
-                tabState.status   = 'done';
-                tabState.progress = 100;
-                tabState.videoUrl = finishedUrl || tabState.videoUrl;
-                if (!tabState.generatingOccurred) {
-                    log(`[Tab ${tabIndex}] ✅ DONE (overlay missed — video sudah selesai saat cek tab lain)`);
+                // ════ KRITIS: Cek apakah ini VIDEO BARU atau VIDEO LAMA (history) ════
+                // Jika generatingOccurred = true, kita sudah lihat overlay → pasti video baru
+                // Jika generatingOccurred = false, cek apakah URL berbeda dari snapshot awal
+                const initialUrls = tabState.initialVideoUrls || [];
+                const isNewVideo = tabState.generatingOccurred ||
+                    (finishedUrl && !initialUrls.includes(finishedUrl));
+                
+                // Safety: jika sudah > 60 detik sejak pertama cek, terima saja
+                const elapsedSinceFirstCheck = Date.now() - (tabState.firstCheckTs || Date.now());
+                const safetyTimeout = elapsedSinceFirstCheck > 60000;
+
+                if (isNewVideo || safetyTimeout) {
+                    tabState.status   = 'done';
+                    tabState.progress = 100;
+                    tabState.videoUrl = finishedUrl || tabState.videoUrl;
+                    if (!tabState.generatingOccurred) {
+                        log(`[Tab ${tabIndex}] ✅ DONE (overlay missed — video BARU terdeteksi, URL berbeda dari snapshot)`);
+                    } else {
+                        log(`[Tab ${tabIndex}] ✅ DONE (confirmed after generating observed)`);
+                    }
+                    return tabState;
                 } else {
-                    log(`[Tab ${tabIndex}] ✅ DONE (confirmed after generating observed)`);
+                    // Video/button ditemukan tapi SAMA dengan yang lama → masih generating
+                    log(`[Tab ${tabIndex}] ⏳ Video/button terlihat tapi merupakan history lama (${initialUrls.length} initial URLs). Menunggu video baru...`);
+                    tabState.status = 'generating';
+                    tabState.progress = 0;
+                    // Jangan return — lanjut ke cek overlay di bawah
                 }
-                return tabState;
             }
         }
 
