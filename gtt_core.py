@@ -881,15 +881,22 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                     log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
 
                 if status == 'done':
-                    # KRITIS: Pastikan tab sudah cukup lama generating sebelum download
-                    # Minimal 15 detik sejak tab mulai generate, agar tidak false-positive
-                    min_wait = 15  # detik
-                    elapsed_since_start = time.time() - tab_start_time.get(i, 0)
-                    if elapsed_since_start < min_wait:
-                        wait_remaining = min_wait - elapsed_since_start
-                        log_fn(f"[UD {ud_num}] [Tab {i+1}] ⏳ Status 'done' tapi baru {elapsed_since_start:.0f}s, tunggu {wait_remaining:.0f}s lagi...")
-                        # Belum waktunya, skip dulu — akan dicek lagi di iterasi berikutnya
-                        continue
+                    # RE-VERIFY: Tunggu 3 detik lalu cek lagi untuk konfirmasi
+                    # Ini mencegah false-positive "done" dari video preview / transisi DOM
+                    time.sleep(3)
+                    try:
+                        recheck = driver.execute_script(
+                            "return window.__grokTabCheckProgress(arguments[0]);", i)
+                        recheck_status = recheck.get('status', '') if recheck else ''
+                        recheck_pct = recheck.get('progress', 0) if recheck else 0
+                        if recheck_status == 'generating' and recheck_pct < 100:
+                            # Ternyata masih generating! Jangan download.
+                            tab_status[i] = 'generating'
+                            tab_prog[i] = recheck_pct
+                            log_fn(f"[UD {ud_num}] [Tab {i+1}] ⚠️ Re-verify: masih generating ({recheck_pct}%), batal download")
+                            continue
+                    except:
+                        pass  # Jika re-verify gagal, lanjut download saja
 
                     found_path = _download_tab_video(driver, i, batch_start, log_fn, ud_num, raw_dir=raw_dir)
 
