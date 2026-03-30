@@ -460,21 +460,23 @@
 
     // Returns true if the generating overlay is currently visible.
     function _isGeneratingOverlayVisible() {
-        // The overlay wraps everything in a flex div with:
-        // - a span saying "Generating" / "Membuat" (animate-pulse)
-        // - a span.tabular-nums.animate-pulse with "X%"
-        // - a button saying "Membatalkan" / "Cancel"
+        // Check animate-pulse spans: "Generating" / "Membuat" / "Menghasilkan"
         const pulseSpans = $$('span.animate-pulse');
         for (const s of pulseSpans) {
             const t = s.textContent.trim();
-            if (t === 'Generating' || t === 'Membuat') return true;
+            if (t === 'Generating' || t === 'Membuat' || t === 'Menghasilkan') return true;
         }
-        // Fallback: check for cancel button text in any visible button
+        // Fallback: check for cancel button text
         for (const btn of $$('button')) {
             const t = btn.textContent.trim();
-            if (t === 'Membatalkan' || t === 'Cancel') {
+            if (t === 'Membatalkan' || t === 'Cancel' || t === 'Cancelling') {
                 if (isVisible(btn)) return true;
             }
+        }
+        // Fallback 2: check for any span with animate-pulse containing percentage
+        for (const s of pulseSpans) {
+            const t = s.textContent.trim();
+            if (t.match(/^\d+%$/)) return true;
         }
         return false;
     }
@@ -503,16 +505,21 @@
     // Returns the generated video URL from video#sd-video (done state).
     function _getFinishedVideoUrl() {
         // Primary: video#sd-video with real assets.grok.com src
+        // DOM: <video id="sd-video" src="https://assets.grok.com/.../generated_video.mp4?cache=1" style="visibility: visible;">
         const sdVideo = $('video#sd-video');
         if (sdVideo && sdVideo.src && sdVideo.src.includes('assets.grok.com') && sdVideo.src.includes('.mp4')) {
-            return sdVideo.src;
+            // Pastikan video visible (bukan placeholder)
+            const style = sdVideo.getAttribute('style') || '';
+            if (style.includes('visibility: visible') || !style.includes('visibility: hidden')) {
+                return sdVideo.src;
+            }
         }
         // Also try video#hd-video
         const hdVideo = $('video#hd-video');
         if (hdVideo && hdVideo.src && hdVideo.src.includes('assets.grok.com') && hdVideo.src.includes('.mp4')) {
             return hdVideo.src;
         }
-        // Fallback: any video with a real http .mp4 src
+        // Fallback: any video with assets.grok.com or generated_video.mp4
         for (const v of $$('video')) {
             if (v.src && v.src.startsWith('https://') && v.src.includes('.mp4')) {
                 return v.src;
@@ -573,13 +580,70 @@
         */
     }
 
-    // Returns true if the download button (Unduh) is visible.
+    // Returns true if the download button (Unduh/Download) is visible.
+    // Detects via: aria-label OR SVG download icon path inside button
     function _isDownloadButtonVisible() {
-        const btns = Array.from(document.querySelectorAll('button[aria-label="Unduh"], button[aria-label="Download"]')).filter(b => isVisible(b));
-        if (btns.length === 0) return false;
-        // Cek hanya tombol yang TERAKHIR (video hasil generasi terbaru)
-        const lastBtn = btns[btns.length - 1];
-        return isVisible(lastBtn);
+        // Method 1: button with aria-label
+        const ariaButtons = Array.from(document.querySelectorAll(
+            'button[aria-label="Unduh"], button[aria-label="Download"]'
+        )).filter(b => isVisible(b));
+        if (ariaButtons.length > 0) return true;
+
+        // Method 2: button containing SVG download icon
+        // The download button in Grok has an SVG with a path like:
+        //   d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" (download tray)
+        //   d="M7 10l5 5 5-5" (arrow down) or d="M12 3v12" (line)
+        // Locate article buttons with SVG that has download-like paths
+        const articleBtns = Array.from(document.querySelectorAll(
+            'main article button, [role="article"] button'
+        )).filter(b => isVisible(b));
+        for (const btn of articleBtns) {
+            const svgPaths = btn.querySelectorAll('svg path');
+            if (svgPaths.length === 0) continue;
+            const pathData = Array.from(svgPaths).map(p => p.getAttribute('d') || '').join(' ');
+            // Download icon typically has: line going down + tray at bottom
+            if (pathData.includes('21 15') && pathData.includes('v4') && pathData.includes('M7 10')) {
+                return true;
+            }
+            if (pathData.includes('M12') && pathData.includes('l5 5') && pathData.includes('v4')) {
+                return true;
+            }
+        }
+
+        // Method 3: check if video#sd-video exists with valid src (video done = download possible)
+        const sdVideo = $('video#sd-video');
+        if (sdVideo && sdVideo.src && sdVideo.src.includes('assets.grok.com') && sdVideo.src.includes('.mp4')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    // Helper: find the actual download button element for clicking
+    function _findDownloadButton() {
+        // Method 1: aria-label buttons
+        const ariaButtons = Array.from(document.querySelectorAll(
+            'button[aria-label="Unduh"], button[aria-label="Download"]'
+        )).filter(b => isVisible(b));
+        if (ariaButtons.length > 0) return ariaButtons[ariaButtons.length - 1];
+
+        // Method 2: SVG icon buttons in article
+        const articleBtns = Array.from(document.querySelectorAll(
+            'main article button, [role="article"] button'
+        )).filter(b => isVisible(b));
+        for (const btn of articleBtns) {
+            const svgPaths = btn.querySelectorAll('svg path');
+            if (svgPaths.length === 0) continue;
+            const pathData = Array.from(svgPaths).map(p => p.getAttribute('d') || '').join(' ');
+            if (pathData.includes('21 15') && pathData.includes('v4') && pathData.includes('M7 10')) {
+                return btn;
+            }
+            if (pathData.includes('M12') && pathData.includes('l5 5') && pathData.includes('v4')) {
+                return btn;
+            }
+        }
+
+        return null;
     }
 
     // ── Track progress (PRECISE — waits for real "done" signal) ──
@@ -1233,39 +1297,60 @@
 
         (async () => {
             try {
-                // Cari tombol Unduh/Download yang visible (poll max 20 detik)
+                // Cari tombol Download (poll max 20 detik)
                 let dlBtn = null;
                 const dlStart = Date.now();
                 while (Date.now() - dlStart < 20000) {
-                    const btns = Array.from(document.querySelectorAll(
-                        'button[aria-label="Unduh"], button[aria-label="Download"]'
-                    )).filter(b => isVisible(b));
-                    if (btns.length > 0) {
-                        dlBtn = btns[btns.length - 1]; // Ambil yang terakhir (terbaru)
-                        break;
-                    }
+                    dlBtn = _findDownloadButton();
+                    if (dlBtn) break;
                     await sleep(500);
                 }
-                
-                if (!dlBtn) throw new Error('Tombol Unduh tidak muncul dalam 20 detik');
+
+                if (!dlBtn) {
+                    // Fallback: jika tombol tidak ditemukan, coba download via URL langsung
+                    const videoUrl = _getFinishedVideoUrl();
+                    if (videoUrl) {
+                        log(`[Tab ${tabIndex}] ⚠️ Tombol download tidak ditemukan, tapi URL video ada`);
+                        log(`[Tab ${tabIndex}] 🔗 URL: ${videoUrl.substring(0, 80)}...`);
+                        tabState.videoUrl = videoUrl;
+                        // Trigger download via hidden <a> tag
+                        try {
+                            const a = document.createElement('a');
+                            a.href = videoUrl;
+                            a.download = `grok_video_${tabIndex}_${Date.now()}.mp4`;
+                            a.style.display = 'none';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            log(`[Tab ${tabIndex}] ✅ Download via URL link diklik!`);
+                        } catch(linkErr) {
+                            log(`[Tab ${tabIndex}] ⚠️ Link download gagal: ${linkErr.message}`);
+                        }
+                        await sleep(2000);
+                        tabState.status = 'downloaded';
+                        batch.totalDone++;
+                        return;
+                    }
+                    throw new Error('Tombol Unduh tidak muncul & URL video tidak ada');
+                }
 
                 dlBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
                 await sleep(500);
-                
+
                 // Klik dengan multiple metode untuk robustness
                 try { dlBtn.click(); } catch(e) {}
                 simulateClick(dlBtn);
                 log(`[Tab ${tabIndex}] ✅ Tombol Unduh diklik!`);
 
                 tabState.videoUrl = _getFinishedVideoUrl() || tabState.videoUrl;
-                await sleep(2000); // beri waktu browser mulai download
+                await sleep(2000);
                 tabState.status = 'downloaded';
                 batch.totalDone++;
             } catch(e) {
                 tabState.status = 'error';
                 tabState.error  = e.message;
                 batch.totalFailed++;
-                log(`[Tab ${tabIndex}] ❌ Download button error: ${e.message}`);
+                log(`[Tab ${tabIndex}] ❌ Download error: ${e.message}`);
             }
         })();
 

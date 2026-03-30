@@ -433,23 +433,206 @@ def _setup_single_tab(driver, tab_index, bahan_folder, prompt_text, log_fn, ud_n
 
 def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num, raw_dir=None):
     """Download video dari tab yang sudah selesai generate.
+    Multi-method download seperti brutal_bot.py:
+      1. URL extraction + download via requests (paling reliable)
+      2. JS __grokTabDownload (klik tombol Unduh)
+      3. Selenium scroll+click tombol Download
+      4. JS pointer events dispatch
+      5. Enter key pada tombol Download
+      6. Direct JS click fallback
     Return path file jika berhasil, None jika gagal."""
     if raw_dir is None: raw_dir = RAW_DIR
     downloads_folder = os.path.expanduser("~/Downloads")
+    prefix = f"[UD {ud_num}] [Tab {tab_index+1}]"
+    dest_filename = f"gtt_{int(time.time())}_{tab_index}.mp4"
+    save_path = os.path.join(raw_dir, dest_filename)
 
-    log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] Generate selesai, download...")
+    log_fn(f"{prefix} Generate selesai, download...")
+
+    # ── Method 0: Extract video URL + download via requests (PALING RELIABLE) ──
+    video_url = None
+    try:
+        video_url = driver.execute_script(
+            "return window.__grokTabGetVideoUrl(arguments[0]);", tab_index)
+    except:
+        pass
+
+    # Fallback: cari langsung dari DOM
+    if not video_url:
+        try:
+            video_url = driver.execute_script("""
+                for(const v of document.querySelectorAll('video')){
+                    if(v.src&&v.src.startsWith('https://')&&v.src.includes('.mp4'))return v.src;
+                    const src=v.querySelector('source');if(src&&src.src&&src.src.startsWith('https://'))return src.src;
+                }
+                for(const a of document.querySelectorAll('a[download],a[href*=".mp4"]')){
+                    if(a.href&&a.href.startsWith('https://'))return a.href;
+                }
+                return null;
+            """)
+        except:
+            pass
+
+    if video_url and video_url.startswith('https://') and 'blob:' not in video_url:
+        log_fn(f"{prefix} 🔗 URL video ditemukan, download via requests...")
+        try:
+            import requests as req_lib
+            cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+            headers = {
+                'User-Agent': driver.execute_script('return navigator.userAgent;'),
+                'Referer': GROK_URL
+            }
+            resp = req_lib.get(video_url, cookies=cookies, headers=headers, stream=True, timeout=120)
+            if resp.status_code == 200:
+                with open(save_path, 'wb') as vf:
+                    for chunk in resp.iter_content(65536):
+                        if chunk:
+                            vf.write(chunk)
+                if os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
+                    sz = os.path.getsize(save_path) / (1024 * 1024)
+                    log_fn(f"{prefix} ✅ Video via requests ({sz:.1f} MB)")
+                    return save_path
+                else:
+                    log_fn(f"{prefix} ⚠️ File terlalu kecil ({os.path.getsize(save_path)} bytes), coba metode lain...")
+                    try: os.remove(save_path)
+                    except: pass
+            else:
+                log_fn(f"{prefix} ⚠️ requests status {resp.status_code}, coba metode lain...")
+        except Exception as e:
+            log_fn(f"{prefix} ⚠️ requests gagal: {str(e)[:50]}, coba metode lain...")
+
+    # ── Dismiss editor overlay so it doesn't block the Download button ──
+    try:
+        driver.execute_script("""
+            document.querySelectorAll('div[contenteditable="true"]').forEach(e=>{
+                e.style.pointerEvents='none'; e.style.zIndex='-1'; });
+            document.querySelectorAll('.tiptap,.ProseMirror').forEach(w=>{
+                w.style.pointerEvents='none'; w.style.zIndex='-1'; });
+        """)
+        time.sleep(0.5)
+    except:
+        pass
+
+    # ── Button click methods ──
+    dl_clicked = False
+
+    # Method 1: JS __grokTabDownload (uses _findDownloadButton + URL fallback)
     try:
         driver.execute_script(
             "window.__grokTabDownload(arguments[0]);", tab_index)
-    except: pass
+        dl_clicked = True
+        log_fn(f"{prefix} ✅ Download dimulai (JS __grokTabDownload)")
+    except:
+        pass
+
+    # Method 2: JS _findDownloadButton() — detects aria-label AND SVG icon buttons
+    if not dl_clicked:
+        try:
+            dl_clicked = driver.execute_script("""
+                const btn = window._findDownloadButton ? window._findDownloadButton() : null;
+                if (btn) {
+                    btn.scrollIntoView({block:'center'});
+                    btn.click();
+                    return true;
+                }
+                return false;
+            """)
+            if dl_clicked:
+                log_fn(f"{prefix} ✅ Download diklik (JS _findDownloadButton)")
+        except:
+            pass
+
+    # Method 3: Selenium scroll + click (aria-label)
+    if not dl_clicked:
+        try:
+            dl_btns = driver.find_elements(By.CSS_SELECTOR,
+                'button[aria-label="Download"], button[aria-label="Unduh"]')
+            if dl_btns:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", dl_btns[-1])
+                time.sleep(0.5)
+                ActionChains(driver).move_to_element(dl_btns[-1]).click().perform()
+                dl_clicked = True
+                log_fn(f"{prefix} ✅ Download diklik (Selenium)")
+        except:
+            pass
+
+    # Method 4: JS pointer events dispatch
+    if not dl_clicked:
+        try:
+            dl_clicked = driver.execute_script("""
+                const btns = Array.from(document.querySelectorAll('main article button')).filter(b => {
+                    const r = b.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                });
+                for (const btn of btns) {
+                    const paths = btn.querySelectorAll('svg path');
+                    if (paths.length === 0) continue;
+                    const d = Array.from(paths).map(p => p.getAttribute('d')||'').join(' ');
+                    if (d.includes('21 15') && d.includes('v4')) {
+                        btn.scrollIntoView({block:'center'});
+                        ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
+                            btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
+                        return true;
+                    }
+                }
+                // Fallback: aria-label buttons
+                for(const btn of document.querySelectorAll('button')){
+                    const l=btn.getAttribute('aria-label')||'';
+                    if(l==='Download'||l==='Unduh'){
+                        btn.scrollIntoView({block:'center'});
+                        ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(ev=>
+                            btn.dispatchEvent(new (ev.startsWith('pointer')?PointerEvent:MouseEvent)(ev,{bubbles:true})));
+                        return true;}
+                }
+                return false;
+            """)
+            if dl_clicked:
+                log_fn(f"{prefix} ✅ Download diklik (JS pointer/SVG)")
+        except:
+            pass
+
+    # Method 5: Last resort — download video URL via requests (jika tombol semua gagal)
+    if not dl_clicked:
+        log_fn(f"{prefix} ⚠️ Semua metode klik gagal, coba download URL langsung...")
+        try:
+            fallback_url = driver.execute_script("""
+                const v = document.querySelector('video#sd-video') || document.querySelector('video#hd-video');
+                if (v && v.src && v.src.includes('assets.grok.com') && v.src.includes('.mp4')) return v.src;
+                for (const vid of document.querySelectorAll('video')) {
+                    if (vid.src && vid.src.startsWith('https://') && vid.src.includes('.mp4')) return vid.src;
+                }
+                return null;
+            """)
+            if fallback_url and fallback_url.startswith('https://'):
+                log_fn(f"{prefix} 🔗 URL ditemukan, download via requests...")
+                import requests as req_lib
+                cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+                headers = {'User-Agent': driver.execute_script('return navigator.userAgent;'), 'Referer': GROK_URL}
+                resp = req_lib.get(fallback_url, cookies=cookies, headers=headers, stream=True, timeout=120)
+                if resp.status_code == 200:
+                    with open(save_path, 'wb') as vf:
+                        for chunk in resp.iter_content(65536):
+                            if chunk: vf.write(chunk)
+                    if os.path.exists(save_path) and os.path.getsize(save_path) > 10000:
+                        sz = os.path.getsize(save_path) / (1024 * 1024)
+                        log_fn(f"{prefix} ✅ Video via URL fallback ({sz:.1f} MB)")
+                        return save_path
+        except Exception as e:
+            log_fn(f"{prefix} ⚠️ URL fallback gagal: {str(e)[:50]}")
+
+    if not dl_clicked:
+        log_fn(f"{prefix} ❌ Download gagal total (semua metode)")
+        return None
+
     time.sleep(3)
 
-    # Wait for .mp4 file to appear (max 45s, with crdownload stall detection)
+    # ── Wait for .mp4 file to appear (max 90s, with crdownload stall detection) ──
+    log_fn(f"{prefix} ⏳ Menunggu file terdownload (max 90 detik)...")
     dl_start = time.time()
     last_crdownload_size = -1
     crdownload_stall_start = None
 
-    while time.time() - dl_start < 45:
+    while time.time() - dl_start < 90:
         time.sleep(2)
         for search_dir in [raw_dir, downloads_folder]:
             try:
@@ -467,6 +650,7 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num, raw_dir=
                             if newest != dest:
                                 try: shutil.move(newest, dest)
                                 except: dest = newest
+                        log_fn(f"{prefix} ✅ Video diunduh: {os.path.basename(dest)}")
                         return dest
 
                 # Detect stalled crdownload (tidak bertambah dalam 20 detik)
@@ -477,7 +661,7 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num, raw_dir=
                             if crdownload_stall_start is None:
                                 crdownload_stall_start = time.time()
                             elif time.time() - crdownload_stall_start > 20:
-                                log_fn(f"[UD {ud_num}] [Tab {tab_index+1}] ⚠️ Download stall 20s, abort")
+                                log_fn(f"{prefix} ⚠️ Download stall 20s, abort")
                                 # Hapus crdownload yang macet
                                 for cr in crdownloads:
                                     try: os.remove(cr)
@@ -486,9 +670,11 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num, raw_dir=
                         else:
                             last_crdownload_size = cr_size
                             crdownload_stall_start = None
-                    except: pass
+                    except:
+                        pass
 
-            except: pass
+            except:
+                pass
 
         # Check JS state
         try:
@@ -497,23 +683,26 @@ def _download_tab_video(driver, tab_index, batch_start, log_fn, ud_num, raw_dir=
             if js_state and js_state.get('status') == 'downloaded':
                 # Give a moment for file write to complete
                 time.sleep(2)
-                for search_dir in [RAW_DIR, downloads_folder]:
+                for search_dir in [raw_dir, downloads_folder]:
                     mp4s = glob.glob(os.path.join(search_dir, "*.mp4"))
                     new_files = [f for f in mp4s if os.path.getmtime(f) > batch_start]
                     if new_files:
                         newest = max(new_files, key=os.path.getmtime)
                         if os.path.getsize(newest) > 10000:
-                            dest = os.path.join(RAW_DIR, f"gtt_{int(time.time())}_{tab_index}.mp4")
-                            if search_dir != RAW_DIR:
+                            dest = os.path.join(raw_dir, f"gtt_{int(time.time())}_{tab_index}.mp4")
+                            if search_dir != raw_dir:
                                 shutil.move(newest, dest)
                             else:
                                 if newest != dest:
                                     try: shutil.move(newest, dest)
                                     except: dest = newest
+                            log_fn(f"{prefix} ✅ Video diunduh (JS confirmed): {os.path.basename(dest)}")
                             return dest
                 break  # JS says downloaded but no file found
-        except: pass
+        except:
+            pass
 
+    log_fn(f"{prefix} ❌ Timeout download 90 detik")
     return None
 
 
