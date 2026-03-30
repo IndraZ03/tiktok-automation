@@ -232,7 +232,7 @@
         await sleep(300);
 
         for (const tag of hashtags) {
-            const clean = tag.replace(/^#/, '').trim();
+            const clean = tag.replace(/^#+/, '').trim();
             if (!clean) continue;
 
             // Type space before hashtag
@@ -465,30 +465,71 @@
             simulateClick(foundRadio);
             log(`  ✅ Radio produk dipilih: ${foundRadio.getAttribute('name')?.substring(0, 50)}...`);
         }
-        await sleep(1000);
+        await sleep(2000);
 
         // D - Click Next (second time - look for primary button)
-        let nextClicked = false;
+        // Match tiktok_gui.py approach: find buttons with div child text='Next'
+        log('  🔍 Mencari tombol Next kedua...');
         const allNextBtns = Array.from($$('button')).filter(b => {
+            // Match buttons that contain a div with text 'Next' (same as Python XPath)
+            const divChild = b.querySelector('div');
+            if (divChild && divChild.textContent.trim() === 'Next' && isVisible(b)) return true;
+            // Fallback: button textContent itself
             const t = (b.textContent || '').trim();
             return t === 'Next' && isVisible(b);
         });
+        log(`  📋 Ditemukan ${allNextBtns.length} tombol Next`);
+
+        // Log each button's info for debugging
+        for (let i = 0; i < allNextBtns.length; i++) {
+            const btn = allNextBtns[i];
+            const cls = (btn.className || '').substring(0, 80);
+            const ariaDis = btn.getAttribute('aria-disabled');
+            log(`    Tombol ${i+1}: Class=${cls}, aria-disabled=${ariaDis}`);
+        }
+
+        // Prefer button with 'primary' in class
         const primaryNext = allNextBtns.find(b => (b.className || '').includes('primary')) 
                          || allNextBtns[allNextBtns.length - 1];
 
         if (primaryNext) {
-            primaryNext.scrollIntoView({ block: 'center' });
+            primaryNext.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            await sleep(1000);
+
+            // Method 1: Native click (most reliable for React)
+            try {
+                primaryNext.click();
+                log('  ✅ Tombol Next diklik (native click)');
+            } catch(e1) {
+                log(`  ⚠️ Native click gagal: ${e1.message}`);
+            }
             await sleep(500);
+
+            // Method 2: simulateClick as additional trigger
             simulateClick(primaryNext);
-            primaryNext.click();
+            await sleep(500);
+
+            // Method 3: Focus + Enter as additional trigger  
+            primaryNext.focus();
+            primaryNext.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+            }));
+            primaryNext.dispatchEvent(new KeyboardEvent('keyup', {
+                key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+            }));
+
             log('  ✅ Tombol Next (setelah radio) diklik');
+        } else {
+            log('  ⚠️ Tombol Next kedua tidak ditemukan!');
         }
+
+        await sleep(2000);
 
         // Verify if the next screen (Product title input) actually loaded
         // Must ensure we don't accidentally find the "Search products" input!
         let titleInputLoaded = false;
         let titleInput = null;
-        for (let i = 0; i < 6; i++) {
+        for (let i = 0; i < 8; i++) {
             await sleep(500);
             titleInput = Array.from($$("input[class*='TUXTextInputCore-input']")).find(el => {
                 const ph = el.getAttribute('placeholder') || '';
@@ -496,26 +537,53 @@
             });
             if (titleInput) {
                 titleInputLoaded = true;
+                log('  ✅ VERIFIKASI: Input nama produk muncul');
                 break;
             }
         }
 
-        // Fallback: If Next button failed silently (Title input didn't load), press Enter on the radio wrapper
-        if (!titleInputLoaded && radioWrapper) {
-            log('  ⚠️ Next gagal pindah halaman, mencoba kirim ENTER ke radio...');
-            for (const evType of ['keydown', 'keypress', 'keyup']) {
-                radioWrapper.dispatchEvent(new KeyboardEvent(evType, {
-                    key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
-                }));
+        // Fallback: If Next button failed silently, try multiple recovery methods
+        if (!titleInputLoaded) {
+            log('  ⚠️ Next gagal pindah halaman, mencoba alternatif...');
+
+            // Fallback 1: Send ENTER to radio wrapper
+            if (radioWrapper) {
+                log('  🔄 Mencoba kirim ENTER ke radio wrapper...');
+                radioWrapper.focus();
+                for (const evType of ['keydown', 'keypress', 'keyup']) {
+                    radioWrapper.dispatchEvent(new KeyboardEvent(evType, {
+                        key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                    }));
+                }
+                await sleep(2000);
             }
-            // Wait for title input to load after pressing Enter
-            for (let i = 0; i < 6; i++) {
+
+            // Fallback 2: Try clicking Next again with fresh search
+            const freshNextBtns = Array.from($$('button')).filter(b => {
+                const divChild = b.querySelector('div');
+                return divChild && divChild.textContent.trim() === 'Next' && isVisible(b);
+            });
+            const freshPrimary = freshNextBtns.find(b => (b.className || '').includes('primary'));
+            if (freshPrimary) {
+                log('  🔄 Mencoba klik ulang Next (fresh search)...');
+                freshPrimary.scrollIntoView({ block: 'center' });
+                await sleep(500);
+                freshPrimary.click();
+                simulateClick(freshPrimary);
+                await sleep(2000);
+            }
+
+            // Wait for title input to load after fallback attempts
+            for (let i = 0; i < 8; i++) {
                 await sleep(500);
                 titleInput = Array.from($$("input[class*='TUXTextInputCore-input']")).find(el => {
                     const ph = el.getAttribute('placeholder') || '';
                     return !ph.includes('Search') && isVisible(el);
                 });
-                if (titleInput) break;
+                if (titleInput) {
+                    log('  ✅ Input nama produk muncul setelah fallback');
+                    break;
+                }
             }
         }
 
