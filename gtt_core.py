@@ -801,6 +801,12 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
     retry_tabs = []  # List of tab indices that need retry (download failed)
     MAX_RETRIES_PER_BATCH = 3
     retries_done = 0
+    tab_start_time = {}  # i -> time.time() when tab started generating (untuk minimum wait)
+    
+    # Catat waktu mulai untuk semua tab awal
+    for i, s in tab_status.items():
+        if s == 'generating':
+            tab_start_time[i] = time.time()
 
     while not stop_event.is_set():
         active = [i for i, s in tab_status.items() if s == 'generating']
@@ -824,6 +830,11 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                         tab_prog[new_tab_idx] = 0
                         next_tab_index += 1
                         if status == 'generating':
+                            tab_start_time[new_tab_idx] = time.time()
+                            batch_start = time.time()  # Reset batch_start agar download tidak match file lama
+                            # Tunggu 5 detik agar generation benar-benar mulai sebelum polling
+                            log_fn(f"[UD {ud_num}] ⏳ Menunggu 5 detik agar retry tab mulai generate...")
+                            time.sleep(5)
                             continue  # Keep polling
                 except Exception as e:
                     log_fn(f"[UD {ud_num}] ⚠️ Retry tab gagal: {str(e)[:50]}")
@@ -870,6 +881,16 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
                     log_fn(f"[UD {ud_num}] {' | '.join(parts)}")
 
                 if status == 'done':
+                    # KRITIS: Pastikan tab sudah cukup lama generating sebelum download
+                    # Minimal 15 detik sejak tab mulai generate, agar tidak false-positive
+                    min_wait = 15  # detik
+                    elapsed_since_start = time.time() - tab_start_time.get(i, 0)
+                    if elapsed_since_start < min_wait:
+                        wait_remaining = min_wait - elapsed_since_start
+                        log_fn(f"[UD {ud_num}] [Tab {i+1}] ⏳ Status 'done' tapi baru {elapsed_since_start:.0f}s, tunggu {wait_remaining:.0f}s lagi...")
+                        # Belum waktunya, skip dulu — akan dicek lagi di iterasi berikutnya
+                        continue
+
                     found_path = _download_tab_video(driver, i, batch_start, log_fn, ud_num, raw_dir=raw_dir)
 
                     if found_path and os.path.exists(found_path) and os.path.getsize(found_path) > 10000:
