@@ -1540,12 +1540,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application):
-    await application.bot.set_my_commands([
-        BotCommand("start","Menu utama"),
-        BotCommand("set","Atur settings"),
-        BotCommand("mp3","Kelola MP3 audio"),
-        BotCommand("produk_radio","Kelola produk radio"),
-    ])
+    try:
+        await application.bot.set_my_commands([
+            BotCommand("start","Menu utama"),
+            BotCommand("set","Atur settings"),
+            BotCommand("mp3","Kelola MP3 audio"),
+            BotCommand("produk_radio","Kelola produk radio"),
+        ], read_timeout=20, connect_timeout=20)
+        logger.info("Bot commands registered successfully.")
+    except Exception as e:
+        logger.warning(f"Gagal set_my_commands saat startup (timeout/error): {e}")
 
 
 def main():
