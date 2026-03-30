@@ -404,41 +404,82 @@
     async function clickGenerate() {
         log('🚀 Clicking Generate...');
 
-        // Try known aria-labels
-        const labels = ['Buat video', 'Create video', 'Generate', 'Submit',
-                        'Buat gambar', 'Create image'];
-        for (const label of labels) {
-            const btn = $(`button[aria-label="${label}"]`);
-            if (btn && isVisible(btn)) {
+        // 1. Try known aria-labels (exact match or partial)
+        const labels = ['buat video', 'create video', 'generate', 'submit', 'buat gambar', 'create image', 'send'];
+        const allBtns = document.querySelectorAll('button');
+        for (const btn of allBtns) {
+            if (!isVisible(btn)) continue;
+            const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+            if (labels.some(l => aria.includes(l))) {
                 simulateClick(btn);
-                log(`✅ Generate clicked (aria-label: ${label})`);
+                try { btn.click(); } catch(e){}
+                log(`✅ Generate clicked (aria-label: ${aria})`);
                 await sleep(2000);
                 return true;
             }
         }
 
-        // Fallback: submit with Ctrl+Enter on editor
-        const editor = $('div.tiptap.ProseMirror[contenteditable="true"]') || $('[contenteditable="true"]');
-        if (editor) {
-            editor.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter', code: 'Enter', keyCode: 13,
-                ctrlKey: true, metaKey: true, bubbles: true, cancelable: true
-            }));
-            await sleep(500);
-            editor.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter', code: 'Enter', keyCode: 13,
-                bubbles: true, cancelable: true
-            }));
-            log('✅ Generate triggered via Ctrl+Enter');
-            await sleep(2000);
-            return true;
+        // 2. Try finding button by Send / Arrow Up SVG icon
+        // Usually the submit button has an SVG path like M... (an arrow up)
+        for (const btn of allBtns) {
+            if (!isVisible(btn)) continue;
+            const paths = btn.querySelectorAll('svg path');
+            if (paths.length > 0) {
+                const d = Array.from(paths).map(p => p.getAttribute('d') || '').join(' ');
+                // Send/Arrow icon typical paths in Grok
+                if (d.includes('M3') && d.includes('21l19-9') || // classic send
+                    d.includes('4 12l1.41 1.41L11') ||           // arrow up
+                    d.includes('M12 4l-8 8h6v8h4v-8h6z') ||      // another up arrow
+                    d.includes('15 21v-8a1 1')) {                // another variant
+                    
+                    // pastikan tombol ini ada di dekat text area (di "bottom" layar biasanya)
+                    const rect = btn.getBoundingClientRect();
+                    if (rect.bottom > window.innerHeight / 2) {
+                        simulateClick(btn);
+                        try { btn.click(); } catch(e){}
+                        log(`✅ Generate clicked (SVG icon match)`);
+                        await sleep(2000);
+                        return true;
+                    }
+                }
+            }
         }
 
-        // Last resort: find any round submit button
-        const roundBtn = $('button.group[type="button"]');
-        if (roundBtn) {
+        // 3. Fallback: submit with Ctrl+Enter / Enter on editor
+        const editor = $('div.tiptap.ProseMirror[contenteditable="true"]') || $('[contenteditable="true"]');
+        if (editor) {
+            editor.focus();
+            
+            // Dispatch Ctrl+Enter
+            const eventCtrl = new KeyboardEvent('keydown', {
+                key: 'Enter', code: 'Enter', keyCode: 13,
+                ctrlKey: true, metaKey: true, bubbles: true, cancelable: true
+            });
+            editor.dispatchEvent(eventCtrl);
+            await sleep(500);
+            
+            // Dispatch plain Enter
+            const eventEnter = new KeyboardEvent('keydown', {
+                key: 'Enter', code: 'Enter', keyCode: 13,
+                bubbles: true, cancelable: true
+            });
+            editor.dispatchEvent(eventEnter);
+            
+            log('✅ Generate triggered via Enter keys on editor');
+            await sleep(2000);
+            
+            // After enter, check if generating overlay appears to confirm it worked
+            if (document.querySelector('span.animate-pulse')) {
+                return true;
+            }
+        }
+
+        // 4. Last resort: find any round isolated button near the editor
+        const roundBtn = $('button.group[type="button"]') || $('button.rounded-full[type="button"]');
+        if (roundBtn && isVisible(roundBtn)) {
             simulateClick(roundBtn);
-            log('✅ Generate clicked (fallback button)');
+            try { roundBtn.click(); } catch(e){}
+            log('✅ Generate clicked (fallback round button)');
             await sleep(2000);
             return true;
         }
