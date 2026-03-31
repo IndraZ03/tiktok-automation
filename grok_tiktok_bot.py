@@ -16,7 +16,7 @@ from gtt_core import (
     load_ud_schedule, save_ud_schedule,
     load_prompts, save_prompts, list_bahan_folders, list_bahan_images,
     escape_html, generate_stok_for_ud, build_tiktok_schedule, upload_tiktok_batch,
-    resolve_ud_path, GrokRateLimitError,
+    resolve_ud_path, GrokRateLimitError, merge_video_pair,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +37,38 @@ active_upload_task = {}  # uid -> {stop, thread}
 
 def is_allowed(uid):
     return not ALLOWED_USER_IDS or uid in ALLOWED_USER_IDS
+
+def get_raw_dir(ud_num):
+    return os.path.join(APP_DIR, f"gtt_raw_{ud_num}")
+
+def merge_leftover_raw(ud_num, log_fn=None):
+    """Merge leftover raw videos for this UD."""
+    import glob, shutil
+    raw_dir = get_raw_dir(ud_num)
+    if not os.path.isdir(raw_dir):
+        return []
+    raws = sorted(glob.glob(os.path.join(raw_dir, "*.mp4")), key=os.path.getmtime)
+    if len(raws) < 2:
+        return []
+    if log_fn:
+        log_fn(f"🔄 Ditemukan {len(raws)} raw video ganjil/genap sisa, melakukan merge pendahuluan...")
+    
+    out_dir = stok_dir(ud_num)
+    os.makedirs(out_dir, exist_ok=True)
+    merged = []
+    
+    for i in range(0, len(raws) - 1, 2):
+        mp = merge_video_pair(raws[i], raws[i+1], out_dir, log_fn)
+        if mp:
+            merged.append(mp)
+            for vp in [raws[i], raws[i+1]]:
+                try:
+                    if os.path.exists(vp): os.remove(vp)
+                except: pass
+
+    if log_fn and merged:
+        log_fn(f"✅ Pre-merge sisa selesai: {len(merged)} video baru masuk stok.")
+    return merged
 
 # ═══════════════════════════════════════════════════════════════
 #  FULL AUTO DAEMON
@@ -109,6 +141,12 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
             continue
 
         batch_size = cfg.get("batch_size", 30)
+        
+        # Merge left over sebelum masuk gen
+        leftover_merged = merge_leftover_raw(ud_num)
+        if leftover_merged:
+            send(f"✅ UD {ud_num}: Berhasil pre-merge {len(leftover_merged)} video 20s dari sisa part sebelumnya!")
+            
         current_stok = count_stok(ud_num)
         needed = max(0, batch_size - current_stok)
 
@@ -145,7 +183,8 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
 
             try:
                 generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                     grok_ud, grok_port, log_fn, stop_event)
+                                     grok_ud, grok_port, log_fn, stop_event,
+                                     raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
             except GrokRateLimitError:
                 gen_done.set()
                 updater_t.join(timeout=3)
@@ -644,7 +683,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Prompt belum diset!", reply_markup=main_menu_kb(uid)); return
         if not cfg.get("bahan_folder"):
             await q.edit_message_text("Bahan belum diset!", reply_markup=main_menu_kb(uid)); return
+            
+        merge_leftover_raw(ud_num)
         needed = max(0, cfg.get("batch_size", 30) - count_stok(ud_num))
+        
         if needed <= 0:
             await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
 
@@ -690,7 +732,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         
             try:
                 generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                     grok_ud, grok_port, lg, stop_evt)
+                                     grok_ud, grok_port, lg, stop_evt,
+                                     raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
             except GrokRateLimitError:
                 lg("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
                 stop_evt.set()
@@ -816,7 +859,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"UD {ud_num}: Prompt belum diset!", reply_markup=main_menu_kb(uid)); return
         if not cfg.get("bahan_folder"):
             await q.edit_message_text(f"UD {ud_num}: Bahan belum diset!", reply_markup=main_menu_kb(uid)); return
+            
+        merge_leftover_raw(ud_num)
         needed = max(0, cfg.get("batch_size", 30) - count_stok(ud_num))
+        
         if needed <= 0:
             await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
 
@@ -858,7 +904,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     if len(log_lines) > 20: log_lines.pop(0)
             try:
                 generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                     grok_ud, grok_port, lg, stop_evt)
+                                     grok_ud, grok_port, lg, stop_evt,
+                                     raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
             except GrokRateLimitError:
                 lg("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
                 stop_evt.set()
