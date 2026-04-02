@@ -255,6 +255,7 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     generated = 0
     failed = 0
     merged_count = 0
+    consecutive_global_timeouts = 0  # Track consecutive global timeouts (2 = rate limit)
 
     ud = bot_settings.get("user_data_dir", DEFAULT_USER_DATA)
     pt = bot_settings.get("port", DEFAULT_PORT)
@@ -337,6 +338,27 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                 )
                 stop_event.set()
                 break
+
+            # Check global timeout sentinel (2 berturut = rate limit)
+            if new_raw == '__GLOBAL_TIMEOUT__':
+                consecutive_global_timeouts += 1
+                log_fn(f"⏱️ Global timeout #{consecutive_global_timeouts}/2", "warn")
+                if consecutive_global_timeouts >= 2:
+                    log_fn("🚫 2x global timeout berturut-turut! Kemungkinan RATE LIMIT.", "error")
+                    send(
+                        "🚫 <b>RATE LIMIT DETECTED!</b>\n\n"
+                        "2x global timeout berturut-turut.\n"
+                        "Kemungkinan besar Grok sudah mencapai batas generate.\n\n"
+                        "Generate <b>dihentikan otomatis</b>."
+                    )
+                    stop_event.set()
+                    break
+                time.sleep(5)
+                continue
+
+            # Reset timeout counter jika batch berhasil
+            if new_raw and isinstance(new_raw, list) and len(new_raw) > 0:
+                consecutive_global_timeouts = 0
 
             if not new_raw:
                 failed += batch_size

@@ -79,6 +79,8 @@ _DEFAULT_UD_CONFIG = {
     "batch_size": 30,
     "tiktok_ud": "",
     "tiktok_port": "",
+    "grok_ud": "",
+    "grok_port": "",
     "schedule": {"tanggal": "", "jam": "02", "menit": "00"},
 }
 
@@ -90,10 +92,14 @@ _DEFAULT_DB = {
 }
 
 _UD_TIKTOK_DEFAULTS = {
-    1: {"tiktok_ud": os.path.join(USER_DATA_BASE, "1"), "tiktok_port": "9222"},
-    2: {"tiktok_ud": os.path.join(USER_DATA_BASE, "2"), "tiktok_port": "9223"},
-    3: {"tiktok_ud": os.path.join(USER_DATA_BASE, "3"), "tiktok_port": "9224"},
-    4: {"tiktok_ud": os.path.join(USER_DATA_BASE, "4"), "tiktok_port": "9225"},
+    1: {"tiktok_ud": os.path.join(USER_DATA_BASE, "1"), "tiktok_port": "9222",
+        "grok_ud": os.path.join(USER_DATA_BASE, "gtt_grok_1"), "grok_port": "9270"},
+    2: {"tiktok_ud": os.path.join(USER_DATA_BASE, "2"), "tiktok_port": "9223",
+        "grok_ud": os.path.join(USER_DATA_BASE, "gtt_grok_2"), "grok_port": "9271"},
+    3: {"tiktok_ud": os.path.join(USER_DATA_BASE, "3"), "tiktok_port": "9224",
+        "grok_ud": os.path.join(USER_DATA_BASE, "gtt_grok_3"), "grok_port": "9272"},
+    4: {"tiktok_ud": os.path.join(USER_DATA_BASE, "4"), "tiktok_port": "9225",
+        "grok_ud": os.path.join(USER_DATA_BASE, "gtt_grok_4"), "grok_port": "9273"},
 }
 
 def load_db():
@@ -115,9 +121,19 @@ def get_ud_config(db, ud_num):
         defaults = _UD_TIKTOK_DEFAULTS.get(ud_num, {})
         cfg["tiktok_ud"] = defaults.get("tiktok_ud", os.path.join(USER_DATA_BASE, str(ud_num)))
         cfg["tiktok_port"] = defaults.get("tiktok_port", str(9221 + ud_num))
+        cfg["grok_ud"] = defaults.get("grok_ud", os.path.join(USER_DATA_BASE, f"gtt_grok_{ud_num}"))
+        cfg["grok_port"] = defaults.get("grok_port", str(9269 + ud_num))
         now = datetime.now()
         cfg["schedule"]["tanggal"] = now.strftime("%Y-%m-%d")
         db.setdefault("ud_configs", {})[key] = cfg
+    # Backward compat: jika config lama belum punya grok_ud/grok_port
+    existing = db["ud_configs"][key]
+    if not existing.get("grok_ud"):
+        defaults = _UD_TIKTOK_DEFAULTS.get(ud_num, {})
+        existing["grok_ud"] = defaults.get("grok_ud", os.path.join(USER_DATA_BASE, f"gtt_grok_{ud_num}"))
+    if not existing.get("grok_port"):
+        defaults = _UD_TIKTOK_DEFAULTS.get(ud_num, {})
+        existing["grok_port"] = defaults.get("grok_port", str(9269 + ud_num))
     return db["ud_configs"][key]
 
 def stok_dir(ud_num):
@@ -798,6 +814,7 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
 
     # Phase 2: Poll __grokTabCheckProgress until all done
     timeout_global = time.time()
+    _global_timeout_hit = False
     retry_tabs = []  # List of tab indices that need retry (download failed)
     MAX_RETRIES_PER_BATCH = 3
     retries_done = 0
@@ -845,6 +862,8 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
             for i in active:
                 tab_status[i] = 'timeout'
                 log_fn(f"[UD {ud_num}] [Tab {i+1}] Global timeout!")
+            # Mark as global timeout for caller to track
+            _global_timeout_hit = True
             break
 
         for i in list(active):
@@ -941,6 +960,11 @@ def _run_mini_batch(driver, num_tabs, bahan_folder, prompt_text, log_fn, stop_ev
         log_fn(f"[UD {ud_num}] 🚫 Rate limit terdeteksi! Generate dihentikan.")
         return '__RATE_LIMITED__'  # Sentinel value
 
+    # Cek global timeout — propagate sentinel ke caller
+    if _global_timeout_hit:
+        log_fn(f"[UD {ud_num}] ⏱️ Global timeout terdeteksi, kemungkinan rate limit.")
+        return '__GLOBAL_TIMEOUT__'  # Sentinel value
+
     ok_count = sum(1 for s in tab_status.values() if s == 'done')
     fail_count = sum(1 for s in tab_status.values() if s != 'done')
     log_fn(f"[UD {ud_num}] Mini-batch: {ok_count} OK, {fail_count} gagal/skip")
@@ -985,6 +1009,7 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
     total_merged_this_session = 0
     merged_since_restart = 0
     consecutive_fails = 0
+    consecutive_global_timeouts = 0  # Track consecutive global timeouts (2 = rate limit)
     raw_pool = []  # Sisa raw yang belum di-merge (ganjil)
 
     log_fn(f"[UD {ud_num}] Target: {target} merged 20s videos")
@@ -1039,6 +1064,27 @@ def generate_stok_for_ud(ud_num, needed, prompt_text, bahan_folder, grok_ud, gro
                 if new_raw == '__RATE_LIMITED__':
                     log_fn(f"[UD {ud_num}] 🚫 Rate limit terdeteksi! Menghentikan generate...")
                     raise GrokRateLimitError("Grok rate limit reached. Generate dihentikan.")
+
+                # Cek global timeout sentinel (2 berturut = rate limit)
+                if new_raw == '__GLOBAL_TIMEOUT__':
+                    consecutive_global_timeouts += 1
+                    log_fn(f"[UD {ud_num}] ⏱️ Global timeout #{consecutive_global_timeouts}/2")
+                    if consecutive_global_timeouts >= 2:
+                        log_fn(f"[UD {ud_num}] 🚫 2x global timeout berturut-turut! Kemungkinan besar RATE LIMIT.")
+                        raise GrokRateLimitError("2x consecutive global timeout — kemungkinan rate limit. Generate dihentikan.")
+                    # Restart Chrome dan coba lagi
+                    log_fn(f"[UD {ud_num}] Restart Chrome setelah global timeout, coba 1x lagi...")
+                    _stop_chrome_session(chrome_proc, driver, log_fn, ud_num)
+                    chrome_proc, driver = _start_chrome_session(grok_ud, grok_port, log_fn, ud_num, raw_dir=raw_dir)
+                    if not driver:
+                        log_fn(f"[UD {ud_num}] Chrome restart gagal setelah timeout, abort!")
+                        break
+                    merged_since_restart = 0
+                    continue
+
+                # Reset consecutive global timeout counter jika batch berhasil
+                if new_raw and isinstance(new_raw, list) and len(new_raw) > 0:
+                    consecutive_global_timeouts = 0
 
                 if not new_raw and not raw_pool:
                     consecutive_fails += 1
