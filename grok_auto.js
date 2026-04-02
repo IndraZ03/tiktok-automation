@@ -565,10 +565,30 @@
     }
 
     // Returns true if Grok rate limit has been reached.
-    // ⚠️ TEMPORARILY DISABLED — always returns false to prevent false positives.
-    // Uncomment the body below to re-enable rate limit detection.
+    // Detects the Sonner toast popup with data-type="error" containing
+    // "Rate limit reached" or "Upgrade to SuperGrok".
     function _isRateLimitReached() {
-        return false; // <<< DISABLED SEMENTARA
+        // Method 1: Sonner toast with data-type="error" (primary — paling akurat)
+        const toasts = document.querySelectorAll('li[data-sonner-toast][data-type="error"]');
+        for (const toast of toasts) {
+            const text = (toast.textContent || '').toLowerCase();
+            if (text.includes('rate limit') || text.includes('supergrok')) {
+                return true;
+            }
+        }
+        // Method 2: Fallback — cari span dengan teks spesifik
+        const spans = document.querySelectorAll('span.font-medium, span.font-bold, span.font-semibold');
+        for (const s of spans) {
+            const t = (s.textContent || '').toLowerCase();
+            if ((t.includes('rate limit') && t.includes('reached')) ||
+                (t.includes('upgrade') && t.includes('supergrok'))) {
+                // Pastikan parent-nya visible (bukan hidden element)
+                if (isVisible(s) || (s.closest('li[data-sonner-toast]'))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Returns true if the download button (Unduh/Download) is visible.

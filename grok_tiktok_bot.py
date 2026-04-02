@@ -73,6 +73,141 @@ def merge_leftover_raw(ud_num, log_fn=None):
 # ═══════════════════════════════════════════════════════════════
 #  FULL AUTO DAEMON
 # ═══════════════════════════════════════════════════════════════
+def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
+    """Pipeline untuk satu UD: Generate -> Upload. Berjalan di thread terpisah.
+    Setiap UD punya grok_ud & grok_port sendiri agar bisa paralel."""
+    import html as _html
+
+    def send(text):
+        asyncio.run_coroutine_threadsafe(
+            bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
+
+    db = load_db()
+    cfg = get_ud_config(db, ud_num)
+    prompt_text = load_prompts().get(cfg.get("prompt_name", ""), "")
+    if not prompt_text:
+        send(f"<b>UD {ud_num}</b>: Prompt tidak ditemukan, skip!")
+        return
+
+    # Per-UD grok settings (beda port & user_data per UD)
+    grok_ud = cfg.get("grok_ud", os.path.join(USER_DATA_BASE, f"gtt_grok_{ud_num}"))
+    grok_port = cfg.get("grok_port", str(9269 + ud_num))
+    batch_size = cfg.get("batch_size", 30)
+
+    send(f"<b>UD {ud_num}</b>: Pipeline dimulai\n"
+         f"Grok UD: <code>{escape_html(os.path.basename(grok_ud))}</code>\n"
+         f"Grok Port: <code>{grok_port}</code>")
+
+    # Merge left over sebelum masuk gen
+    leftover_merged = merge_leftover_raw(ud_num)
+    if leftover_merged:
+        send(f"✅ UD {ud_num}: Pre-merge {len(leftover_merged)} video sisa!")
+
+    current_stok = count_stok(ud_num)
+    needed = max(0, batch_size - current_stok)
+
+    # STEP 1: Generate jika stok kurang
+    if needed > 0 and not stop_event.is_set():
+        send(f"<b>UD {ud_num} STEP 1:</b> Generate {needed} video (stok: {current_stok}/{batch_size})")
+        gen_log_lines = []; gen_log_lock = threading.Lock()
+        gen_done = threading.Event()
+
+        def log_fn(msg):
+            s = _html.escape(str(msg))
+            with gen_log_lock:
+                gen_log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                if len(gen_log_lines) > 20: gen_log_lines.pop(0)
+
+        def _gen_updater():
+            last_text = ""
+            while not gen_done.is_set() and not stop_event.is_set():
+                time.sleep(5)
+                with gen_log_lock:
+                    if not gen_log_lines: continue
+                    text = f"<b>[UD {ud_num}] Generate Progress ({count_stok(ud_num)}/{batch_size})</b>\n" + "\n".join(gen_log_lines)
+                if text != last_text:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
+                        future.result(timeout=10)
+                        last_text = text
+                    except: pass
+
+        updater_t = threading.Thread(target=_gen_updater, daemon=True)
+        updater_t.start()
+
+        try:
+            generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
+                                 grok_ud, grok_port, log_fn, stop_event,
+                                 raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
+        except GrokRateLimitError:
+            gen_done.set()
+            updater_t.join(timeout=3)
+            send(
+                "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
+                f"UD {ud_num}: Grok sudah mencapai batas generate.\n"
+                "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
+                "Generate <b>dihentikan otomatis</b>.\n"
+                f"Stok saat ini: <b>{count_stok(ud_num)}</b>")
+            return
+        gen_done.set()
+        updater_t.join(timeout=3)
+        send(f"<b>UD {ud_num}:</b> Generate selesai! Stok: {count_stok(ud_num)}")
+
+    if stop_event.is_set(): return
+
+    # STEP 2: Build schedule & upload
+    stok_files = list_stok(ud_num)[:batch_size]
+    if not stok_files:
+        send(f"<b>UD {ud_num}:</b> Stok kosong, skip upload!")
+        return
+
+    interval_hours = cfg.get("interval_hours", 5)
+    start_dt = datetime.now() + timedelta(minutes=30)
+    start_dt = start_dt.replace(second=0, microsecond=0)
+    rounded = ((start_dt.minute + 4) // 5) * 5
+    if rounded >= 60:
+        start_dt = start_dt.replace(minute=0) + timedelta(hours=1)
+    else:
+        start_dt = start_dt.replace(minute=rounded)
+
+    schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
+    save_ud_schedule(ud_num, schedule)
+
+    preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule))
+    full_text = f"<b>UD {ud_num} STEP 2:</b> Upload {len(schedule)} video\nInterval: {interval_hours}h\n\n{preview}"
+    if len(full_text) <= 4096:
+        send(full_text)
+    else:
+        send(full_text[:4096])
+        for cs in range(4096, len(full_text), 4096):
+            send(full_text[cs:cs+4096])
+
+    log_lines2 = []; log_lock2 = threading.Lock()
+    def log_fn2(msg):
+        with log_lock2:
+            log_lines2.append(msg)
+
+    uploaded = upload_tiktok_batch(ud_num, schedule, cfg, log_fn2, stop_event)
+    send(f"<b>UD {ud_num}:</b> Upload selesai! {uploaded}/{len(schedule)}")
+
+    # STEP 3: Update schedule untuk pipeline berikutnya
+    if uploaded > 0:
+        db = load_db()
+        cfg = get_ud_config(db, ud_num)
+        last_sched_str = schedule[-1]["schedule"]
+        try:
+            last_dt = datetime.strptime(last_sched_str, "%Y-%m-%d %H:%M")
+        except:
+            last_dt = datetime.now()
+        next_dt = last_dt + timedelta(hours=interval_hours, minutes=random.randint(0, 30))
+        cfg["schedule"]["tanggal"] = next_dt.strftime("%Y-%m-%d")
+        cfg["schedule"]["jam"] = f"{next_dt.hour:02d}"
+        cfg["schedule"]["menit"] = f"{next_dt.minute:02d}"
+        save_db(db)
+        send(f"<b>UD {ud_num}:</b> Next pipeline: <code>{next_dt.strftime('%Y-%m-%d %H:%M')}</code>")
+
+
 def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
     def send(text):
         asyncio.run_coroutine_threadsafe(
@@ -80,17 +215,18 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
 
     db = load_db()
     active = db.get("active_ud", [1, 2])
-    send(f"<b>Full Auto dimulai!</b>\nActive UD: <b>{', '.join(str(x) for x in active)}</b>\n"
-         f"Logika: Tunggu jadwal UD terdekat -> generate -> upload batch")
+    send(f"<b>Full Auto dimulai! (Parallel Mode)</b>\n"
+         f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n"
+         f"Setiap UD punya Chrome sendiri → generate paralel!")
 
     while not stop_event.is_set():
         db = load_db()
         active = db.get("active_ud", [1, 2])
-        grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
-        grok_port = db.get("grok_port", "9270")
 
-        # Kumpulkan kandidat UD
-        candidates = []
+        # Kumpulkan kandidat UD yang siap (jadwal sudah sampai/terlewat)
+        now = datetime.now()
+        ready_uds = []
+        future_uds = []
         for ud_num in active:
             cfg = get_ud_config(db, ud_num)
             if not cfg.get("prompt_name") or not cfg.get("bahan_folder"):
@@ -101,9 +237,12 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
                     f"{sched['tanggal']} {sched['jam']}:{sched['menit']}", "%Y-%m-%d %H:%M")
             except:
                 continue
-            candidates.append((trigger_dt, ud_num))
+            if trigger_dt <= now:
+                ready_uds.append(ud_num)
+            else:
+                future_uds.append((trigger_dt, ud_num))
 
-        if not candidates:
+        if not ready_uds and not future_uds:
             if not stop_event.is_set():
                 send("Semua UD belum dikonfigurasi (prompt/bahan kosong). Menunggu 60 detik...")
                 for _ in range(12):
@@ -111,151 +250,41 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
                     time.sleep(5)
             continue
 
-        candidates.sort(key=lambda x: x[0])
-        trigger_dt, ud_num = candidates[0]
+        # Jika ada UD yang siap → jalankan paralel
+        if ready_uds:
+            send(f"<b>🚀 Menjalankan {len(ready_uds)} UD paralel:</b> {', '.join(f'UD {u}' for u in ready_uds)}")
+            ud_threads = []
+            for ud_num in ready_uds:
+                t = threading.Thread(
+                    target=_run_ud_pipeline,
+                    args=(ud_num, chat_id, bot, main_loop, stop_event),
+                    daemon=True, name=f"ud_pipeline_{ud_num}")
+                t.start()
+                ud_threads.append(t)
 
-        # Tampilkan jadwal
-        sched_info = "\n".join(
-            f"  {'>' if c[1]==ud_num else ' '} UD {c[1]}: <code>{c[0].strftime('%Y-%m-%d %H:%M')}</code>"
-            for c in candidates)
-        send(f"<b>Jadwal UD:</b>\n{sched_info}\n\nTerdekat: <b>UD {ud_num}</b>")
+            # Tunggu semua UD selesai
+            for t in ud_threads:
+                while t.is_alive() and not stop_event.is_set():
+                    t.join(timeout=10)
 
-        # Tunggu jadwal
-        now = datetime.now()
-        wait_sec = (trigger_dt - now).total_seconds()
-        if wait_sec > 0:
-            h = int(wait_sec // 3600); m = int((wait_sec % 3600) // 60)
-            send(f"<b>UD {ud_num}</b>: Menunggu jadwal...\n"
-                 f"<code>{trigger_dt.strftime('%Y-%m-%d %H:%M')}</code> ({h}j {m}m lagi)")
-            elapsed = 0
-            while elapsed < wait_sec and not stop_event.is_set():
-                time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
             if stop_event.is_set(): break
-
-        # Pipeline: Generate -> Upload
-        db = load_db()
-        cfg = get_ud_config(db, ud_num)
-        prompt_text = load_prompts().get(cfg.get("prompt_name", ""), "")
-        if not prompt_text:
-            send(f"<b>UD {ud_num}</b>: Prompt tidak ditemukan, skip!")
-            continue
-
-        batch_size = cfg.get("batch_size", 30)
-        
-        # Merge left over sebelum masuk gen
-        leftover_merged = merge_leftover_raw(ud_num)
-        if leftover_merged:
-            send(f"✅ UD {ud_num}: Berhasil pre-merge {len(leftover_merged)} video 20s dari sisa part sebelumnya!")
-            
-        current_stok = count_stok(ud_num)
-        needed = max(0, batch_size - current_stok)
-
-        # STEP 1: Generate jika stok kurang
-        if needed > 0 and not stop_event.is_set():
-            send(f"<b>UD {ud_num} STEP 1:</b> Generate {needed} video (stok: {current_stok}/{batch_size})")
-            import html as _html
-            gen_log_lines = []; gen_log_lock = threading.Lock()
-            gen_done = threading.Event()
-
-            def log_fn(msg):
-                s = _html.escape(str(msg))
-                with gen_log_lock:
-                    gen_log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
-                    if len(gen_log_lines) > 20: gen_log_lines.pop(0)
-
-            def _gen_updater():
-                last_text = ""
-                while not gen_done.is_set() and not stop_event.is_set():
-                    time.sleep(5)
-                    with gen_log_lock:
-                        if not gen_log_lines: continue
-                        text = f"<b>[UD {ud_num}] Generate Progress ({count_stok(ud_num)}/{batch_size})</b>\n" + "\n".join(gen_log_lines)
-                    if text != last_text:
-                        try:
-                            future = asyncio.run_coroutine_threadsafe(
-                                bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
-                            future.result(timeout=10)
-                            last_text = text
-                        except: pass
-
-            updater_t = threading.Thread(target=_gen_updater, daemon=True)
-            updater_t.start()
-
-            try:
-                generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                     grok_ud, grok_port, log_fn, stop_event,
-                                     raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
-            except GrokRateLimitError:
-                gen_done.set()
-                updater_t.join(timeout=3)
-                send(
-                    "🚫 <b>RATE LIMIT REACHED!</b>\n\n"
-                    f"UD {ud_num}: Grok sudah mencapai batas generate.\n"
-                    "Pesan dari Grok: <i>Rate limit reached — Upgrade to SuperGrok Heavy</i>\n\n"
-                    "Generate <b>dihentikan otomatis</b>.\n"
-                    f"Stok saat ini: <b>{count_stok(ud_num)}</b>\n\n"
-                    "Bot akan lanjut ke jadwal UD berikutnya.")
-                continue
-            gen_done.set()
-            updater_t.join(timeout=3)
-            send(f"<b>UD {ud_num}:</b> Generate selesai! Stok: {count_stok(ud_num)}")
-
-        if stop_event.is_set(): break
-
-        # STEP 2: Build schedule & upload
-        stok_files = list_stok(ud_num)[:batch_size]
-        if not stok_files:
-            send(f"<b>UD {ud_num}:</b> Stok kosong, skip upload!")
-            continue
-
-        interval_hours = cfg.get("interval_hours", 5)
-        # Schedule mulai dari sekarang + 30 menit setelah stok penuh
-        start_dt = datetime.now() + timedelta(minutes=30)
-        start_dt = start_dt.replace(second=0, microsecond=0)
-        # Bulatkan ke 5 menit
-        rounded = ((start_dt.minute + 4) // 5) * 5
-        if rounded >= 60:
-            start_dt = start_dt.replace(minute=0) + timedelta(hours=1)
-        else:
-            start_dt = start_dt.replace(minute=rounded)
-
-        schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
-        save_ud_schedule(ud_num, schedule)
-
-        preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule))
-        full_text = f"<b>UD {ud_num} STEP 2:</b> Upload {len(schedule)} video\nInterval: {interval_hours}h\n\n{preview}"
-        # Split jika terlalu panjang
-        if len(full_text) <= 4096:
-            send(full_text)
-        else:
-            send(full_text[:4096])
-            for cs in range(4096, len(full_text), 4096):
-                send(full_text[cs:cs+4096])
-
-        log_lines2 = []; log_lock2 = threading.Lock()
-        def log_fn2(msg):
-            with log_lock2:
-                log_lines2.append(msg)
-
-        uploaded = upload_tiktok_batch(ud_num, schedule, cfg, log_fn2, stop_event)
-        send(f"<b>UD {ud_num}:</b> Upload selesai! {uploaded}/{len(schedule)}")
-
-        # STEP 3: Update schedule untuk pipeline berikutnya
-        if uploaded > 0:
-            last_sched_str = schedule[-1]["schedule"]
-            try:
-                last_dt = datetime.strptime(last_sched_str, "%Y-%m-%d %H:%M")
-            except:
-                last_dt = datetime.now()
-            next_dt = last_dt + timedelta(hours=interval_hours, minutes=random.randint(0, 30))
-            cfg["schedule"]["tanggal"] = next_dt.strftime("%Y-%m-%d")
-            cfg["schedule"]["jam"] = f"{next_dt.hour:02d}"
-            cfg["schedule"]["menit"] = f"{next_dt.minute:02d}"
-            save_db(db)
-            send(f"<b>UD {ud_num}:</b> Next pipeline: <code>{next_dt.strftime('%Y-%m-%d %H:%M')}</code>")
-
-        if not stop_event.is_set():
+            send(f"<b>✅ Semua UD selesai!</b> ({', '.join(f'UD {u}' for u in ready_uds)})")
             time.sleep(10)
+            continue
+
+        # Tidak ada yang siap → tunggu jadwal terdekat
+        future_uds.sort(key=lambda x: x[0])
+        trigger_dt, next_ud = future_uds[0]
+        sched_info = "\n".join(
+            f"  {'>' if c[1]==next_ud else ' '} UD {c[1]}: <code>{c[0].strftime('%Y-%m-%d %H:%M')}</code>"
+            for c in future_uds)
+        wait_sec = (trigger_dt - now).total_seconds()
+        h = int(wait_sec // 3600); m = int((wait_sec % 3600) // 60)
+        send(f"<b>Jadwal UD:</b>\n{sched_info}\n\nMenunggu: <b>UD {next_ud}</b> ({h}j {m}m lagi)")
+
+        elapsed = 0
+        while elapsed < wait_sec and not stop_event.is_set():
+            time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
 
     full_auto_task.pop(uid, None)
     send("<b>Full Auto dihentikan.</b>")
@@ -301,7 +330,7 @@ def main_menu_kb(uid=None):
 def status_text():
     db = load_db()
     active = db.get("active_ud", [1, 2])
-    lines = ["<b>Grok TikTok Bot</b>\n"]
+    lines = ["<b>Grok TikTok Bot (Parallel)</b>\n"]
     lines.append(f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n")
     for ud in active:
         cfg = get_ud_config(db, ud)
@@ -310,6 +339,8 @@ def status_text():
         sched_str = f"{sched.get('tanggal','-')} {sched.get('jam','00')}:{sched.get('menit','00')}"
         prod = "ON" if cfg.get("add_product") else "OFF"
         sound = "ON" if cfg.get("add_sound") else "OFF"
+        grok_ud_disp = os.path.basename(cfg.get('grok_ud', '')) or '(auto)'
+        grok_port_disp = cfg.get('grok_port', '') or '(auto)'
         lines.append(
             f"<b>UD {ud}:</b>\n"
             f"  Stok: <b>{stok}/{cfg.get('batch_size',30)}</b>\n"
@@ -317,7 +348,8 @@ def status_text():
             f"  Bahan: <code>{escape_html(cfg.get('bahan_folder','(kosong)'))}</code>\n"
             f"  Desc: <code>{escape_html(cfg.get('deskripsi','(kosong)')[:40])}</code>\n"
             f"  Interval: <b>{cfg.get('interval_hours',5)}h</b> | Produk: {prod} | Sound: {sound}\n"
-            f"  Schedule: <code>{sched_str}</code>\n")
+            f"  Schedule: <code>{sched_str}</code>\n"
+            f"  🔌 Grok: <code>{grok_ud_disp}</code> : <code>{grok_port_disp}</code>\n")
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════════
@@ -348,10 +380,10 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set interval 1 5</code> - Interval (jam)\n"
             "<code>/set batch 1 30</code> - Batch size\n"
             "<code>/set sched 1 2026-03-16 02:00</code> - Schedule\n"
-            "<code>/set tiktok_ud 1 2</code> - TikTok user_data UD 1 = user_data/2\n"
+            "<code>/set tiktok_ud 1 2</code> - TikTok user_data\n"
             "<code>/set tiktok_port 1 9223</code> - TikTok port\n"
-            "<code>/set grok_ud gtt_grok</code> - Grok user_data\n"
-            "<code>/set grok_port 9270</code> - Grok port",
+            "<code>/set grok_ud 1 gtt_grok_1</code> - Grok user_data UD 1\n"
+            "<code>/set grok_port 1 9270</code> - Grok port UD 1",
             parse_mode=ParseMode.HTML)
         return
     parts = args[1].split(None, 1)
@@ -368,13 +400,6 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         db["active_ud"] = nums; save_db(db)
         await update.message.reply_text(f"Active UD: <b>{', '.join(str(x) for x in nums)}</b>", parse_mode=ParseMode.HTML)
         return
-    if sub == "grok_ud":
-        full_path = resolve_ud_path(val)
-        db["grok_ud"] = full_path; save_db(db)
-        await update.message.reply_text(f"Grok UD: <code>{escape_html(full_path)}</code>", parse_mode=ParseMode.HTML); return
-    if sub == "grok_port":
-        db["grok_port"] = val; save_db(db)
-        await update.message.reply_text(f"Grok Port: <code>{val}</code>", parse_mode=ParseMode.HTML); return
 
     # Per-UD settings: /set SUB UD_NUM VALUE
     sub_parts = val.split(None, 1)
@@ -441,6 +466,11 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud_val = cfg["tiktok_ud"]
     elif sub == "tiktok_port":
         cfg["tiktok_port"] = ud_val
+    elif sub == "grok_ud":
+        cfg["grok_ud"] = resolve_ud_path(ud_val)
+        ud_val = cfg["grok_ud"]
+    elif sub == "grok_port":
+        cfg["grok_port"] = ud_val
     else:
         await update.message.reply_text("Sub-command tidak dikenal. Ketik <code>/set</code>", parse_mode=ParseMode.HTML); return
 
@@ -648,6 +678,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sched = cfg.get("schedule", {})
         sched_str = f"{sched.get('tanggal','-')} {sched.get('jam','00')}:{sched.get('menit','00')}"
         hashtags_disp = ', '.join('#'+h for h in cfg.get('hashtags',[])) or '(kosong)'
+        grok_ud_disp = os.path.basename(cfg.get('grok_ud', '')) or '(auto)'
+        grok_port_disp = cfg.get('grok_port', '') or '(auto)'
         text = (
             f"<b>UD {ud_num} Status</b>\n\n"
             f"Stok: <b>{stok}/{cfg.get('batch_size',30)}</b> video\n"
@@ -661,8 +693,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"  Radio ({len(cfg.get('nama_produk_radio_list',[]))}): <code>{escape_html(', '.join(cfg.get('nama_produk_radio_list',[])) or cfg.get('nama_produk_radio','(kosong)'))[:60]}</code>\n"
             f"  Input: <code>{escape_html(cfg.get('nama_produk_input','(kosong)')[:40])}</code>\n"
             f"<b>Sound:</b> {'ON' if cfg.get('add_sound') else 'OFF'}\n"
-            f"\nTikTok UD: <code>{escape_html(cfg.get('tiktok_ud',''))}</code>\n"
-            f"TikTok Port: <code>{cfg.get('tiktok_port','')}</code>")
+            f"\n<b>🔌 Grok Chrome:</b>\n"
+            f"  UD: <code>{escape_html(grok_ud_disp)}</code>\n"
+            f"  Port: <code>{grok_port_disp}</code>\n"
+            f"<b>🔌 TikTok Chrome:</b>\n"
+            f"  UD: <code>{escape_html(cfg.get('tiktok_ud',''))}</code>\n"
+            f"  Port: <code>{cfg.get('tiktok_port','')}</code>")
         rows = [
             [InlineKeyboardButton(f"Generate UD {ud_num}", callback_data=f"gen_ud_{ud_num}"),
              InlineKeyboardButton(f"Upload UD {ud_num}", callback_data=f"upload_ud_{ud_num}")],
@@ -691,8 +727,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
 
         stop_evt = threading.Event()
-        grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
-        grok_port = db.get("grok_port", "9270")
+        grok_ud = cfg.get("grok_ud", os.path.join(USER_DATA_BASE, f"gtt_grok_{ud_num}"))
+        grok_port = cfg.get("grok_port", str(9269 + ud_num))
         
         initial_msg = await q.edit_message_text(f"Generate UD {ud_num} dimulai! Target: {needed} video\nMembuka browser...", reply_markup=main_menu_kb(uid))
         msg_id = initial_msg.message_id
