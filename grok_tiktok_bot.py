@@ -41,6 +41,67 @@ def is_allowed(uid):
 def get_raw_dir(ud_num):
     return os.path.join(APP_DIR, f"gtt_raw_{ud_num}")
 
+MP3_DIR = os.path.join(APP_DIR, "brutal_mp3")
+
+def get_random_mp3():
+    os.makedirs(MP3_DIR, exist_ok=True)
+    mp3s = sorted([f for f in os.listdir(MP3_DIR) if f.lower().endswith('.mp3')])
+    if not mp3s: return None
+    return os.path.join(MP3_DIR, random.choice(mp3s))
+
+def _mute_and_add_mp3(video_path, log_fn=None):
+    import subprocess
+    mp3_path = get_random_mp3()
+    if not mp3_path:
+        if log_fn: log_fn("⚠️ Tidak ada file MP3 di brutal_mp3, video tetap muted")
+        tmp_out = video_path + ".muted.mp4"
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-an", "-c:v", "copy", tmp_out]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+                os.replace(tmp_out, video_path)
+                if log_fn: log_fn("🔇 Video dimute (tanpa MP3)")
+                return True
+        except Exception as e:
+            if log_fn: log_fn(f"❌ Mute error: {e}")
+        try:
+            if os.path.exists(tmp_out): os.remove(tmp_out)
+        except: pass
+        return False
+
+    mp3_name = os.path.basename(mp3_path)
+    if log_fn: log_fn(f"🎵 Menambahkan audio: {mp3_name[:40]}")
+    tmp_out = video_path + ".audio.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-stream_loop", "-1", "-i", mp3_path,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-shortest",
+        tmp_out
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+            os.replace(tmp_out, video_path)
+            if log_fn: log_fn(f"✅ Audio diganti: {mp3_name[:40]}")
+            return True
+        if log_fn: log_fn(f"❌ Audio replace gagal: {r.stderr[-150:]}")
+    except Exception as e:
+        if log_fn: log_fn(f"❌ Audio replace error: {e}")
+    try:
+        if os.path.exists(tmp_out): os.remove(tmp_out)
+    except: pass
+    return False
+
+def custom_merge_video_pair(vid1, vid2, output_dir, log_fn=None):
+    out_path = merge_video_pair(vid1, vid2, output_dir, log_fn)
+    if out_path:
+        _mute_and_add_mp3(out_path, log_fn)
+    return out_path
+
 def merge_leftover_raw(ud_num, log_fn=None):
     """Merge leftover raw videos for this UD."""
     import glob, shutil
@@ -58,7 +119,7 @@ def merge_leftover_raw(ud_num, log_fn=None):
     merged = []
     
     for i in range(0, len(raws) - 1, 2):
-        mp = merge_video_pair(raws[i], raws[i+1], out_dir, log_fn)
+        mp = custom_merge_video_pair(raws[i], raws[i+1], out_dir, log_fn)
         if mp:
             merged.append(mp)
             for vp in [raws[i], raws[i+1]]:
@@ -139,7 +200,7 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
         try:
             generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
                                  grok_ud, grok_port, log_fn, stop_event,
-                                 raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
+                                 raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair)
         except GrokRateLimitError:
             gen_done.set()
             updater_t.join(timeout=3)
@@ -188,6 +249,7 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
         with log_lock2:
             log_lines2.append(msg)
 
+    cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
     uploaded = upload_tiktok_batch(ud_num, schedule, cfg, log_fn2, stop_event)
     send(f"<b>UD {ud_num}:</b> Upload selesai! {uploaded}/{len(schedule)}")
 
@@ -823,6 +885,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_ud_schedule(ud_num, schedule)
         def _upload():
             def lg(m): pass
+            cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
             uploaded = upload_tiktok_batch(ud_num, schedule, cfg, lg, stop_evt)
             asyncio.run_coroutine_threadsafe(
                 bot.send_message(chat_id, f"Upload UD {ud_num} selesai! {uploaded}/{len(schedule)}"), main_loop)
@@ -1066,6 +1129,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     log_lines_ul.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
                     if len(log_lines_ul) > 20: log_lines_ul.pop(0)
             try:
+                cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
                 uploaded = upload_tiktok_batch(ud_num, schedule, cfg, lg, stop_evt)
             except Exception as e:
                 lg(f"Error: {type(e).__name__}: {str(e)[:40]}")
