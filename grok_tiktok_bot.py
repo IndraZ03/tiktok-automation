@@ -34,6 +34,7 @@ ALLOWED_USER_IDS = []
 full_auto_task = {}      # uid -> {stop, thread}
 active_gen_task = {}     # uid -> {stop, thread}
 active_upload_task = {}  # uid -> {stop, thread}
+active_mp3_task = {}     # uid -> {stop, thread}
 
 def is_allowed(uid):
     return not ALLOWED_USER_IDS or uid in ALLOWED_USER_IDS
@@ -244,14 +245,54 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
         for cs in range(4096, len(full_text), 4096):
             send(full_text[cs:cs+4096])
 
+    upload_stats_fa = {"success": 0, "fail": 0, "current": 0, "total": len(schedule)}
     log_lines2 = []; log_lock2 = threading.Lock()
+    upload_done_fa = threading.Event()
+
     def log_fn2(msg):
         with log_lock2:
             log_lines2.append(msg)
+            if len(log_lines2) > 25: log_lines2.pop(0)
+            if '✅ Upload sukses' in msg or ('✅' in msg and 'sukses' in msg):
+                upload_stats_fa["success"] += 1
+            if 'Upload:' in msg or ('Upload' in msg and '/' in msg):
+                import re as _re
+                match = _re.search(r'\[(\d+)/\d+\]', msg)
+                if match:
+                    upload_stats_fa["current"] = int(match.group(1))
+
+    def _fa_upload_updater():
+        last_text = ""
+        while not upload_done_fa.is_set() and not stop_event.is_set():
+            time.sleep(5)
+            with log_lock2:
+                if not log_lines2: continue
+                st = upload_stats_fa
+                text = (
+                    f"<b>[UD {ud_num}] 📤 Upload TikTok</b>\n"
+                    f"Video: <b>{st['current']}/{st['total']}</b>\n"
+                    f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n" +
+                    "\n".join(log_lines2[-10:]))
+            if text != last_text:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
+                    future.result(timeout=10)
+                    last_text = text
+                except: pass
+
+    updater_t2 = threading.Thread(target=_fa_upload_updater, daemon=True)
+    updater_t2.start()
 
     cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
     uploaded = upload_tiktok_batch(ud_num, schedule, cfg, log_fn2, stop_event)
-    send(f"<b>UD {ud_num}:</b> Upload selesai! {uploaded}/{len(schedule)}")
+    upload_done_fa.set()
+    updater_t2.join(timeout=3)
+    upload_stats_fa["success"] = uploaded
+    upload_stats_fa["fail"] = upload_stats_fa["total"] - uploaded
+    send(f"<b>UD {ud_num}:</b> Upload selesai!\n"
+         f"✅ Berhasil: <b>{uploaded}/{len(schedule)}</b>\n"
+         f"❌ Gagal: <b>{upload_stats_fa['fail']}</b>")
 
     # STEP 3: Update schedule untuk pipeline berikutnya
     if uploaded > 0:
@@ -375,12 +416,16 @@ def main_menu_kb(uid=None):
     # Stok Sekarang & Upload Sekarang (like brutal_bot)
     rows.append([InlineKeyboardButton("🎬 Stok Sekarang", callback_data="stok_now_choose"),
                  InlineKeyboardButton("📤 Upload Sekarang", callback_data="upload_now_choose")])
+    rows.append([InlineKeyboardButton("🎵 Mute+MP3 Stok", callback_data="mp3_choose")])
 
     # Stop buttons when tasks are running
+    is_mp3 = bool(uid and active_mp3_task.get(uid))
     if is_gen:
         rows.append([InlineKeyboardButton("⏹ Stop Generate", callback_data="stop_gen")])
     if is_upload:
         rows.append([InlineKeyboardButton("⏹ Stop Upload", callback_data="stop_upload")])
+    if is_mp3:
+        rows.append([InlineKeyboardButton("⏹ Stop Mute+MP3", callback_data="stop_mp3")])
 
     rows.append([InlineKeyboardButton("Settings", callback_data="settings_menu")])
     rows.append([InlineKeyboardButton(
@@ -872,32 +917,108 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── UPLOAD NOW (per UD) ──
     if data.startswith("upload_ud_"):
         ud_num = int(data.split("_")[-1])
+        if active_upload_task.get(uid):
+            await q.edit_message_text("Upload sudah berjalan!", reply_markup=main_menu_kb(uid)); return
         db = load_db()
         cfg = get_ud_config(db, ud_num)
         stok_files = list_stok(ud_num)[:cfg.get("batch_size", 30)]
         if not stok_files:
             await q.edit_message_text(f"Stok UD {ud_num} kosong!", reply_markup=main_menu_kb(uid)); return
+
+        tiktok_ud = cfg.get("tiktok_ud", "")
+        tiktok_port = cfg.get("tiktok_port", "")
+        if not tiktok_ud or not tiktok_port:
+            await q.edit_message_text(
+                f"UD {ud_num}: TikTok UD/Port belum diset!\n"
+                f"Gunakan:\n<code>/set tiktok_ud {ud_num} PATH</code>\n<code>/set tiktok_port {ud_num} PORT</code>",
+                parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+
         stop_evt = threading.Event()
         interval_hours = cfg.get("interval_hours", 5)
         start_dt = datetime.now() + timedelta(minutes=60)
         start_dt = start_dt.replace(second=0, microsecond=0)
         schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
         save_ud_schedule(ud_num, schedule)
-        def _upload():
-            def lg(m): pass
-            cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
-            uploaded = upload_tiktok_batch(ud_num, schedule, cfg, lg, stop_evt)
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(chat_id, f"Upload UD {ud_num} selesai! {uploaded}/{len(schedule)}"), main_loop)
-        t = threading.Thread(target=_upload, daemon=True); t.start()
-        preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule))
-        full_text = f"<b>Upload UD {ud_num}</b>\n{len(schedule)} video, interval {interval_hours}h\n\n{preview}"
-        if len(full_text) <= 4096:
-            await q.edit_message_text(full_text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
-        else:
-            await q.edit_message_text(full_text[:4096], parse_mode=ParseMode.HTML)
-            for cs in range(4096, len(full_text), 4096):
-                await bot.send_message(chat_id, full_text[cs:cs+4096], parse_mode=ParseMode.HTML)
+
+        initial_msg = await q.edit_message_text(
+            f"<b>📤 Upload UD {ud_num}</b>\n"
+            f"Total: {len(schedule)} video, interval {interval_hours}h\n"
+            f"Memulai upload...",
+            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+        upload_msg_id = initial_msg.message_id
+
+        log_lines_uud = []; log_lock_uud = threading.Lock()
+        upload_stats_uud = {"success": 0, "fail": 0, "current": 0, "total": len(schedule)}
+
+        def _uud_log_updater():
+            last_text = ""
+            while not stop_evt.is_set():
+                time.sleep(4.0)
+                with log_lock_uud:
+                    if not log_lines_uud: continue
+                    st = upload_stats_uud
+                    header = (
+                        f"<b>📤 [UD {ud_num}] Upload TikTok</b>\n"
+                        f"Video: <b>{st['current']}/{st['total']}</b>\n"
+                        f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n")
+                    text = header + "\n".join(log_lines_uud[-12:])
+                if text != last_text:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            bot.edit_message_text(text, chat_id=chat_id, message_id=upload_msg_id,
+                                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                            main_loop)
+                        future.result(timeout=5)
+                        last_text = text
+                    except: pass
+        threading.Thread(target=_uud_log_updater, daemon=True).start()
+
+        def _upload_ud():
+            import html as _html
+            def lg(m):
+                s = _html.escape(str(m))
+                with log_lock_uud:
+                    log_lines_uud.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                    if len(log_lines_uud) > 20: log_lines_uud.pop(0)
+                    # Track success/fail from log messages
+                    if '✅ Upload sukses' in m or '✅' in m and 'sukses' in m:
+                        upload_stats_uud["success"] += 1
+                    if 'Upload:' in m or ('Upload' in m and '/' in m):
+                        # Extract current video number from [X/Y] pattern
+                        import re as _re
+                        match = _re.search(r'\[(\d+)/\d+\]', m)
+                        if match:
+                            upload_stats_uud["current"] = int(match.group(1))
+            try:
+                cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
+                uploaded = upload_tiktok_batch(ud_num, schedule, cfg, lg, stop_evt)
+                upload_stats_uud["success"] = uploaded
+                upload_stats_uud["fail"] = upload_stats_uud["total"] - uploaded
+            except Exception as e:
+                lg(f"Error: {type(e).__name__}: {str(e)[:40]}")
+                uploaded = upload_stats_uud["success"]
+            finally:
+                stop_evt.set()
+                try:
+                    with log_lock_uud:
+                        st = upload_stats_uud
+                        final_text = (
+                            f"<b>📤 Upload UD {ud_num} Selesai!</b>\n\n"
+                            f"Video: <b>{st['total']}</b>\n"
+                            f"✅ Berhasil: <b>{st['success']}</b>\n"
+                            f"❌ Gagal: <b>{st['fail']}</b>\n"
+                            f"Sisa stok: <b>{count_stok(ud_num)}</b>\n\n" +
+                            "\n".join(log_lines_uud[-7:])
+                        )
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=upload_msg_id,
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop)
+                except: pass
+                active_upload_task.pop(uid, None)
+
+        t = threading.Thread(target=_upload_ud, daemon=True); t.start()
+        active_upload_task[uid] = {"stop": stop_evt, "thread": t}
         return
 
     # ── CLEAR STOK ──
@@ -1090,26 +1211,29 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
         save_ud_schedule(ud_num, schedule)
 
-        preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule[:20]))
-        if len(schedule) > 20:
-            preview += f"\n  ... +{len(schedule)-20} lagi"
-
         initial_msg = await q.edit_message_text(
             f"<b>📤 Upload UD {ud_num} Sekarang!</b>\n"
-            f"{len(schedule)} video, interval {interval_hours}h\n"
-            f"Mulai: <code>{start_dt.strftime('%H:%M')}</code>\n\n{preview}",
+            f"Total: {len(schedule)} video, interval {interval_hours}h\n"
+            f"Mulai: <code>{start_dt.strftime('%H:%M')}</code>\n\n"
+            f"Memulai upload...",
             parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
         upload_msg_id = initial_msg.message_id
 
         log_lines_ul = []; log_lock_ul = threading.Lock()
+        upload_stats_ul = {"success": 0, "fail": 0, "current": 0, "total": len(schedule)}
 
         def _upload_log_updater():
             last_text = ""
             while not stop_evt.is_set():
-                time.sleep(5.0)
+                time.sleep(4.0)
                 with log_lock_ul:
                     if not log_lines_ul: continue
-                    text = f"<b>📤 [UD {ud_num}] Upload TikTok</b>\n" + "\n".join(log_lines_ul[-15:])
+                    st = upload_stats_ul
+                    header = (
+                        f"<b>📤 [UD {ud_num}] Upload TikTok</b>\n"
+                        f"Video: <b>{st['current']}/{st['total']}</b>\n"
+                        f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n")
+                    text = header + "\n".join(log_lines_ul[-12:])
                 if text != last_text:
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -1128,20 +1252,32 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 with log_lock_ul:
                     log_lines_ul.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
                     if len(log_lines_ul) > 20: log_lines_ul.pop(0)
+                    # Track success/fail from log messages
+                    if '✅ Upload sukses' in m or ('✅' in m and 'sukses' in m):
+                        upload_stats_ul["success"] += 1
+                    if 'Upload:' in m or ('Upload' in m and '/' in m):
+                        import re as _re
+                        match = _re.search(r'\[(\d+)/\d+\]', m)
+                        if match:
+                            upload_stats_ul["current"] = int(match.group(1))
             try:
                 cfg["tiktok_ud"] = os.path.join(APP_DIR, "user_data", str(ud_num))
                 uploaded = upload_tiktok_batch(ud_num, schedule, cfg, lg, stop_evt)
+                upload_stats_ul["success"] = uploaded
+                upload_stats_ul["fail"] = upload_stats_ul["total"] - uploaded
             except Exception as e:
                 lg(f"Error: {type(e).__name__}: {str(e)[:40]}")
-                uploaded = 0
             finally:
                 stop_evt.set()
                 try:
                     with log_lock_ul:
+                        st = upload_stats_ul
                         final_text = (
-                            f"<b>📤 Upload UD {ud_num} Selesai!</b>\n"
-                            f"Uploaded: {uploaded}/{len(schedule)}\n"
-                            f"Sisa stok: {count_stok(ud_num)}\n\n" +
+                            f"<b>📤 Upload UD {ud_num} Selesai!</b>\n\n"
+                            f"Video: <b>{st['total']}</b>\n"
+                            f"✅ Berhasil: <b>{st['success']}</b>\n"
+                            f"❌ Gagal: <b>{st['fail']}</b>\n"
+                            f"Sisa stok: <b>{count_stok(ud_num)}</b>\n\n" +
                             "\n".join(log_lines_ul[-7:])
                         )
                     asyncio.run_coroutine_threadsafe(
@@ -1159,6 +1295,110 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         task = active_upload_task.get(uid)
         if task: task["stop"].set(); active_upload_task.pop(uid, None)
         await q.edit_message_text("<b>Upload dihentikan.</b>", parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
+
+    # ── MUTE + MP3 (choose UD) ──
+    if data == "mp3_choose":
+        if active_mp3_task.get(uid):
+            await q.edit_message_text("Proses Mute+MP3 sudah berjalan!", reply_markup=main_menu_kb(uid)); return
+        db = load_db()
+        active = db.get("active_ud", [1, 2])
+        rows = []
+        for ud in active:
+            stok = count_stok(ud)
+            rows.append([InlineKeyboardButton(
+                f"UD {ud} (Stok: {stok} video)",
+                callback_data=f"mp3_ud_{ud}")])
+        rows.append([InlineKeyboardButton("Kembali", callback_data="refresh")])
+        await q.edit_message_text(
+            "<b>🎵 Mute + Add MP3</b>\nPilih UD untuk mute & replace audio seluruh stok:",
+            parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows)); return
+
+    if data.startswith("mp3_ud_"):
+        ud_num = int(data.split("_")[-1])
+        if active_mp3_task.get(uid):
+            await q.edit_message_text("Proses Mute+MP3 sudah berjalan!", reply_markup=main_menu_kb(uid)); return
+        stok_files = list_stok(ud_num)
+        if not stok_files:
+            await q.edit_message_text(f"Stok UD {ud_num} kosong!", reply_markup=main_menu_kb(uid)); return
+
+        mp3_test = get_random_mp3()
+        mp3_info = f"MP3: <code>{escape_html(os.path.basename(mp3_test))}</code>" if mp3_test else "⚠️ Tidak ada MP3, video hanya dimute"
+
+        stop_evt = threading.Event()
+        initial_msg = await q.edit_message_text(
+            f"<b>🎵 Mute+MP3 UD {ud_num}</b>\n"
+            f"Total: {len(stok_files)} video\n"
+            f"{mp3_info}\n\nMemulai proses...",
+            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
+        msg_id = initial_msg.message_id
+
+        log_lines_mp3 = []; log_lock_mp3 = threading.Lock()
+
+        def _mp3_log_updater():
+            last_text = ""
+            while not stop_evt.is_set():
+                time.sleep(3.0)
+                with log_lock_mp3:
+                    if not log_lines_mp3: continue
+                    text = f"<b>🎵 [UD {ud_num}] Mute+MP3</b>\n" + "\n".join(log_lines_mp3[-15:])
+                if text != last_text:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
+                                                  parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                            main_loop)
+                        future.result(timeout=5)
+                        last_text = text
+                    except: pass
+        threading.Thread(target=_mp3_log_updater, daemon=True).start()
+
+        def _mp3_process():
+            import html as _html
+            success = 0; fail = 0; total = len(stok_files)
+            def lg(m):
+                s = _html.escape(str(m))
+                with log_lock_mp3:
+                    log_lines_mp3.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
+                    if len(log_lines_mp3) > 25: log_lines_mp3.pop(0)
+            try:
+                for idx, vpath in enumerate(stok_files):
+                    if stop_evt.is_set():
+                        lg("⏹ Dihentikan oleh user.")
+                        break
+                    fname = os.path.basename(vpath)
+                    lg(f"[{idx+1}/{total}] 🎬 {fname[:45]}")
+                    ok = _mute_and_add_mp3(vpath, log_fn=lg)
+                    if ok:
+                        success += 1
+                    else:
+                        fail += 1
+            except Exception as e:
+                lg(f"❌ Error: {type(e).__name__}: {str(e)[:60]}")
+            finally:
+                stop_evt.set()
+                try:
+                    with log_lock_mp3:
+                        final_text = (
+                            f"<b>🎵 Mute+MP3 UD {ud_num} Selesai!</b>\n"
+                            f"✅ Sukses: {success}/{total}\n"
+                            f"❌ Gagal: {fail}/{total}\n\n" +
+                            "\n".join(log_lines_mp3[-7:])
+                        )
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                              parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)),
+                        main_loop)
+                except: pass
+                active_mp3_task.pop(uid, None)
+
+        t = threading.Thread(target=_mp3_process, daemon=True); t.start()
+        active_mp3_task[uid] = {"stop": stop_evt, "thread": t}
+        return
+
+    if data == "stop_mp3":
+        task = active_mp3_task.get(uid)
+        if task: task["stop"].set(); active_mp3_task.pop(uid, None)
+        await q.edit_message_text("<b>Mute+MP3 dihentikan.</b>", parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid)); return
 
     # ── FULL AUTO ──
     if data == "start_auto":
