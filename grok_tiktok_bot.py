@@ -416,7 +416,7 @@ def main_menu_kb(uid=None):
     # Stok Sekarang & Upload Sekarang (like brutal_bot)
     rows.append([InlineKeyboardButton("🎬 Stok Sekarang", callback_data="stok_now_choose"),
                  InlineKeyboardButton("📤 Upload Sekarang", callback_data="upload_now_choose")])
-    rows.append([InlineKeyboardButton("🎵 Mute+MP3 Stok", callback_data="mp3_choose")])
+    rows.append([InlineKeyboardButton("🎵 Mute+MP3 (brutal_mp3)", callback_data="mp3_choose")])
 
     # Stop buttons when tasks are running
     is_mp3 = bool(uid and active_mp3_task.get(uid))
@@ -940,10 +940,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
         save_ud_schedule(ud_num, schedule)
 
+        # Build schedule preview
+        sched_preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule[:15]))
+        if len(schedule) > 15:
+            sched_preview += f"\n  ... +{len(schedule)-15} lagi"
+
         initial_msg = await q.edit_message_text(
             f"<b>📤 Upload UD {ud_num}</b>\n"
-            f"Total: {len(schedule)} video, interval {interval_hours}h\n"
-            f"Memulai upload...",
+            f"Total: {len(schedule)} video, interval {interval_hours}h\n\n"
+            f"<b>Jadwal:</b>\n{sched_preview}\n\n"
+            f"⏳ Memulai upload...",
             parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
         upload_msg_id = initial_msg.message_id
 
@@ -960,8 +966,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     header = (
                         f"<b>📤 [UD {ud_num}] Upload TikTok</b>\n"
                         f"Video: <b>{st['current']}/{st['total']}</b>\n"
-                        f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n")
-                    text = header + "\n".join(log_lines_uud[-12:])
+                        f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n"
+                        f"<b>Jadwal:</b>\n{sched_preview}\n\n"
+                        f"<b>Progress:</b>\n")
+                    text = header + "\n".join(log_lines_uud[-10:])
+                # Telegram limit: 4096 chars
+                if len(text) > 4096:
+                    text = text[:4090] + "\n..."
                 if text != last_text:
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -1211,11 +1222,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
         save_ud_schedule(ud_num, schedule)
 
+        # Build schedule preview
+        sched_preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule[:15]))
+        if len(schedule) > 15:
+            sched_preview += f"\n  ... +{len(schedule)-15} lagi"
+
         initial_msg = await q.edit_message_text(
             f"<b>📤 Upload UD {ud_num} Sekarang!</b>\n"
             f"Total: {len(schedule)} video, interval {interval_hours}h\n"
             f"Mulai: <code>{start_dt.strftime('%H:%M')}</code>\n\n"
-            f"Memulai upload...",
+            f"<b>Jadwal:</b>\n{sched_preview}\n\n"
+            f"⏳ Memulai upload...",
             parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
         upload_msg_id = initial_msg.message_id
 
@@ -1232,8 +1249,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     header = (
                         f"<b>📤 [UD {ud_num}] Upload TikTok</b>\n"
                         f"Video: <b>{st['current']}/{st['total']}</b>\n"
-                        f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n")
-                    text = header + "\n".join(log_lines_ul[-12:])
+                        f"✅ Berhasil: <b>{st['success']}</b> | ❌ Gagal: <b>{st['fail']}</b>\n\n"
+                        f"<b>Jadwal:</b>\n{sched_preview}\n\n"
+                        f"<b>Progress:</b>\n")
+                    text = header + "\n".join(log_lines_ul[-10:])
+                # Telegram limit: 4096 chars
+                if len(text) > 4096:
+                    text = text[:4090] + "\n..."
                 if text != last_text:
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -1302,6 +1324,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Proses Mute+MP3 sudah berjalan!", reply_markup=main_menu_kb(uid)); return
         db = load_db()
         active = db.get("active_ud", [1, 2])
+        # Count available MP3 in brutal_mp3
+        mp3_count = len([f for f in os.listdir(MP3_DIR) if f.lower().endswith('.mp3')]) if os.path.isdir(MP3_DIR) else 0
         rows = []
         for ud in active:
             stok = count_stok(ud)
@@ -1310,7 +1334,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"mp3_ud_{ud}")])
         rows.append([InlineKeyboardButton("Kembali", callback_data="refresh")])
         await q.edit_message_text(
-            "<b>🎵 Mute + Add MP3</b>\nPilih UD untuk mute & replace audio seluruh stok:",
+            f"<b>🎵 Mute + Add MP3</b>\n"
+            f"Sumber MP3: <code>brutal_mp3/</code> ({mp3_count} file)\n\n"
+            f"Pilih UD untuk mute & replace audio seluruh stok:",
             parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows)); return
 
     if data.startswith("mp3_ud_"):
@@ -1322,13 +1348,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"Stok UD {ud_num} kosong!", reply_markup=main_menu_kb(uid)); return
 
         mp3_test = get_random_mp3()
-        mp3_info = f"MP3: <code>{escape_html(os.path.basename(mp3_test))}</code>" if mp3_test else "⚠️ Tidak ada MP3, video hanya dimute"
+        mp3_count = len([f for f in os.listdir(MP3_DIR) if f.lower().endswith('.mp3')]) if os.path.isdir(MP3_DIR) else 0
+        if mp3_test:
+            mp3_info = f"Sumber: <code>brutal_mp3/</code> ({mp3_count} file)"
+        else:
+            mp3_info = "⚠️ Tidak ada MP3 di <code>brutal_mp3/</code>, video hanya dimute"
 
         stop_evt = threading.Event()
         initial_msg = await q.edit_message_text(
             f"<b>🎵 Mute+MP3 UD {ud_num}</b>\n"
             f"Total: {len(stok_files)} video\n"
-            f"{mp3_info}\n\nMemulai proses...",
+            f"{mp3_info}\n\n⏳ Memulai proses...",
             parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
         msg_id = initial_msg.message_id
 
