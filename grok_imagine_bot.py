@@ -189,7 +189,7 @@ def merge_video_pair(vid1: str, vid2: str, output_dir: str, log_fn=None):
 class GrokBrowserWorker:
     """One Chrome instance generating videos via grok_autoV2.js injection."""
 
-    def __init__(self, browser_id, port, user_data_dir, output_dir, log_fn, stop_event, file_lock, video_cfg):
+    def __init__(self, browser_id, port, user_data_dir, output_dir, log_fn, stop_event, file_lock, video_cfg, browser_states=None):
         self.bid = browser_id
         self.port = port
         self.user_data_dir = user_data_dir
@@ -201,6 +201,22 @@ class GrokBrowserWorker:
         self.driver = None
         self.generated = 0
         self.failed = 0
+        self.results = []  # List of successfully generated file paths
+        self._browser_states = browser_states  # Shared dict for live dashboard
+        self._update_state("idle", 0, "Menunggu...")
+
+    def _update_state(self, status, progress=0, message="", task_num=0, total_tasks=0):
+        """Update shared browser state for live dashboard."""
+        if self._browser_states is not None:
+            self._browser_states[self.bid] = {
+                "status": status,
+                "progress": progress,
+                "message": message,
+                "generated": self.generated,
+                "failed": self.failed,
+                "task_num": task_num,
+                "total_tasks": total_tasks,
+            }
 
     def log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -282,12 +298,14 @@ class GrokBrowserWorker:
         prefix = f"[#{gen_idx+1}]"
 
         # Navigate to /imagine
+        self._update_state("navigating", 0, "Membuka /imagine...")
         self.log(f"{prefix} 🌐 Membuka grok.com/imagine...")
         driver.get(GROK_URL)
         time.sleep(5)
         if self._stop.is_set(): return None
 
         # Inject JS
+        self._update_state("injecting", 5, "Inject JS...")
         if not self.inject_js(driver):
             self.log(f"{prefix} ❌ Gagal inject JS")
             return None
@@ -297,6 +315,7 @@ class GrokBrowserWorker:
         image_b64 = None
         image_name = "ref.jpg"
         if image_path and os.path.exists(image_path):
+            self._update_state("uploading", 8, f"Encoding {os.path.basename(image_path)[:20]}...")
             self.log(f"{prefix} 📷 Encoding: {os.path.basename(image_path)}")
             try:
                 image_b64 = image_to_base64(image_path)
@@ -307,6 +326,7 @@ class GrokBrowserWorker:
         if self._stop.is_set(): return None
 
         # Call __grokGenerate with configurable video settings
+        self._update_state("generating", 10, "Memulai generate...")
         self.log(f"{prefix} 🚀 Generate: {prompt_text[:60]}...")
         try:
             config_json = json.dumps({
@@ -365,15 +385,19 @@ class GrokBrowserWorker:
 
             if pct != last_pct:
                 last_pct = pct
+                self._update_state("generating", max(10, min(95, pct)), msg[:40])
                 self.log(f"{prefix} ⏳ {pct}% — {msg[:60]}")
 
             if status == "done":
+                self._update_state("downloading", 98, "Selesai! Downloading...")
                 self.log(f"{prefix} ✅ Generasi selesai!")
                 break
             elif status == "error":
+                self._update_state("error", 0, error or "Unknown error")
                 self.log(f"{prefix} ❌ Error: {error or 'Unknown'}")
                 return None
             elif status == "rate_limited":
+                self._update_state("rate_limited", 0, "Rate limited!")
                 self.log(f"{prefix} 🚫 RATE LIMIT!")
                 return "RATE_LIMITED"
             elif status == "cancelled":
@@ -381,6 +405,7 @@ class GrokBrowserWorker:
 
             time.sleep(2)
         else:
+            self._update_state("error", 0, "Timeout")
             self.log(f"{prefix} ❌ Timeout")
             return None
 
@@ -415,6 +440,7 @@ class GrokBrowserWorker:
 
         filename = self.get_next_filename(output_dir)
         save_path = os.path.join(output_dir, filename)
+        self._update_state("downloading", 98, "Downloading video...")
         self.log(f"{prefix} ⬇️ Downloading...")
 
         try:
@@ -484,9 +510,11 @@ class GrokBrowserWorker:
         for task_idx, (gen_num, prompt_text, image_path) in enumerate(tasks):
             if self._stop.is_set(): break
 
+            self._update_state("generating", 0, "Memulai...", task_idx + 1, len(tasks))
             result = self.do_single_generate(driver, gen_num, prompt_text, image_path, self.output_dir)
 
             if result == "RATE_LIMITED":
+                self._update_state("rate_limited", 0, "Menunggu 2 menit...", task_idx + 1, len(tasks))
                 self.log("🚫 Rate limit! Menunggu 2 menit...")
                 for _ in range(120):
                     if self._stop.is_set(): break
@@ -494,13 +522,17 @@ class GrokBrowserWorker:
                 if self._stop.is_set(): break
                 result = self.do_single_generate(driver, gen_num, prompt_text, image_path, self.output_dir)
                 if result == "RATE_LIMITED":
+                    self._update_state("error", 0, "Rate limit masih aktif")
                     self.log("🚫 Rate limit masih aktif. Stop browser ini.")
                     break
 
             if result and result != "RATE_LIMITED":
                 self.generated += 1
+                self.results.append(result)
+                self._update_state("success", 100, f"✅ Video #{self.generated}", task_idx + 1, len(tasks))
             else:
                 self.failed += 1
+                self._update_state("error", 0, "Gagal", task_idx + 1, len(tasks))
 
             # Delay between videos
             if task_idx < len(tasks) - 1 and not self._stop.is_set():
@@ -510,6 +542,7 @@ class GrokBrowserWorker:
                     time.sleep(1)
 
     def shutdown(self):
+        self._update_state("done", 100, f"Selesai: {self.generated} OK, {self.failed} gagal")
         self.log(f"🏁 B{self.bid+1} total: {self.generated} OK, {self.failed} gagal")
         try: self.driver.quit()
         except: pass
@@ -597,6 +630,94 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     generated_total = [0]
     failed_total = [0]
     merged_count = [0]
+    start_time = time.time()
+    browser_states = {}  # Shared dict: bid -> {status, progress, message, ...}
+    active_worker_list = []  # Reference to current workers for dashboard
+
+    def make_progress_bar(current, total, bar_length=15):
+        """Create a colorful gradient progress bar for Telegram."""
+        if total <= 0 or current <= 0:
+            pct = 0
+        else:
+            pct = min(100, int(current / total * 100))
+
+        filled = int(bar_length * pct / 100)
+        empty = bar_length - filled
+
+        # Gradient colors based on percentage
+        if pct < 25:
+            fill_char = "🟥"
+        elif pct < 50:
+            fill_char = "🟧"
+        elif pct < 75:
+            fill_char = "🟨"
+        else:
+            fill_char = "🟩"
+
+        bar = fill_char * filled + "⬜" * empty
+        return bar, pct
+
+    def make_mini_bar(current, total=100, length=8):
+        """Create a compact per-browser progress bar."""
+        if total <= 0 or current <= 0:
+            pct = 0
+        else:
+            pct = min(100, int(current / total * 100))
+        filled = int(length * pct / 100)
+        empty = length - filled
+        if pct < 25:
+            c = "🟥"
+        elif pct < 50:
+            c = "🟧"
+        elif pct < 75:
+            c = "🟨"
+        else:
+            c = "🟩"
+        return c * filled + "⬜" * empty, pct
+
+    def render_browser_panel():
+        """Render per-browser status panel."""
+        if not browser_states:
+            return ""
+        lines = []
+        status_icons = {
+            "idle": "⚪", "navigating": "🌐", "injecting": "💉",
+            "uploading": "📤", "generating": "🔄", "downloading": "⬇️",
+            "success": "✅", "error": "❌", "rate_limited": "🚫",
+            "done": "🏁",
+        }
+        for bid in sorted(browser_states.keys()):
+            st = browser_states[bid]
+            status = st.get("status", "idle")
+            pct = st.get("progress", 0)
+            msg = st.get("message", "")[:25]
+            gen = st.get("generated", 0)
+            fail = st.get("failed", 0)
+            task_n = st.get("task_num", 0)
+            task_t = st.get("total_tasks", 0)
+            icon = status_icons.get(status, "⚪")
+
+            bar, bar_pct = make_mini_bar(pct, 100, 8)
+
+            task_info = f"({task_n}/{task_t})" if task_t > 0 else ""
+            stat_str = f"✓{gen}" if gen > 0 else ""
+            if fail > 0:
+                stat_str += f" ✗{fail}"
+
+            lines.append(
+                f"{icon} <b>B{bid+1}</b> {bar} {bar_pct}% {stat_str} {task_info}"
+                f"\n     <i>{escape_html(msg)}</i>"
+            )
+        return "\n".join(lines)
+
+    def format_elapsed(seconds):
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h}j {m}m {s}d"
+        elif m > 0:
+            return f"{m}m {s}d"
+        return f"{s}d"
 
     def log_fn(msg, tag=None):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -617,13 +738,49 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     async def _live_log_updater():
         last_text = ""
         while not log_done.is_set():
+            elapsed = time.time() - start_time
+            elapsed_str = format_elapsed(elapsed)
+            gen = generated_total[0]
+            fail = failed_total[0]
+
+            # Overall progress bar
+            if not infinite and count > 0:
+                bar, pct = make_progress_bar(gen, count)
+                progress_line = f"{bar} <b>{pct}%</b>"
+                counter_line = f"📊 <b>{gen}</b>/{count} video"
+            else:
+                spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+                spin_idx = int(elapsed) % len(spinner)
+                progress_line = f"🟩🟩🟩 <b>♾️ INFINITE</b> 🟩🟩🟩"
+                counter_line = f"📊 <b>{gen}</b> video <code>{spinner[spin_idx]}</code>"
+
+            # Speed
+            if elapsed > 10 and gen > 0:
+                speed = gen / (elapsed / 60)
+                speed_str = f"⚡ {speed:.1f} vid/min"
+            else:
+                speed_str = "⚡ --"
+
+            # Per-browser panel
+            browser_panel = render_browser_panel()
+
             with log_lock:
-                body = "\n".join(log_lines[-20:]) if log_lines else "<i>Menunggu...</i>"
+                body = "\n".join(log_lines[-8:]) if log_lines else "<i>Menunggu...</i>"
+
             text = (
-                f"📋 <b>Live Log (Multi-Browser)</b>\n"
-                f"✅ {generated_total[0]}/{target_str} | ❌ {failed_total[0]} | 🎬 Merged: {merged_count[0]}\n\n"
-                f"{body}"
+                f"📋 <b>Grok Imagine — Live Dashboard</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{progress_line}\n"
+                f"{counter_line}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Berhasil: <b>{gen}</b>  ❌ Gagal: <b>{fail}</b>\n"
+                f"🎬 Merged: <b>{merged_count[0]}</b>  ⏱ {elapsed_str}\n"
+                f"{speed_str}\n"
             )
+            if browser_panel:
+                text += f"━━━━━━━━━━━━━━━━━━━━\n🖥 <b>Browser Status:</b>\n{browser_panel}\n"
+            text += f"━━━━━━━━━━━━━━━━━━━━\n{body}"
+
             if text != last_text and log_msg_id:
                 try:
                     await bot.edit_message_text(
@@ -632,20 +789,44 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                     last_text = text
                 except: pass
             await asyncio.sleep(3)
-        # Final update
+
+        # ── Final update ──
+        elapsed = time.time() - start_time
+        elapsed_str = format_elapsed(elapsed)
+        gen = generated_total[0]
+        fail = failed_total[0]
+
+        if not infinite and count > 0:
+            bar, pct = make_progress_bar(gen, count)
+            progress_line = f"{bar} <b>{pct}%</b>"
+        else:
+            progress_line = f"🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩 <b>DONE</b>"
+
+        browser_panel = render_browser_panel()
         with log_lock:
-            body = "\n".join(log_lines[-25:]) if log_lines else ""
+            body = "\n".join(log_lines[-10:]) if log_lines else ""
+
         try:
+            final = (
+                f"🏁 <b>Grok Imagine — Selesai!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{progress_line}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Berhasil: <b>{gen}</b>  ❌ Gagal: <b>{fail}</b>\n"
+                f"🎬 Merged: <b>{merged_count[0]}</b>  ⏱ Total: {elapsed_str}\n"
+            )
+            if browser_panel:
+                final += f"━━━━━━━━━━━━━━━━━━━━\n🖥 <b>Browser Final:</b>\n{browser_panel}\n"
+            final += f"━━━━━━━━━━━━━━━━━━━━\n{body}"
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=log_msg_id,
-                text=f"📋 <b>Log Selesai</b>\n✅ {generated_total[0]}/{target_str} | ❌ {failed_total[0]} | 🎬 Merged: {merged_count[0]}\n\n{body}"[:4096],
-                parse_mode=ParseMode.HTML)
+                text=final[:4096], parse_mode=ParseMode.HTML)
         except: pass
 
     log_task = asyncio.run_coroutine_threadsafe(_live_log_updater(), main_loop)
 
     # ── Main multi-browser loop ──
-    all_generated_files = []
+    raw_pool = []  # Only freshly generated files from this session
     file_lock = threading.Lock()
 
     try:
@@ -688,7 +869,7 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
 
                 worker = GrokBrowserWorker(
                     b, port, ud_dir, OUTPUT_DIR, log_fn,
-                    stop_event, file_lock, video_cfg)
+                    stop_event, file_lock, video_cfg, browser_states)
                 if worker.start():
                     workers.append(worker)
                     log_fn(f"✅ Browser {b+1} terhubung (port {port})")
@@ -730,6 +911,11 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
             for t in threads:
                 t.join()
 
+            # Collect generated files from workers (raw pool)
+            round_raw = []
+            for w in workers:
+                round_raw.extend(w.results)
+
             # Shutdown browsers
             for w in workers:
                 try: w.shutdown()
@@ -746,23 +932,21 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                 log_fn("⚠️ Tidak ada video berhasil round ini.")
                 break
 
-            # Collect generated files
-            new_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "*.mp4")), key=os.path.getmtime)
-            for nf in new_files:
-                if nf not in all_generated_files:
-                    all_generated_files.append(nf)
+            # Add this round's files to raw pool
+            raw_pool.extend(round_raw)
 
-            # Process merge + send
+            # Process merge + send from raw pool only
             if merge_enabled:
-                while len(all_generated_files) >= 2 and not stop_event.is_set():
-                    vid_a = all_generated_files.pop(0)
-                    vid_b = all_generated_files.pop(0)
+                while len(raw_pool) >= 2 and not stop_event.is_set():
+                    vid_a = raw_pool.pop(0)
+                    vid_b = raw_pool.pop(0)
                     if not os.path.exists(vid_a) or not os.path.exists(vid_b):
                         continue
                     merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
                     if merged_path:
                         merged_count[0] += 1
                         send_video_tg(merged_path)
+                        # Delete raw source files after merge
                         for _vp in (vid_a, vid_b):
                             try:
                                 if os.path.exists(_vp): os.remove(_vp)
@@ -773,10 +957,10 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                         send_video_tg(vid_a)
                         send_video_tg(vid_b)
             else:
-                for vf in list(all_generated_files):
+                for vf in list(raw_pool):
                     if os.path.exists(vf):
                         send_video_tg(vf)
-                all_generated_files.clear()
+                raw_pool.clear()
 
             if stop_event.is_set(): break
             if infinite:
@@ -789,13 +973,13 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
         log_done.set()
         time.sleep(2)
 
-    # Send remaining buffer
-    if merge_enabled and all_generated_files:
-        send(f"📬 Sisa {len(all_generated_files)} video di buffer, dikirim tanpa merge")
-        for vp in all_generated_files:
+    # Send remaining raw pool buffer
+    if merge_enabled and raw_pool:
+        send(f"📬 Sisa {len(raw_pool)} video di buffer, dikirim tanpa merge")
+        for vp in raw_pool:
             if os.path.exists(vp):
                 send_video_tg(vp)
-        all_generated_files.clear()
+        raw_pool.clear()
 
     merge_info = f"\n🎬 Merged: <b>{merged_count[0]}</b> video" if merge_enabled else ""
     send(
