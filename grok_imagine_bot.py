@@ -138,10 +138,36 @@ def image_to_base64(path):
     return f"data:{mime};base64,{b64}"
 
 # ═══════════════════════════════════════════════════════════════
-#  VIDEO MERGE (FFmpeg concat)
+#  VIDEO MERGE (FFmpeg re-encode for reliability)
 # ═══════════════════════════════════════════════════════════════
+def _validate_video(path, log_fn=None):
+    """Check if a video file is valid using ffprobe. Returns True if OK."""
+    if not os.path.exists(path) or os.path.getsize(path) < 50000:
+        return False
+    try:
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=width,height,duration",
+               "-of", "csv=p=0", path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            if log_fn: log_fn(f"⚠️ Video rusak: {os.path.basename(path)}")
+            return False
+        return True
+    except Exception:
+        return True  # If ffprobe not found, assume OK
+
 def merge_video_pair(vid1: str, vid2: str, output_dir: str, log_fn=None):
+    """Merge 2 videos using ffmpeg re-encode (reliable, no corrupt output)."""
     os.makedirs(output_dir, exist_ok=True)
+
+    # Validate inputs first
+    if not _validate_video(vid1, log_fn):
+        if log_fn: log_fn(f"⚠️ Skip merge: {os.path.basename(vid1)} rusak/kosong")
+        return None
+    if not _validate_video(vid2, log_fn):
+        if log_fn: log_fn(f"⚠️ Skip merge: {os.path.basename(vid2)} rusak/kosong")
+        return None
+
     existing = glob.glob(os.path.join(output_dir, "*.mp4"))
     existing_nums = []
     for f in existing:
@@ -151,37 +177,73 @@ def merge_video_pair(vid1: str, vid2: str, output_dir: str, log_fn=None):
     next_num = (max(existing_nums) + 1) if existing_nums else 1
     out_name = f"{next_num}.mp4"
     out_path = os.path.join(output_dir, out_name)
-    list_file = os.path.join(output_dir, f"_merge_list_{next_num}.txt")
+
+    if log_fn:
+        log_fn(f"🎬 Merge: {os.path.basename(vid1)} + {os.path.basename(vid2)} → {out_name}")
+
     try:
-        with open(list_file, "w", encoding="utf-8") as lf:
-            lf.write(f"file '{vid1}'\n")
-            lf.write(f"file '{vid2}'\n")
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out_path]
-        if log_fn:
-            log_fn(f"🎬 Merge: {os.path.basename(vid1)} + {os.path.basename(vid2)} → {out_name}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            if log_fn:
+        # Use concat filter (re-encode) for reliability. This handles
+        # different codecs, resolutions, and timestamps properly.
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", vid1,
+            "-i", vid2,
+            "-filter_complex", "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]",
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            out_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
+        if result.returncode != 0:
+            # Fallback: try without audio in case one video has no audio
+            if log_fn: log_fn("⚠️ Retry merge tanpa audio...")
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-i", vid1,
+                "-i", vid2,
+                "-filter_complex", "[0:v:0][1:v:0]concat=n=2:v=1:a=0[outv]",
+                "-map", "[outv]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-movflags", "+faststart",
+                "-an",
+                out_path
+            ]
+            result = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=180)
+
+        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 50000:
+            # Validate the output
+            if _validate_video(out_path, log_fn):
                 sz = os.path.getsize(out_path) / (1024 * 1024)
-                log_fn(f"✅ Merged: {out_name} ({sz:.1f} MB)")
-            return out_path
+                if log_fn: log_fn(f"✅ Merged: {out_name} ({sz:.1f} MB)")
+                return out_path
+            else:
+                if log_fn: log_fn(f"❌ Merged file rusak, hapus")
+                try: os.remove(out_path)
+                except: pass
+                return None
         else:
-            if log_fn:
-                log_fn(f"❌ Merge gagal: {result.stderr[-200:] if result.stderr else 'unknown'}")
+            err = result.stderr[-200:] if result.stderr else 'unknown'
+            if log_fn: log_fn(f"❌ Merge gagal: {err}")
+            try: os.remove(out_path)
+            except: pass
             return None
+
     except FileNotFoundError:
         if log_fn: log_fn("❌ FFmpeg tidak ditemukan!")
         return None
     except subprocess.TimeoutExpired:
-        if log_fn: log_fn("⚠️ FFmpeg merge timeout (120s)")
+        if log_fn: log_fn("⚠️ FFmpeg merge timeout (180s)")
+        try: os.remove(out_path)
+        except: pass
         return None
     except Exception as e:
         if log_fn: log_fn(f"❌ Error merge: {str(e)[:100]}")
+        try: os.remove(out_path)
+        except: pass
         return None
-    finally:
-        if os.path.exists(list_file):
-            try: os.remove(list_file)
-            except: pass
 
 # ═══════════════════════════════════════════════════════════════
 #  MULTI-BROWSER GROK WORKER (uses grok_autoV2.js)
@@ -566,17 +628,38 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
             bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
 
     def send_video_tg(path):
+        """Send video to Telegram, then delete the file."""
         async def _send():
             try:
-                with open(path, 'rb') as vf:
-                    await bot.send_video(chat_id, video=vf,
-                                         caption=f"🎬 Video dari folder <b>{escape_html(folder_name)}</b>",
-                                         parse_mode=ParseMode.HTML,
-                                         supports_streaming=True)
+                # Validate before sending
+                if not os.path.exists(path):
+                    return
+                fsize = os.path.getsize(path)
+                if fsize < 50000:
+                    log_fn(f"⚠️ File terlalu kecil, skip: {os.path.basename(path)}")
+                    try: os.remove(path)
+                    except: pass
+                    return
+                if fsize > 50 * 1024 * 1024:  # > 50MB
+                    log_fn(f"⚠️ File terlalu besar ({fsize/1024/1024:.0f}MB), kirim sebagai document")
+                    with open(path, 'rb') as vf:
+                        await bot.send_document(chat_id, document=vf,
+                                                caption=f"🎬 Video dari <b>{escape_html(folder_name)}</b> ({fsize/1024/1024:.1f}MB)",
+                                                parse_mode=ParseMode.HTML)
+                else:
+                    with open(path, 'rb') as vf:
+                        await bot.send_video(chat_id, video=vf,
+                                             caption=f"🎬 Video dari <b>{escape_html(folder_name)}</b>",
+                                             parse_mode=ParseMode.HTML,
+                                             supports_streaming=True,
+                                             read_timeout=120,
+                                             write_timeout=120)
+                # Delete after successful send
                 try:
                     if os.path.exists(path): os.remove(path)
                 except: pass
-            except Exception: pass
+            except Exception as e:
+                log_fn(f"⚠️ Gagal kirim {os.path.basename(path)}: {str(e)[:60]}")
         asyncio.run_coroutine_threadsafe(_send(), main_loop)
 
     prompts = load_prompts()
@@ -940,8 +1023,33 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                 while len(raw_pool) >= 2 and not stop_event.is_set():
                     vid_a = raw_pool.pop(0)
                     vid_b = raw_pool.pop(0)
-                    if not os.path.exists(vid_a) or not os.path.exists(vid_b):
+
+                    # Validate both files exist and are not corrupt
+                    a_ok = os.path.exists(vid_a) and os.path.getsize(vid_a) > 50000
+                    b_ok = os.path.exists(vid_b) and os.path.getsize(vid_b) > 50000
+
+                    if not a_ok and not b_ok:
+                        log_fn("⚠️ Kedua video rusak, skip")
+                        for _vp in (vid_a, vid_b):
+                            try:
+                                if os.path.exists(_vp): os.remove(_vp)
+                            except: pass
                         continue
+                    if not a_ok:
+                        log_fn(f"⚠️ {os.path.basename(vid_a)} rusak, kirim {os.path.basename(vid_b)} saja")
+                        try:
+                            if os.path.exists(vid_a): os.remove(vid_a)
+                        except: pass
+                        send_video_tg(vid_b)
+                        continue
+                    if not b_ok:
+                        log_fn(f"⚠️ {os.path.basename(vid_b)} rusak, kirim {os.path.basename(vid_a)} saja")
+                        try:
+                            if os.path.exists(vid_b): os.remove(vid_b)
+                        except: pass
+                        send_video_tg(vid_a)
+                        continue
+
                     merged_path = merge_video_pair(vid_a, vid_b, MERGED_DIR, log_fn)
                     if merged_path:
                         merged_count[0] += 1
@@ -956,10 +1064,17 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                         log_fn("⚠️ Merge gagal, kirim terpisah")
                         send_video_tg(vid_a)
                         send_video_tg(vid_b)
+                    time.sleep(0.5)  # Small delay between sends
             else:
                 for vf in list(raw_pool):
-                    if os.path.exists(vf):
+                    if os.path.exists(vf) and os.path.getsize(vf) > 50000:
                         send_video_tg(vf)
+                    else:
+                        # Remove corrupt/small files silently
+                        try:
+                            if os.path.exists(vf): os.remove(vf)
+                        except: pass
+                    time.sleep(0.5)  # Small delay between sends
                 raw_pool.clear()
 
             if stop_event.is_set(): break
