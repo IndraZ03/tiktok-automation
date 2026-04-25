@@ -34,13 +34,13 @@ BOT_TOKEN = "8522516359:AAGrXXryDQVv5kC4twE28mcIOlVlSfSWqv0"
 ALLOWED_USER_IDS = []
 
 # ── Multi-browser Grok config ──
-GROK_PORTS = [9220, 9221, 9222, 9223, 9224, 9225]  # 6 ports
+GROK_PORTS = [9231, 9232, 9233, 9234, 9235]  # 5 ports
 GROK_USER_DATA_DIRS = [
-    os.path.join(USER_DATA_BASE, "1grok"),
-    os.path.join(USER_DATA_BASE, "2grok"),
-    os.path.join(USER_DATA_BASE, "3grok"),
-    os.path.join(USER_DATA_BASE, "4grok"),
-    os.path.join(USER_DATA_BASE, "5grok"),
+    os.path.join(USER_DATA_BASE, "1groktiktok"),
+    os.path.join(USER_DATA_BASE, "2groktiktok"),
+    os.path.join(USER_DATA_BASE, "3groktiktok"),
+    os.path.join(USER_DATA_BASE, "4groktiktok"),
+    os.path.join(USER_DATA_BASE, "5groktiktok"),
 ]
 N_GROK_BROWSERS = len(GROK_USER_DATA_DIRS)  # 5
 
