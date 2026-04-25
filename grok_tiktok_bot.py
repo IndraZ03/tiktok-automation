@@ -1,8 +1,10 @@
 """
-Grok TikTok Bot — Per-UD Grok 20s Video Generation + TikTok Schedule Upload
-Setiap UD punya: prompt, bahan, stok, hashtag, produk, sound, deskripsi, interval, schedule
+Grok TikTok Bot — Multi-Browser Grok Video Generation + TikTok Schedule Upload
+Uses grok_autoV2.js for generation with 5 parallel browsers (ports 9220-9225).
+User-data-dirs: 1grok, 2grok, 3grok, 4grok, 5grok.
+Default video: Video mode, 720p, 10s, 9:16.
 """
-import os, sys, re, time, asyncio, json, threading, random, logging
+import os, sys, re, time, asyncio, json, threading, random, logging, glob, shutil, base64, queue
 from datetime import datetime, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,8 +17,9 @@ from gtt_core import (
     load_db, save_db, get_ud_config, stok_dir, count_stok, list_stok,
     load_ud_schedule, save_ud_schedule,
     load_prompts, save_prompts, list_bahan_folders, list_bahan_images,
-    escape_html, generate_stok_for_ud, build_tiktok_schedule, upload_tiktok_batch,
+    escape_html, build_tiktok_schedule, upload_tiktok_batch,
     resolve_ud_path, GrokRateLimitError, merge_video_pair,
+    get_random_bahan_image,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +30,26 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 BOT_TOKEN = "8522516359:AAGrXXryDQVv5kC4twE28mcIOlVlSfSWqv0"
 ALLOWED_USER_IDS = []
+
+# ── Multi-browser Grok config ──
+GROK_PORTS = [9220, 9221, 9222, 9223, 9224, 9225]  # 6 ports
+GROK_USER_DATA_DIRS = [
+    os.path.join(USER_DATA_BASE, "1grok"),
+    os.path.join(USER_DATA_BASE, "2grok"),
+    os.path.join(USER_DATA_BASE, "3grok"),
+    os.path.join(USER_DATA_BASE, "4grok"),
+    os.path.join(USER_DATA_BASE, "5grok"),
+]
+N_GROK_BROWSERS = len(GROK_USER_DATA_DIRS)  # 5
+
+GROK_URL = "https://grok.com/imagine"
+JS_FILE = os.path.join(APP_DIR, "grok_autoV2.js")
+
+# ── Default video settings ──
+DEFAULT_GEN_MODE = "Video"
+DEFAULT_RESOLUTION = "720p"
+DEFAULT_DURATION = "10s"
+DEFAULT_ASPECT_RATIO = "9:16"
 
 # ═══════════════════════════════════════════════════════════════
 #  STATE
@@ -105,7 +128,6 @@ def custom_merge_video_pair(vid1, vid2, output_dir, log_fn=None):
 
 def merge_leftover_raw(ud_num, log_fn=None):
     """Merge leftover raw videos for this UD."""
-    import glob, shutil
     raw_dir = get_raw_dir(ud_num)
     if not os.path.isdir(raw_dir):
         return []
@@ -133,11 +155,489 @@ def merge_leftover_raw(ud_num, log_fn=None):
     return merged
 
 # ═══════════════════════════════════════════════════════════════
+#  MULTI-BROWSER GROK GENERATION ENGINE (uses grok_autoV2.js)
+# ═══════════════════════════════════════════════════════════════
+
+try:
+    import requests
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_OK = True
+except ImportError:
+    SELENIUM_OK = False
+
+def image_to_base64(path):
+    """Convert image file to base64 data URL."""
+    with open(path, "rb") as f:
+        data = f.read()
+    b64 = base64.b64encode(data).decode("utf-8")
+    ext = os.path.splitext(path)[1].lower()
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "webp": "image/webp", "bmp": "image/bmp"}.get(ext.lstrip("."), "image/jpeg")
+    return f"data:{mime};base64,{b64}"
+
+
+class GrokBrowserWorker:
+    """One Chrome instance generating videos via grok_autoV2.js injection."""
+
+    def __init__(self, browser_id, port, user_data_dir, output_dir, log_fn, stop_event, file_lock):
+        self.bid = browser_id
+        self.port = port
+        self.user_data_dir = user_data_dir
+        self.output_dir = output_dir
+        self.log_fn = log_fn
+        self._stop = stop_event
+        self._file_lock = file_lock
+        self.driver = None
+        self.generated = 0
+        self.failed = 0
+
+    def log(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_fn(f"[{ts}] [B{self.bid+1}] {msg}")
+
+    def get_next_filename(self, folder):
+        with self._file_lock:
+            files = glob.glob(os.path.join(folder, "*.mp4"))
+            pat = re.compile(r'(\d+)\.mp4')
+            max_n = 0
+            for f in files:
+                m = pat.fullmatch(os.path.basename(f))
+                if m: max_n = max(max_n, int(m.group(1)))
+            return f"{max_n + 1}.mp4"
+
+    def open_chrome(self):
+        self.log(f"Membuka Chrome port={self.port}...")
+        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        cmd = [chrome,
+               f"--remote-debugging-port={self.port}",
+               f"--user-data-dir={self.user_data_dir}",
+               "--headless=new",
+               "--no-first-run", "--no-default-browser-check",
+               GROK_URL]
+        import subprocess
+        subprocess.Popen(cmd)
+        time.sleep(6)
+
+    def kill_chrome(self):
+        try:
+            import subprocess
+            res = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10)
+            pids = set()
+            for line in res.stdout.splitlines():
+                if f":{self.port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    if parts: pids.add(parts[-1])
+            for pid in pids:
+                subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, timeout=5)
+                self.log(f"Chrome PID {pid} dimatikan ✓")
+        except Exception as e:
+            self.log(f"Gagal matikan Chrome: {e}")
+
+    def connect_selenium(self):
+        opts = Options()
+        opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.port}")
+        try:
+            svc = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=svc, options=opts)
+            os.makedirs(self.output_dir, exist_ok=True)
+            driver.execute_cdp_cmd("Page.setDownloadBehavior",
+                                   {"behavior": "allow", "downloadPath": self.output_dir})
+            self.log(f"Selenium terhubung ✓ (port {self.port})")
+            return driver
+        except Exception as e:
+            self.log(f"Gagal connect Selenium: {e}")
+            return None
+
+    def inject_js(self, driver):
+        if not os.path.exists(JS_FILE):
+            self.log(f"❌ File JS tidak ditemukan: {JS_FILE}")
+            return False
+        try:
+            with open(JS_FILE, "r", encoding="utf-8") as f:
+                js_code = f.read()
+            driver.execute_script(js_code)
+            time.sleep(1)
+            ready = driver.execute_script("return typeof window.__grokGenerate === 'function';")
+            if ready:
+                self.log("✅ grok_autoV2.js di-inject")
+                return True
+            else:
+                self.log("⚠️ JS inject tapi __grokGenerate tidak tersedia")
+                return False
+        except Exception as e:
+            self.log(f"❌ Gagal inject JS: {e}")
+            return False
+
+    def do_single_generate(self, driver, gen_idx, prompt_text, image_path, output_dir):
+        """Generate a single video. Returns file path, 'RATE_LIMITED', or None."""
+        prefix = f"[#{gen_idx+1}]"
+
+        # Navigate to /imagine
+        self.log(f"{prefix} 🌐 Membuka grok.com/imagine...")
+        driver.get(GROK_URL)
+        time.sleep(5)
+        if self._stop.is_set(): return None
+
+        # Inject JS
+        if not self.inject_js(driver):
+            self.log(f"{prefix} ❌ Gagal inject JS")
+            return None
+        if self._stop.is_set(): return None
+
+        # Prepare image
+        image_b64 = None
+        image_name = "ref.jpg"
+        if image_path and os.path.exists(image_path):
+            self.log(f"{prefix} 📷 Encoding: {os.path.basename(image_path)}")
+            try:
+                image_b64 = image_to_base64(image_path)
+                image_name = os.path.basename(image_path)
+            except Exception as e:
+                self.log(f"{prefix} ⚠️ Gagal encode gambar: {e}")
+                image_b64 = None
+        if self._stop.is_set(): return None
+
+        # Call __grokGenerate
+        self.log(f"{prefix} 🚀 Generate: {prompt_text[:60]}...")
+        try:
+            config_json = json.dumps({
+                "prompt": prompt_text,
+                "mode": "video",
+                "image": image_b64,
+                "imageName": image_name,
+                "timeout": 600000,
+                "upscale": False,
+                "useImageRef": True if image_b64 else False,
+                "genMode": DEFAULT_GEN_MODE,
+                "resolution": DEFAULT_RESOLUTION,
+                "duration": DEFAULT_DURATION,
+                "aspectRatio": DEFAULT_ASPECT_RATIO,
+            })
+            driver.execute_script(f"""
+                (async function() {{
+                    try {{
+                        await window.__grokGenerate({config_json});
+                    }} catch(e) {{
+                        window.__GROK_AUTO.status = 'error';
+                        window.__GROK_AUTO.error = e.message;
+                    }}
+                }})();
+            """)
+        except Exception as e:
+            self.log(f"{prefix} ❌ Gagal __grokGenerate: {e}")
+            return None
+
+        # Poll progress
+        poll_start = time.time()
+        poll_timeout = 660
+        last_pct = -1
+        last_msg = ""
+
+        while time.time() - poll_start < poll_timeout:
+            if self._stop.is_set():
+                try: driver.execute_script("window.__grokCancel();")
+                except: pass
+                return None
+
+            try:
+                state = driver.execute_script("return window.__grokGetState();")
+            except Exception:
+                time.sleep(2)
+                continue
+
+            if not state:
+                time.sleep(1)
+                continue
+
+            status = state.get("status", "idle")
+            pct = state.get("progress", 0)
+            msg = state.get("message", "")
+            error = state.get("error")
+
+            if pct != last_pct:
+                last_pct = pct
+                self.log(f"{prefix} ⏳ {pct}% — {msg[:60]}")
+
+            if status == "done":
+                self.log(f"{prefix} ✅ Generasi selesai!")
+                break
+            elif status == "error":
+                self.log(f"{prefix} ❌ Error: {error or 'Unknown'}")
+                return None
+            elif status == "rate_limited":
+                self.log(f"{prefix} 🚫 RATE LIMIT!")
+                return "RATE_LIMITED"
+            elif status == "cancelled":
+                return None
+
+            time.sleep(2)
+        else:
+            self.log(f"{prefix} ❌ Timeout")
+            return None
+
+        if self._stop.is_set(): return None
+
+        # Download video
+        try:
+            state = driver.execute_script("return window.__grokGetState();")
+            vid_url = state.get("videoUrl") if state else None
+        except:
+            vid_url = None
+
+        if not vid_url or not vid_url.startswith("https://"):
+            try:
+                vid_url = driver.execute_script("""
+                    const sd = document.querySelector('video#sd-video');
+                    if (sd && sd.src && sd.src.startsWith('https://')) return sd.src;
+                    const hd = document.querySelector('video#hd-video');
+                    if (hd && hd.src && hd.src.startsWith('https://')) return hd.src;
+                    for (const v of document.querySelectorAll('video')) {
+                        if (v.src && v.src.startsWith('https://') && v.src.includes('.mp4'))
+                            return v.src;
+                    }
+                    return null;
+                """)
+            except:
+                vid_url = None
+
+        if not vid_url or not vid_url.startswith("https://"):
+            self.log(f"{prefix} ❌ Video URL tidak ditemukan")
+            return None
+
+        filename = self.get_next_filename(output_dir)
+        save_path = os.path.join(output_dir, filename)
+        self.log(f"{prefix} ⬇️ Downloading...")
+
+        try:
+            cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+            headers = {
+                'User-Agent': driver.execute_script("return navigator.userAgent;"),
+                'Referer': 'https://grok.com/',
+            }
+            resp = requests.get(vid_url, headers=headers, cookies=cookies,
+                                stream=True, timeout=120)
+            if resp.status_code == 200:
+                size = 0
+                with open(save_path, 'wb') as f:
+                    for chunk in resp.iter_content(65536):
+                        if chunk:
+                            f.write(chunk)
+                            size += len(chunk)
+                if size > 50000:
+                    self.log(f"{prefix} ✅ {filename} ({size/1024/1024:.1f} MB)")
+                    return save_path
+                else:
+                    try: os.remove(save_path)
+                    except: pass
+        except Exception as e:
+            self.log(f"{prefix} ⚠️ Download error: {e}")
+
+        self.log(f"{prefix} ❌ Download gagal")
+        return None
+
+    def start(self):
+        """Launch Chrome and connect Selenium."""
+        self.open_chrome()
+        if self._stop.is_set(): return False
+        driver = self.connect_selenium()
+        if not driver:
+            return False
+        self.driver = driver
+        return True
+
+    def run_generate(self, tasks):
+        """
+        tasks = list of (gen_num, prompt_text, image_path)
+        Runs on self.driver.
+        """
+        driver = self.driver
+        delay = 5
+
+        for task_idx, (gen_num, prompt_text, image_path) in enumerate(tasks):
+            if self._stop.is_set(): break
+
+            result = self.do_single_generate(driver, gen_num, prompt_text, image_path, self.output_dir)
+
+            if result == "RATE_LIMITED":
+                self.log("🚫 Rate limit! Menunggu 2 menit...")
+                for _ in range(120):
+                    if self._stop.is_set(): break
+                    time.sleep(1)
+                if self._stop.is_set(): break
+                result = self.do_single_generate(driver, gen_num, prompt_text, image_path, self.output_dir)
+                if result == "RATE_LIMITED":
+                    self.log("🚫 Rate limit masih aktif. Stop browser ini.")
+                    break
+
+            if result and result != "RATE_LIMITED":
+                self.generated += 1
+            else:
+                self.failed += 1
+
+            # Delay between videos
+            if task_idx < len(tasks) - 1 and not self._stop.is_set():
+                self.log(f"⏳ Jeda {delay} detik...")
+                for _ in range(delay):
+                    if self._stop.is_set(): break
+                    time.sleep(1)
+
+    def shutdown(self):
+        self.log(f"🏁 B{self.bid+1} total: {self.generated} OK, {self.failed} gagal")
+        try: self.driver.quit()
+        except: pass
+        self.kill_chrome()
+
+
+def generate_stok_multibrowser(ud_num, needed, prompt_text, bahan_folder, log_fn, stop_event,
+                                raw_dir=None, merge_func=None):
+    """
+    Multi-browser Grok generation using grok_autoV2.js.
+    Launches up to 5 browsers (ports 9220-9224, user-data 1grok-5grok).
+    Each browser generates videos in parallel, results go to raw_dir,
+    then merge pairs into stok.
+    """
+    if not SELENIUM_OK:
+        log_fn("❌ Selenium tidak terinstall!")
+        return 0
+
+    if raw_dir is None:
+        raw_dir = get_raw_dir(ud_num)
+    out_dir = stok_dir(ud_num)
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Need 2 raw per merged video
+    raw_needed = needed * 2
+    file_lock = threading.Lock()
+
+    # Determine how many browsers to use (up to 5, but at most raw_needed)
+    n_browsers = min(N_GROK_BROWSERS, max(1, raw_needed))
+    log_fn(f"[UD {ud_num}] 🚀 Multi-browser: {n_browsers} browser, target {needed} merged ({raw_needed} raw)")
+
+    # Build task list
+    all_tasks = []
+    for vid_idx in range(raw_needed):
+        image_path = get_random_bahan_image(bahan_folder) if bahan_folder else None
+        all_tasks.append((vid_idx, prompt_text, image_path))
+
+    # Distribute tasks across browsers
+    browser_tasks = [[] for _ in range(n_browsers)]
+    base_count = raw_needed // n_browsers
+    remainder = raw_needed % n_browsers
+    idx = 0
+    for b in range(n_browsers):
+        count = base_count + (1 if b < remainder else 0)
+        browser_tasks[b] = all_tasks[idx:idx + count]
+        idx += count
+
+    # Launch browsers
+    workers = []
+    for b in range(n_browsers):
+        if stop_event.is_set(): break
+        port = GROK_PORTS[b]
+        ud_dir = GROK_USER_DATA_DIRS[b]
+        os.makedirs(ud_dir, exist_ok=True)
+
+        worker = GrokBrowserWorker(b, port, ud_dir, raw_dir, log_fn, stop_event, file_lock)
+        if worker.start():
+            workers.append(worker)
+            log_fn(f"✅ Browser {b+1} terhubung (port {port}, ud: {os.path.basename(ud_dir)})")
+        else:
+            log_fn(f"❌ Browser {b+1} gagal start")
+        time.sleep(3)
+
+    active_workers = [w for w in workers if w.driver is not None]
+    if not active_workers:
+        log_fn(f"[UD {ud_num}] ❌ Tidak ada browser yang berhasil terhubung!")
+        return 0
+
+    n_active = len(active_workers)
+    log_fn(f"[UD {ud_num}] ✅ {n_active}/{n_browsers} browser aktif. Memulai generasi...")
+
+    # Redistribute tasks to active workers only
+    if n_active < n_browsers:
+        active_tasks = [[] for _ in range(n_active)]
+        all_flat = [t for bt in browser_tasks for t in bt]
+        base_c = len(all_flat) // n_active
+        rem_c = len(all_flat) % n_active
+        ix = 0
+        for b in range(n_active):
+            cnt = base_c + (1 if b < rem_c else 0)
+            active_tasks[b] = all_flat[ix:ix + cnt]
+            ix += cnt
+        browser_tasks = active_tasks
+
+    for b in range(n_active):
+        log_fn(f"  Browser {active_workers[b].bid+1}: {len(browser_tasks[b])} video")
+
+    # Run all workers in parallel threads
+    threads = []
+    for b, worker in enumerate(active_workers):
+        if not browser_tasks[b]:
+            continue
+        t = threading.Thread(target=worker.run_generate,
+                             args=(browser_tasks[b],), daemon=True)
+        threads.append(t)
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Shutdown browsers
+    for w in workers:
+        try: w.shutdown()
+        except: pass
+
+    total_gen = sum(w.generated for w in workers)
+    total_fail = sum(w.failed for w in workers)
+    log_fn(f"[UD {ud_num}] 🎬 Raw generate selesai: {total_gen} berhasil, {total_fail} gagal")
+
+    if stop_event.is_set():
+        return 0
+
+    # Check rate limit
+    if total_gen == 0:
+        log_fn(f"[UD {ud_num}] ❌ Tidak ada video yang berhasil di-generate!")
+        raise GrokRateLimitError("Tidak ada video yang berhasil. Kemungkinan rate limit.")
+
+    # Merge raw videos into pairs
+    raw_files = sorted(glob.glob(os.path.join(raw_dir, "*.mp4")), key=os.path.getmtime)
+    log_fn(f"[UD {ud_num}] 🎬 Merge {len(raw_files)} raw videos...")
+    merged_count = 0
+    _merge_func = merge_func if merge_func else merge_video_pair
+    for i in range(0, len(raw_files) - 1, 2):
+        if stop_event.is_set(): break
+        mp = _merge_func(raw_files[i], raw_files[i+1], out_dir, log_fn)
+        if mp:
+            merged_count += 1
+            log_fn(f"[UD {ud_num}] Merged #{merged_count}")
+        for vp in [raw_files[i], raw_files[i+1]]:
+            try:
+                if os.path.exists(vp): os.remove(vp)
+            except: pass
+
+    # Handle leftover odd raw
+    remaining_raws = glob.glob(os.path.join(raw_dir, "*.mp4"))
+    for leftover in remaining_raws:
+        if os.path.exists(leftover):
+            dest = os.path.join(out_dir, os.path.basename(leftover))
+            try: shutil.move(leftover, dest)
+            except: pass
+
+    final_stok = count_stok(ud_num)
+    log_fn(f"[UD {ud_num}] ✅ Pipeline selesai! Merged: {merged_count}, Stok total: {final_stok}")
+    return merged_count
+
+
+# ═══════════════════════════════════════════════════════════════
 #  FULL AUTO DAEMON
 # ═══════════════════════════════════════════════════════════════
 def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
-    """Pipeline untuk satu UD: Generate -> Upload. Berjalan di thread terpisah.
-    Setiap UD punya grok_ud & grok_port sendiri agar bisa paralel."""
+    """Pipeline untuk satu UD: Generate -> Upload. Multi-browser."""
     import html as _html
 
     def send(text):
@@ -151,14 +651,11 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
         send(f"<b>UD {ud_num}</b>: Prompt tidak ditemukan, skip!")
         return
 
-    # Per-UD grok settings (beda port & user_data per UD)
-    grok_ud = cfg.get("grok_ud", os.path.join(USER_DATA_BASE, f"gtt_grok_{ud_num}"))
-    grok_port = cfg.get("grok_port", str(9269 + ud_num))
     batch_size = cfg.get("batch_size", 30)
 
-    send(f"<b>UD {ud_num}</b>: Pipeline dimulai\n"
-         f"Grok UD: <code>{escape_html(os.path.basename(grok_ud))}</code>\n"
-         f"Grok Port: <code>{grok_port}</code>")
+    send(f"<b>UD {ud_num}</b>: Pipeline dimulai (Multi-Browser)\n"
+         f"Browsers: <b>{N_GROK_BROWSERS}</b> (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})\n"
+         f"Video: <code>{DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}</code>")
 
     # Merge left over sebelum masuk gen
     leftover_merged = merge_leftover_raw(ud_num)
@@ -199,9 +696,10 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
         updater_t.start()
 
         try:
-            generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                 grok_ud, grok_port, log_fn, stop_event,
-                                 raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair)
+            generate_stok_multibrowser(
+                ud_num, needed, prompt_text, cfg["bahan_folder"],
+                log_fn, stop_event,
+                raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair)
         except GrokRateLimitError:
             gen_done.set()
             updater_t.join(timeout=3)
@@ -318,15 +816,15 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
 
     db = load_db()
     active = db.get("active_ud", [1, 2])
-    send(f"<b>Full Auto dimulai! (Parallel Mode)</b>\n"
+    send(f"<b>Full Auto dimulai! (Multi-Browser Mode)</b>\n"
          f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n"
-         f"Setiap UD punya Chrome sendiri → generate paralel!")
+         f"Grok Browsers: <b>{N_GROK_BROWSERS}</b> (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})\n"
+         f"Video: <code>{DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}</code>")
 
     while not stop_event.is_set():
         db = load_db()
         active = db.get("active_ud", [1, 2])
 
-        # Kumpulkan kandidat UD yang siap (jadwal sudah sampai/terlewat)
         now = datetime.now()
         ready_uds = []
         future_uds = []
@@ -353,22 +851,12 @@ def run_full_auto(uid, chat_id, bot, main_loop, stop_event):
                     time.sleep(5)
             continue
 
-        # Jika ada UD yang siap → jalankan paralel
+        # Jika ada UD yang siap → jalankan satu per satu (karena browser shared)
         if ready_uds:
-            send(f"<b>🚀 Menjalankan {len(ready_uds)} UD paralel:</b> {', '.join(f'UD {u}' for u in ready_uds)}")
-            ud_threads = []
+            send(f"<b>🚀 Menjalankan {len(ready_uds)} UD:</b> {', '.join(f'UD {u}' for u in ready_uds)}")
             for ud_num in ready_uds:
-                t = threading.Thread(
-                    target=_run_ud_pipeline,
-                    args=(ud_num, chat_id, bot, main_loop, stop_event),
-                    daemon=True, name=f"ud_pipeline_{ud_num}")
-                t.start()
-                ud_threads.append(t)
-
-            # Tunggu semua UD selesai
-            for t in ud_threads:
-                while t.is_alive() and not stop_event.is_set():
-                    t.join(timeout=10)
+                if stop_event.is_set(): break
+                _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event)
 
             if stop_event.is_set(): break
             send(f"<b>✅ Semua UD selesai!</b> ({', '.join(f'UD {u}' for u in ready_uds)})")
@@ -413,7 +901,7 @@ def main_menu_kb(uid=None):
             rows.append(ud_row); ud_row = []
     if ud_row: rows.append(ud_row)
 
-    # Stok Sekarang & Upload Sekarang (like brutal_bot)
+    # Stok Sekarang & Upload Sekarang
     rows.append([InlineKeyboardButton("🎬 Stok Sekarang", callback_data="stok_now_choose"),
                  InlineKeyboardButton("📤 Upload Sekarang", callback_data="upload_now_choose")])
     rows.append([InlineKeyboardButton("🎵 Mute+MP3 (brutal_mp3)", callback_data="mp3_choose")])
@@ -437,8 +925,10 @@ def main_menu_kb(uid=None):
 def status_text():
     db = load_db()
     active = db.get("active_ud", [1, 2])
-    lines = ["<b>Grok TikTok Bot (Parallel)</b>\n"]
-    lines.append(f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n")
+    lines = ["<b>Grok TikTok Bot (Multi-Browser)</b>\n"]
+    lines.append(f"Active UD: <b>{', '.join(str(x) for x in active)}</b>")
+    lines.append(f"Grok Browsers: <b>{N_GROK_BROWSERS}</b> (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})")
+    lines.append(f"Video: <code>{DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}</code>\n")
     for ud in active:
         cfg = get_ud_config(db, ud)
         stok = count_stok(ud)
@@ -446,8 +936,6 @@ def status_text():
         sched_str = f"{sched.get('tanggal','-')} {sched.get('jam','00')}:{sched.get('menit','00')}"
         prod = "ON" if cfg.get("add_product") else "OFF"
         sound = "ON" if cfg.get("add_sound") else "OFF"
-        grok_ud_disp = os.path.basename(cfg.get('grok_ud', '')) or '(auto)'
-        grok_port_disp = cfg.get('grok_port', '') or '(auto)'
         lines.append(
             f"<b>UD {ud}:</b>\n"
             f"  Stok: <b>{stok}/{cfg.get('batch_size',30)}</b>\n"
@@ -455,8 +943,7 @@ def status_text():
             f"  Bahan: <code>{escape_html(cfg.get('bahan_folder','(kosong)'))}</code>\n"
             f"  Desc: <code>{escape_html(cfg.get('deskripsi','(kosong)')[:40])}</code>\n"
             f"  Interval: <b>{cfg.get('interval_hours',5)}h</b> | Produk: {prod} | Sound: {sound}\n"
-            f"  Schedule: <code>{sched_str}</code>\n"
-            f"  🔌 Grok: <code>{grok_ud_disp}</code> : <code>{grok_port_disp}</code>\n")
+            f"  Schedule: <code>{sched_str}</code>\n")
     return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════════
@@ -488,9 +975,7 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set batch 1 30</code> - Batch size\n"
             "<code>/set sched 1 2026-03-16 02:00</code> - Schedule\n"
             "<code>/set tiktok_ud 1 2</code> - TikTok user_data\n"
-            "<code>/set tiktok_port 1 9223</code> - TikTok port\n"
-            "<code>/set grok_ud 1 gtt_grok_1</code> - Grok user_data UD 1\n"
-            "<code>/set grok_port 1 9270</code> - Grok port UD 1",
+            "<code>/set tiktok_port 1 9223</code> - TikTok port",
             parse_mode=ParseMode.HTML)
         return
     parts = args[1].split(None, 1)
@@ -535,7 +1020,6 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cfg["add_product"] = ud_val.lower() in ("on","true","1","ya")
         ud_val = "ON" if cfg["add_product"] else "OFF"
     elif sub == "produk_radio":
-        # Backward compat: simpan ke list
         radio_list = cfg.get("nama_produk_radio_list", [])
         if ud_val and ud_val not in radio_list:
             radio_list.append(ud_val)
@@ -573,11 +1057,6 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud_val = cfg["tiktok_ud"]
     elif sub == "tiktok_port":
         cfg["tiktok_port"] = ud_val
-    elif sub == "grok_ud":
-        cfg["grok_ud"] = resolve_ud_path(ud_val)
-        ud_val = cfg["grok_ud"]
-    elif sub == "grok_port":
-        cfg["grok_port"] = ud_val
     else:
         await update.message.reply_text("Sub-command tidak dikenal. Ketik <code>/set</code>", parse_mode=ParseMode.HTML); return
 
@@ -586,11 +1065,15 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>Grok TikTok Bot</b>\n\n"
+        "<b>Grok TikTok Bot (Multi-Browser)</b>\n\n"
         "/start - Menu utama\n"
         "/set - Konfigurasi (lihat daftar)\n"
         "/help - Panduan\n"
         "/stop - Stop auto/generate\n\n"
+        "<b>Grok Config:</b>\n"
+        f"  Browsers: {N_GROK_BROWSERS} (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})\n"
+        f"  User Data: 1grok, 2grok, 3grok, 4grok, 5grok\n"
+        f"  Video: {DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}\n\n"
         "<b>Flow:</b>\n"
         "1. Set prompt dan bahan per UD\n"
         "2. Set schedule per UD\n"
@@ -631,13 +1114,11 @@ async def cmd_produk_radio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db = load_db()
     cfg = get_ud_config(db, ud_num)
     radio_list = cfg.get("nama_produk_radio_list", [])
-    # Backward compat
     if not radio_list and cfg.get("nama_produk_radio", ""):
         radio_list = [cfg["nama_produk_radio"]]
         cfg["nama_produk_radio_list"] = radio_list
 
     if len(args) < 3:
-        # Show list
         if not radio_list:
             await update.message.reply_text(
                 f"<b>📻 Produk Radio UD {ud_num}:</b>\n(kosong)\n\n"
@@ -660,7 +1141,7 @@ async def cmd_produk_radio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"<code>{escape_html(new_name)}</code> sudah ada!", parse_mode=ParseMode.HTML); return
         radio_list.append(new_name)
         cfg["nama_produk_radio_list"] = radio_list
-        cfg["nama_produk_radio"] = new_name  # backward compat
+        cfg["nama_produk_radio"] = new_name
         save_db(db)
         await update.message.reply_text(
             f"✅ UD {ud_num}: Ditambahkan <code>{escape_html(new_name)}</code>\nTotal: {len(radio_list)} produk radio",
@@ -734,7 +1215,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("bahan_del|"):
         folder = data.split("|", 1)[1]
-        import shutil
         path = os.path.join(BAHAN_DIR, folder)
         try:
             if os.path.isdir(path): shutil.rmtree(path)
@@ -785,8 +1265,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sched = cfg.get("schedule", {})
         sched_str = f"{sched.get('tanggal','-')} {sched.get('jam','00')}:{sched.get('menit','00')}"
         hashtags_disp = ', '.join('#'+h for h in cfg.get('hashtags',[])) or '(kosong)'
-        grok_ud_disp = os.path.basename(cfg.get('grok_ud', '')) or '(auto)'
-        grok_port_disp = cfg.get('grok_port', '') or '(auto)'
         text = (
             f"<b>UD {ud_num} Status</b>\n\n"
             f"Stok: <b>{stok}/{cfg.get('batch_size',30)}</b> video\n"
@@ -799,10 +1277,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"<b>Produk:</b> {'ON' if cfg.get('add_product') else 'OFF'}\n"
             f"  Radio ({len(cfg.get('nama_produk_radio_list',[]))}): <code>{escape_html(', '.join(cfg.get('nama_produk_radio_list',[])) or cfg.get('nama_produk_radio','(kosong)'))[:60]}</code>\n"
             f"  Input: <code>{escape_html(cfg.get('nama_produk_input','(kosong)')[:40])}</code>\n"
-            f"<b>Sound:</b> {'ON' if cfg.get('add_sound') else 'OFF'}\n"
-            f"\n<b>🔌 Grok Chrome:</b>\n"
-            f"  UD: <code>{escape_html(grok_ud_disp)}</code>\n"
-            f"  Port: <code>{grok_port_disp}</code>\n"
+            f"<b>Sound:</b> {'ON' if cfg.get('add_sound') else 'OFF'}\n\n"
+            f"<b>🔌 Grok (Shared Multi-Browser):</b>\n"
+            f"  Browsers: {N_GROK_BROWSERS} (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})\n"
+            f"  User Data: 1grok-5grok\n"
+            f"  Video: {DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}\n"
             f"<b>🔌 TikTok Chrome:</b>\n"
             f"  UD: <code>{escape_html(cfg.get('tiktok_ud',''))}</code>\n"
             f"  Port: <code>{cfg.get('tiktok_port','')}</code>")
@@ -834,10 +1313,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
 
         stop_evt = threading.Event()
-        grok_ud = cfg.get("grok_ud", os.path.join(USER_DATA_BASE, f"gtt_grok_{ud_num}"))
-        grok_port = cfg.get("grok_port", str(9269 + ud_num))
         
-        initial_msg = await q.edit_message_text(f"Generate UD {ud_num} dimulai! Target: {needed} video\nMembuka browser...", reply_markup=main_menu_kb(uid))
+        initial_msg = await q.edit_message_text(
+            f"Generate UD {ud_num} dimulai! Target: {needed} video\n"
+            f"Multi-Browser: {N_GROK_BROWSERS} browser (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})\n"
+            f"Membuka browser...", reply_markup=main_menu_kb(uid))
         msg_id = initial_msg.message_id
         
         log_lines = []
@@ -849,7 +1329,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 time.sleep(4.0)
                 with log_lock:
                     if not log_lines: continue
-                    text = f"<b>[UD {ud_num}] Prog Generate {needed} Stok</b>\n" + "\n".join(log_lines)
+                    text = f"<b>[UD {ud_num}] Multi-Browser Generate {needed} Stok</b>\n" + "\n".join(log_lines)
                 if text != last_text:
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -874,9 +1354,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         log_lines.pop(0)
                         
             try:
-                generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                     grok_ud, grok_port, lg, stop_evt,
-                                     raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
+                generate_stok_multibrowser(
+                    ud_num, needed, prompt_text, cfg["bahan_folder"],
+                    lg, stop_evt,
+                    raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair)
             except GrokRateLimitError:
                 lg("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
                 stop_evt.set()
@@ -940,7 +1421,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
         save_ud_schedule(ud_num, schedule)
 
-        # Build schedule preview
         sched_preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule[:15]))
         if len(schedule) > 15:
             sched_preview += f"\n  ... +{len(schedule)-15} lagi"
@@ -970,7 +1450,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         f"<b>Jadwal:</b>\n{sched_preview}\n\n"
                         f"<b>Progress:</b>\n")
                     text = header + "\n".join(log_lines_uud[-10:])
-                # Telegram limit: 4096 chars
                 if len(text) > 4096:
                     text = text[:4090] + "\n..."
                 if text != last_text:
@@ -991,11 +1470,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 with log_lock_uud:
                     log_lines_uud.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
                     if len(log_lines_uud) > 20: log_lines_uud.pop(0)
-                    # Track success/fail from log messages
                     if '✅ Upload sukses' in m or '✅' in m and 'sukses' in m:
                         upload_stats_uud["success"] += 1
                     if 'Upload:' in m or ('Upload' in m and '/' in m):
-                        # Extract current video number from [X/Y] pattern
                         import re as _re
                         match = _re.search(r'\[(\d+)/\d+\]', m)
                         if match:
@@ -1034,7 +1511,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── CLEAR STOK ──
     if data.startswith("clear_stok_"):
-        import shutil
         ud_num = int(data.split("_")[-1])
         d = stok_dir(ud_num)
         for f in os.listdir(d):
@@ -1052,9 +1528,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         active = db.get("active_ud", [1, 2])
         text = (
             "<b>Settings</b>\n\n"
-            f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n"
-            f"Grok UD: <code>{escape_html(db.get('grok_ud',''))}</code>\n"
-            f"Grok Port: <code>{db.get('grok_port','9270')}</code>\n\n"
+            f"Active UD: <b>{', '.join(str(x) for x in active)}</b>\n\n"
+            f"<b>🔌 Grok (Multi-Browser):</b>\n"
+            f"  Browsers: {N_GROK_BROWSERS} (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})\n"
+            f"  User Data: 1grok, 2grok, 3grok, 4grok, 5grok\n"
+            f"  Video: {DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}\n\n"
             f"Prompt: {escape_html(', '.join(prompts.keys()) or '(kosong)')}\n"
             f"Bahan: {escape_html(', '.join(folders) or '(kosong)')}\n\n"
             "Gunakan <code>/set</code> untuk mengubah konfigurasi.")
@@ -1076,7 +1554,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"stok_now_{ud}")])
         rows.append([InlineKeyboardButton("Kembali", callback_data="refresh")])
         await q.edit_message_text(
-            "<b>🎬 Stok Sekarang</b>\nPilih UD untuk generate stok:",
+            "<b>🎬 Stok Sekarang</b>\nPilih UD untuk generate stok (Multi-Browser):",
             parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows)); return
 
     if data.startswith("stok_now_"):
@@ -1098,11 +1576,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"Stok UD {ud_num} sudah penuh!", reply_markup=main_menu_kb(uid)); return
 
         stop_evt = threading.Event()
-        grok_ud = db.get("grok_ud", os.path.join(USER_DATA_BASE, "gtt_grok"))
-        grok_port = db.get("grok_port", "9270")
 
         initial_msg = await q.edit_message_text(
-            f"<b>🎬 Stok Sekarang UD {ud_num}</b>\nTarget: {needed} video\nMembuka browser...",
+            f"<b>🎬 Stok Sekarang UD {ud_num}</b>\nTarget: {needed} video\n"
+            f"Multi-Browser: {N_GROK_BROWSERS} browser\nMembuka browser...",
             parse_mode=ParseMode.HTML, reply_markup=main_menu_kb(uid))
         msg_id = initial_msg.message_id
 
@@ -1114,7 +1591,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 time.sleep(4.0)
                 with log_lock:
                     if not log_lines: continue
-                    text = f"<b>🎬 [UD {ud_num}] Stok Generate ({needed} video)</b>\n" + "\n".join(log_lines)
+                    text = f"<b>🎬 [UD {ud_num}] Multi-Browser Stok Generate ({needed} video)</b>\n" + "\n".join(log_lines)
                 if text != last_text:
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -1134,9 +1611,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
                     if len(log_lines) > 20: log_lines.pop(0)
             try:
-                generate_stok_for_ud(ud_num, needed, prompt_text, cfg["bahan_folder"],
-                                     grok_ud, grok_port, lg, stop_evt,
-                                     raw_dir=get_raw_dir(ud_num), merge_func=merge_video_pair)
+                generate_stok_multibrowser(
+                    ud_num, needed, prompt_text, cfg["bahan_folder"],
+                    lg, stop_evt,
+                    raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair)
             except GrokRateLimitError:
                 lg("🚫 RATE LIMIT! Grok tidak bisa generate lagi.")
                 stop_evt.set()
@@ -1216,13 +1694,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         stop_evt = threading.Event()
         interval_hours = cfg.get("interval_hours", 5)
 
-        # Schedule mulai dari sekarang + 30 menit
         start_dt = datetime.now() + timedelta(minutes=30)
         start_dt = start_dt.replace(second=0, microsecond=0)
         schedule = build_tiktok_schedule(stok_files, start_dt, interval_hours)
         save_ud_schedule(ud_num, schedule)
 
-        # Build schedule preview
         sched_preview = "\n".join(f"  {i+1}. <code>{s['schedule']}</code>" for i, s in enumerate(schedule[:15]))
         if len(schedule) > 15:
             sched_preview += f"\n  ... +{len(schedule)-15} lagi"
@@ -1253,7 +1729,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         f"<b>Jadwal:</b>\n{sched_preview}\n\n"
                         f"<b>Progress:</b>\n")
                     text = header + "\n".join(log_lines_ul[-10:])
-                # Telegram limit: 4096 chars
                 if len(text) > 4096:
                     text = text[:4090] + "\n..."
                 if text != last_text:
@@ -1274,7 +1749,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 with log_lock_ul:
                     log_lines_ul.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
                     if len(log_lines_ul) > 20: log_lines_ul.pop(0)
-                    # Track success/fail from log messages
                     if '✅ Upload sukses' in m or ('✅' in m and 'sukses' in m):
                         upload_stats_ul["success"] += 1
                     if 'Upload:' in m or ('Upload' in m and '/' in m):
@@ -1324,7 +1798,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Proses Mute+MP3 sudah berjalan!", reply_markup=main_menu_kb(uid)); return
         db = load_db()
         active = db.get("active_ud", [1, 2])
-        # Count available MP3 in brutal_mp3
         mp3_count = len([f for f in os.listdir(MP3_DIR) if f.lower().endswith('.mp3')]) if os.path.isdir(MP3_DIR) else 0
         rows = []
         for ud in active:
@@ -1527,7 +2000,10 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("Grok TikTok Bot is running...")
+    print("Grok TikTok Bot (Multi-Browser) is running...")
+    print(f"  Browsers: {N_GROK_BROWSERS} (ports {GROK_PORTS[0]}-{GROK_PORTS[N_GROK_BROWSERS-1]})")
+    print(f"  User Data: 1grok, 2grok, 3grok, 4grok, 5grok")
+    print(f"  Video: {DEFAULT_GEN_MODE} {DEFAULT_RESOLUTION} {DEFAULT_DURATION} {DEFAULT_ASPECT_RATIO}")
     app.run_polling()
 
 if __name__ == "__main__":
