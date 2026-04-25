@@ -138,112 +138,38 @@ def image_to_base64(path):
     return f"data:{mime};base64,{b64}"
 
 # ═══════════════════════════════════════════════════════════════
-#  VIDEO MERGE (FFmpeg re-encode for reliability)
+#  VIDEO MERGE (same method as gtt_core — concat demuxer + re-encode)
 # ═══════════════════════════════════════════════════════════════
-def _validate_video(path, log_fn=None):
-    """Check if a video file is valid using ffprobe. Returns True if OK."""
-    if not os.path.exists(path) or os.path.getsize(path) < 50000:
-        return False
-    try:
-        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-               "-show_entries", "stream=width,height,duration",
-               "-of", "csv=p=0", path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if result.returncode != 0:
-            if log_fn: log_fn(f"⚠️ Video rusak: {os.path.basename(path)}")
-            return False
-        return True
-    except Exception:
-        return True  # If ffprobe not found, assume OK
-
 def merge_video_pair(vid1: str, vid2: str, output_dir: str, log_fn=None):
-    """Merge 2 videos using ffmpeg re-encode (reliable, no corrupt output)."""
+    """Merge 2 videos using concat demuxer + re-encode (proven reliable)."""
     os.makedirs(output_dir, exist_ok=True)
-
-    # Validate inputs first
-    if not _validate_video(vid1, log_fn):
-        if log_fn: log_fn(f"⚠️ Skip merge: {os.path.basename(vid1)} rusak/kosong")
-        return None
-    if not _validate_video(vid2, log_fn):
-        if log_fn: log_fn(f"⚠️ Skip merge: {os.path.basename(vid2)} rusak/kosong")
-        return None
-
-    existing = glob.glob(os.path.join(output_dir, "*.mp4"))
-    existing_nums = []
-    for f in existing:
-        m = re.fullmatch(r'(\d+)\.mp4', os.path.basename(f))
-        if m:
-            existing_nums.append(int(m.group(1)))
-    next_num = (max(existing_nums) + 1) if existing_nums else 1
-    out_name = f"{next_num}.mp4"
-    out_path = os.path.join(output_dir, out_name)
-
-    if log_fn:
-        log_fn(f"🎬 Merge: {os.path.basename(vid1)} + {os.path.basename(vid2)} → {out_name}")
-
+    out = os.path.join(output_dir, f"merged_{int(time.time())}_{random.randint(100,999)}.mp4")
+    txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
     try:
-        # Use concat filter (re-encode) for reliability. This handles
-        # different codecs, resolutions, and timestamps properly.
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", vid1,
-            "-i", vid2,
-            "-filter_complex", "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]",
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            out_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-
-        if result.returncode != 0:
-            # Fallback: try without audio in case one video has no audio
-            if log_fn: log_fn("⚠️ Retry merge tanpa audio...")
-            cmd_fallback = [
-                "ffmpeg", "-y",
-                "-i", vid1,
-                "-i", vid2,
-                "-filter_complex", "[0:v:0][1:v:0]concat=n=2:v=1:a=0[outv]",
-                "-map", "[outv]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-movflags", "+faststart",
-                "-an",
-                out_path
-            ]
-            result = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=180)
-
-        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 50000:
-            # Validate the output
-            if _validate_video(out_path, log_fn):
-                sz = os.path.getsize(out_path) / (1024 * 1024)
-                if log_fn: log_fn(f"✅ Merged: {out_name} ({sz:.1f} MB)")
-                return out_path
-            else:
-                if log_fn: log_fn(f"❌ Merged file rusak, hapus")
-                try: os.remove(out_path)
-                except: pass
-                return None
-        else:
-            err = result.stderr[-200:] if result.stderr else 'unknown'
-            if log_fn: log_fn(f"❌ Merge gagal: {err}")
-            try: os.remove(out_path)
-            except: pass
-            return None
-
+        with open(txt, "w") as f:
+            f.write(f"file '{vid1}'\nfile '{vid2}'\n")
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", txt,
+               "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+               "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+               "-t", "20", out]
+        if log_fn:
+            log_fn(f"🎬 Merge: {os.path.basename(vid1)} + {os.path.basename(vid2)}")
+        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
+            sz = os.path.getsize(out) / (1024 * 1024)
+            if log_fn: log_fn(f"✅ Merged: {os.path.basename(out)} ({sz:.1f} MB)")
+            return out
+        if log_fn: log_fn(f"❌ Merge gagal: returncode={r.returncode}")
     except FileNotFoundError:
         if log_fn: log_fn("❌ FFmpeg tidak ditemukan!")
-        return None
     except subprocess.TimeoutExpired:
-        if log_fn: log_fn("⚠️ FFmpeg merge timeout (180s)")
-        try: os.remove(out_path)
-        except: pass
-        return None
+        if log_fn: log_fn("⚠️ FFmpeg merge timeout (120s)")
     except Exception as e:
-        if log_fn: log_fn(f"❌ Error merge: {str(e)[:100]}")
-        try: os.remove(out_path)
+        if log_fn: log_fn(f"❌ Merge error: {str(e)[:100]}")
+    finally:
+        try: os.remove(txt)
         except: pass
-        return None
+    return None
 
 # ═══════════════════════════════════════════════════════════════
 #  MULTI-BROWSER GROK WORKER (uses grok_autoV2.js)
