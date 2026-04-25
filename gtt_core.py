@@ -1200,9 +1200,63 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
     add_product = ud_cfg.get("add_product", True)
     add_sound = ud_cfg.get("add_sound", False)
 
+    def _is_403_page(drv):
+        """Deteksi apakah halaman saat ini terkena HTTP 403."""
+        try:
+            page_src = (drv.page_source or "").lower()
+            cur_url = (drv.current_url or "").lower()
+            if "403" in drv.title or "forbidden" in drv.title.lower():
+                return True
+            if "403 forbidden" in page_src or "http error 403" in page_src:
+                return True
+            if "access denied" in page_src and "tiktok" in cur_url:
+                return True
+            # TikTok specific: blank page or error page after navigation
+            if "error" in cur_url and "403" in page_src:
+                return True
+        except:
+            pass
+        return False
+
+    def _force_fresh_tab(drv, log_fn_inner, prefix):
+        """Tutup semua tab lama, buka tab baru ke TikTok upload page."""
+        log_fn_inner(f"{prefix} 🔄 Membuka tab baru (fresh session)...")
+        try:
+            drv.execute_script("window.open('about:blank', '_blank');")
+            time.sleep(1)
+            windows = drv.window_handles
+            new_window = windows[-1]
+            # Tutup semua tab lama
+            for w in windows[:-1]:
+                try:
+                    drv.switch_to.window(w)
+                    drv.close()
+                except:
+                    pass
+            drv.switch_to.window(new_window)
+            time.sleep(1)
+            # Navigate ke upload page
+            drv.get("https://www.tiktok.com/tiktokstudio/upload")
+            time.sleep(5)
+            # Verify upload page loaded
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                from selenium.webdriver.common.by import By
+                WebDriverWait(drv, 15).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+                log_fn_inner(f"{prefix} ✅ Tab baru siap")
+            except:
+                drv.refresh()
+                time.sleep(5)
+                log_fn_inner(f"{prefix} ⚠️ Refresh halaman setelah timeout")
+        except Exception as e:
+            log_fn_inner(f"{prefix} ⚠️ Error buat tab baru: {str(e)[:60]}")
+
     clear_chrome_data(tiktok_ud)
     chrome_proc = open_chrome_debug(tiktok_ud, tiktok_port)
     driver = None; uploaded = 0
+    MAX_403_RETRIES = 2
     try:
         driver = connect_selenium(tiktok_port)
         total = len(remaining)
@@ -1227,65 +1281,105 @@ def upload_tiktok_batch(ud_num, schedule, ud_cfg, log_fn, stop_event):
                 log_fn(f"[UD {ud_num}] [{idx+1}/{total}] 🎲 Produk: {chosen_radio[:40]}")
 
             log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Upload: {os.path.basename(path)} | {item['schedule']}")
-            try:
-                # 1. Navigate to upload page
-                navigate_upload_page(driver, force=(idx > 0))
-                time.sleep(3)
 
-                # 2. Upload file via input[type=file]
-                inject_video_file(driver, path)
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] File disuntikkan")
-                time.sleep(5)
+            # Upload with 403 retry logic
+            post_ok = False
+            for attempt_403 in range(MAX_403_RETRIES + 1):
+                try:
+                    prefix = f"[UD {ud_num}] [{idx+1}/{total}]"
 
-                desc_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
+                    # 1. Selalu buka tab baru untuk setiap video (menghindari 403)
+                    _force_fresh_tab(driver, log_fn, prefix)
+                    time.sleep(2)
 
-                # 3. Post video with produk radio retry (like brutal_bot)
-                post_ok = False
-                tried_radios = []
-                candidates_to_try = list(radio_candidates) if (radio_candidates and add_product) else [""]
+                    # Cek apakah terkena 403 setelah navigasi
+                    if _is_403_page(driver):
+                        log_fn(f"{prefix} ⚠️ HTTP 403 terdeteksi! Retry {attempt_403+1}/{MAX_403_RETRIES}...")
+                        time.sleep(5)
+                        continue
 
-                for radio_try in candidates_to_try:
-                    if stop_event.is_set(): break
-                    try:
-                        do_post_video(
-                            driver=driver,
-                            deskripsi=desc_with_num,
-                            nama_produk_radio=radio_try if add_product else "",
-                            nama_produk_input=nama_produk_input if add_product else "",
-                            log=lambda m, *args: log_fn(f"[UD {ud_num}]   {m}"),
-                            schedule_dt=sched_dt,
-                            stop_event=stop_event,
-                            add_sound=add_sound,
-                            add_product=add_product,
-                            skip_switches=True,
-                            hashtags=hashtags if hashtags else [],
-                            location=None
-                        )
-                        post_ok = True
-                        break
-                    except Exception as e_post:
-                        tried_radios.append(radio_try)
-                        err_msg = str(e_post).lower()
-                        # Jika error karena produk tidak ditemukan, coba nama lain
-                        if any(kw in err_msg for kw in ["radio", "produk", "timeout", "presence", "not found", "xpath"]):
-                            log_fn(f"[UD {ud_num}]   ⚠️ Produk '{radio_try[:30]}' tidak ditemukan, coba lain...")
-                            continue
-                        else:
-                            # Error lain (bukan soal produk), langsung raise
-                            raise
+                    # 2. Upload file via input[type=file]
+                    inject_video_file(driver, path)
+                    log_fn(f"{prefix} File disuntikkan")
+                    time.sleep(5)
 
-                if post_ok and not stop_event.is_set():
-                    try: os.remove(path)
-                    except: pass
-                    uploaded += 1
-                    item["status"] = "done"
-                    save_ud_schedule(ud_num, schedule)
-                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ✅ Upload sukses")
-                elif tried_radios and not post_ok:
-                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ❌ Semua produk radio gagal ({len(tried_radios)} dicoba)")
+                    # Cek lagi 403 setelah inject file
+                    if _is_403_page(driver):
+                        log_fn(f"{prefix} ⚠️ HTTP 403 setelah inject file! Retry {attempt_403+1}/{MAX_403_RETRIES}...")
+                        time.sleep(5)
+                        continue
 
-            except Exception as e:
-                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Error: {e}")
+                    desc_with_num = f"[{idx+1}] {deskripsi}" if deskripsi else ""
+
+                    # 3. Post video with produk radio retry (like brutal_bot)
+                    tried_radios = []
+                    candidates_to_try = list(radio_candidates) if (radio_candidates and add_product) else [""]
+
+                    for radio_try in candidates_to_try:
+                        if stop_event.is_set(): break
+                        try:
+                            do_post_video(
+                                driver=driver,
+                                deskripsi=desc_with_num,
+                                nama_produk_radio=radio_try if add_product else "",
+                                nama_produk_input=nama_produk_input if add_product else "",
+                                log=lambda m, *args: log_fn(f"[UD {ud_num}]   {m}"),
+                                schedule_dt=sched_dt,
+                                stop_event=stop_event,
+                                add_sound=add_sound,
+                                add_product=add_product,
+                                skip_switches=True,
+                                hashtags=hashtags if hashtags else [],
+                                location=None
+                            )
+                            post_ok = True
+                            break
+                        except Exception as e_post:
+                            tried_radios.append(radio_try)
+                            err_msg = str(e_post).lower()
+                            # Cek apakah error 403
+                            if "403" in err_msg or "forbidden" in err_msg:
+                                log_fn(f"{prefix} ⚠️ HTTP 403 saat posting! Retry...")
+                                break  # Break inner loop, will retry via outer 403 loop
+                            # Jika error karena produk tidak ditemukan, coba nama lain
+                            if any(kw in err_msg for kw in ["radio", "produk", "timeout", "presence", "not found", "xpath"]):
+                                log_fn(f"[UD {ud_num}]   ⚠️ Produk '{radio_try[:30]}' tidak ditemukan, coba lain...")
+                                continue
+                            else:
+                                # Error lain (bukan soal produk), langsung raise
+                                raise
+
+                    if post_ok:
+                        break  # Keluar dari 403 retry loop
+
+                    # Jika semua radio gagal karena 403, lanjut retry
+                    if any("403" in str(r).lower() or "forbidden" in str(r).lower() for r in tried_radios):
+                        log_fn(f"{prefix} 🔄 Mencoba ulang karena 403...")
+                        time.sleep(5)
+                        continue
+
+                    # Jika gagal bukan karena 403, keluar
+                    if tried_radios and not post_ok:
+                        log_fn(f"{prefix} ❌ Semua produk radio gagal ({len(tried_radios)} dicoba)")
+                    break  # Tidak perlu retry lagi
+
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if ("403" in err_str or "forbidden" in err_str) and attempt_403 < MAX_403_RETRIES:
+                        log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ⚠️ HTTP 403 error, retry {attempt_403+1}/{MAX_403_RETRIES}...")
+                        time.sleep(5)
+                        continue
+                    log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Error: {e}")
+                    break
+
+            if post_ok and not stop_event.is_set():
+                try: os.remove(path)
+                except: pass
+                uploaded += 1
+                item["status"] = "done"
+                save_ud_schedule(ud_num, schedule)
+                log_fn(f"[UD {ud_num}] [{idx+1}/{total}] ✅ Upload sukses")
+
             if idx < total-1 and not stop_event.is_set():
                 log_fn(f"[UD {ud_num}] Menunggu 10 detik..."); time.sleep(10)
     finally:
