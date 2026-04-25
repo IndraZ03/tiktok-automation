@@ -137,6 +137,91 @@ def image_to_base64(path):
             "webp": "image/webp", "bmp": "image/bmp"}.get(ext, "image/jpeg")
     return f"data:{mime};base64,{b64}"
 
+def make_progress_bar(current, total, bar_length=15):
+    """Create a colorful gradient progress bar for Telegram."""
+    if total <= 0 or current <= 0:
+        pct = 0
+    else:
+        pct = min(100, int(current / total * 100))
+
+    filled = int(bar_length * pct / 100)
+    empty = bar_length - filled
+
+    # Gradient colors based on percentage
+    if pct < 25:
+        fill_char = "🟥"
+    elif pct < 50:
+        fill_char = "🟧"
+    elif pct < 75:
+        fill_char = "🟨"
+    else:
+        fill_char = "🟩"
+
+    bar = fill_char * filled + "⬜" * empty
+    return bar, pct
+
+def make_mini_bar(current, total=100, length=8):
+    """Create a compact per-browser progress bar."""
+    if total <= 0 or current <= 0:
+        pct = 0
+    else:
+        pct = min(100, int(current / total * 100))
+    filled = int(length * pct / 100)
+    empty = length - filled
+    if pct < 25:
+        c = "🟥"
+    elif pct < 50:
+        c = "🟧"
+    elif pct < 75:
+        c = "🟨"
+    else:
+        c = "🟩"
+    return c * filled + "⬜" * empty, pct
+
+def render_browser_panel(browser_states):
+    """Render per-browser status panel."""
+    if not browser_states:
+        return ""
+    lines = []
+    status_icons = {
+        "idle": "⚪", "navigating": "🌐", "injecting": "💉",
+        "uploading": "📤", "generating": "🔄", "downloading": "⬇️",
+        "success": "✅", "error": "❌", "rate_limited": "🚫",
+        "done": "🏁",
+    }
+    for bid in sorted(browser_states.keys()):
+        st = browser_states[bid]
+        status = st.get("status", "idle")
+        pct = st.get("progress", 0)
+        msg = st.get("message", "")[:25]
+        gen = st.get("generated", 0)
+        fail = st.get("failed", 0)
+        task_n = st.get("task_num", 0)
+        task_t = st.get("total_tasks", 0)
+        icon = status_icons.get(status, "⚪")
+
+        bar, bar_pct = make_mini_bar(pct, 100, 8)
+
+        task_info = f"({task_n}/{task_t})" if task_t > 0 else ""
+        stat_str = f"✓{gen}" if gen > 0 else ""
+        if fail > 0:
+            stat_str += f" ✗{fail}"
+
+        lines.append(
+            f"{icon} <b>B{bid+1}</b> {bar} {bar_pct}% {stat_str} {task_info}"
+            f"\n     <i>{escape_html(msg)}</i>"
+        )
+    return "\n".join(lines)
+
+def format_elapsed(seconds):
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}j {m}m {s}d"
+    elif m > 0:
+        return f"{m}m {s}d"
+    return f"{s}d"
+
 # ═══════════════════════════════════════════════════════════════
 #  VIDEO MERGE (same method as gtt_core — concat demuxer + re-encode)
 # ═══════════════════════════════════════════════════════════════
@@ -643,97 +728,6 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     browser_states = {}  # Shared dict: bid -> {status, progress, message, ...}
     active_worker_list = []  # Reference to current workers for dashboard
 
-    def make_progress_bar(current, total, bar_length=15):
-        """Create a colorful gradient progress bar for Telegram."""
-        if total <= 0 or current <= 0:
-            pct = 0
-        else:
-            pct = min(100, int(current / total * 100))
-
-        filled = int(bar_length * pct / 100)
-        empty = bar_length - filled
-
-        # Gradient colors based on percentage
-        if pct < 25:
-            fill_char = "🟥"
-        elif pct < 50:
-            fill_char = "🟧"
-        elif pct < 75:
-            fill_char = "🟨"
-        else:
-            fill_char = "🟩"
-
-        bar = fill_char * filled + "⬜" * empty
-        return bar, pct
-
-    def make_mini_bar(current, total=100, length=8):
-        """Create a compact per-browser progress bar."""
-        if total <= 0 or current <= 0:
-            pct = 0
-        else:
-            pct = min(100, int(current / total * 100))
-        filled = int(length * pct / 100)
-        empty = length - filled
-        if pct < 25:
-            c = "🟥"
-        elif pct < 50:
-            c = "🟧"
-        elif pct < 75:
-            c = "🟨"
-        else:
-            c = "🟩"
-        return c * filled + "⬜" * empty, pct
-
-    def render_browser_panel():
-        """Render per-browser status panel."""
-        if not browser_states:
-            return ""
-        lines = []
-        status_icons = {
-            "idle": "⚪", "navigating": "🌐", "injecting": "💉",
-            "uploading": "📤", "generating": "🔄", "downloading": "⬇️",
-            "success": "✅", "error": "❌", "rate_limited": "🚫",
-            "done": "🏁",
-        }
-        for bid in sorted(browser_states.keys()):
-            st = browser_states[bid]
-            status = st.get("status", "idle")
-            pct = st.get("progress", 0)
-            msg = st.get("message", "")[:25]
-            gen = st.get("generated", 0)
-            fail = st.get("failed", 0)
-            task_n = st.get("task_num", 0)
-            task_t = st.get("total_tasks", 0)
-            icon = status_icons.get(status, "⚪")
-
-            bar, bar_pct = make_mini_bar(pct, 100, 8)
-
-            task_info = f"({task_n}/{task_t})" if task_t > 0 else ""
-            stat_str = f"✓{gen}" if gen > 0 else ""
-            if fail > 0:
-                stat_str += f" ✗{fail}"
-
-            lines.append(
-                f"{icon} <b>B{bid+1}</b> {bar} {bar_pct}% {stat_str} {task_info}"
-                f"\n     <i>{escape_html(msg)}</i>"
-            )
-        return "\n".join(lines)
-
-    def format_elapsed(seconds):
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        if h > 0:
-            return f"{h}j {m}m {s}d"
-        elif m > 0:
-            return f"{m}m {s}d"
-        return f"{s}d"
-
-    def log_fn(msg, tag=None):
-        ts = datetime.now().strftime("%H:%M:%S")
-        with log_lock:
-            log_lines.append(f"<code>[{ts}]</code> {escape_html(msg)}")
-            if len(log_lines) > 25: log_lines.pop(0)
-
     log_msg_future = asyncio.run_coroutine_threadsafe(
         bot.send_message(chat_id,
                          f"📋 <b>Live Log</b>\n\n<i>Memulai {N_BROWSERS} browser...</i>",
@@ -771,7 +765,7 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
                 speed_str = "⚡ --"
 
             # Per-browser panel
-            browser_panel = render_browser_panel()
+            browser_panel = render_browser_panel(browser_states)
 
             with log_lock:
                 body = "\n".join(log_lines[-8:]) if log_lines else "<i>Menunggu...</i>"

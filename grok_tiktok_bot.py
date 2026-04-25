@@ -22,6 +22,8 @@ from gtt_core import (
     get_random_bahan_image,
 )
 
+from grok_imagine_bot import GrokBrowserWorker, render_browser_panel, make_progress_bar, format_elapsed, make_mini_bar
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -155,353 +157,16 @@ def merge_leftover_raw(ud_num, log_fn=None):
     return merged
 
 # ═══════════════════════════════════════════════════════════════
-#  MULTI-BROWSER GROK GENERATION ENGINE (uses grok_autoV2.js)
+#  MULTI-BROWSER GROK GENERATION ENGINE
 # ═══════════════════════════════════════════════════════════════
-
-try:
-    import requests
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
-    SELENIUM_OK = True
-except ImportError:
-    SELENIUM_OK = False
-
-def image_to_base64(path):
-    """Convert image file to base64 data URL."""
-    with open(path, "rb") as f:
-        data = f.read()
-    b64 = base64.b64encode(data).decode("utf-8")
-    ext = os.path.splitext(path)[1].lower()
-    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-            "webp": "image/webp", "bmp": "image/bmp"}.get(ext.lstrip("."), "image/jpeg")
-    return f"data:{mime};base64,{b64}"
-
-
-class GrokBrowserWorker:
-    """One Chrome instance generating videos via grok_autoV2.js injection."""
-
-    def __init__(self, browser_id, port, user_data_dir, output_dir, log_fn, stop_event, file_lock):
-        self.bid = browser_id
-        self.port = port
-        self.user_data_dir = user_data_dir
-        self.output_dir = output_dir
-        self.log_fn = log_fn
-        self._stop = stop_event
-        self._file_lock = file_lock
-        self.driver = None
-        self.generated = 0
-        self.failed = 0
-
-    def log(self, msg):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.log_fn(f"[{ts}] [B{self.bid+1}] {msg}")
-
-    def get_next_filename(self, folder):
-        with self._file_lock:
-            files = glob.glob(os.path.join(folder, "*.mp4"))
-            pat = re.compile(r'(\d+)\.mp4')
-            max_n = 0
-            for f in files:
-                m = pat.fullmatch(os.path.basename(f))
-                if m: max_n = max(max_n, int(m.group(1)))
-            return f"{max_n + 1}.mp4"
-
-    def open_chrome(self):
-        self.log(f"Membuka Chrome port={self.port}...")
-        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-        cmd = [chrome,
-               f"--remote-debugging-port={self.port}",
-               f"--user-data-dir={self.user_data_dir}",
-               "--headless=new",
-               "--no-first-run", "--no-default-browser-check",
-               GROK_URL]
-        import subprocess
-        subprocess.Popen(cmd)
-        time.sleep(6)
-
-    def kill_chrome(self):
-        try:
-            import subprocess
-            res = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10)
-            pids = set()
-            for line in res.stdout.splitlines():
-                if f":{self.port}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    if parts: pids.add(parts[-1])
-            for pid in pids:
-                subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, timeout=5)
-                self.log(f"Chrome PID {pid} dimatikan ✓")
-        except Exception as e:
-            self.log(f"Gagal matikan Chrome: {e}")
-
-    def connect_selenium(self):
-        opts = Options()
-        opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.port}")
-        try:
-            svc = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=svc, options=opts)
-            os.makedirs(self.output_dir, exist_ok=True)
-            driver.execute_cdp_cmd("Page.setDownloadBehavior",
-                                   {"behavior": "allow", "downloadPath": self.output_dir})
-            self.log(f"Selenium terhubung ✓ (port {self.port})")
-            return driver
-        except Exception as e:
-            self.log(f"Gagal connect Selenium: {e}")
-            return None
-
-    def inject_js(self, driver):
-        if not os.path.exists(JS_FILE):
-            self.log(f"❌ File JS tidak ditemukan: {JS_FILE}")
-            return False
-        try:
-            with open(JS_FILE, "r", encoding="utf-8") as f:
-                js_code = f.read()
-            driver.execute_script(js_code)
-            time.sleep(1)
-            ready = driver.execute_script("return typeof window.__grokGenerate === 'function';")
-            if ready:
-                self.log("✅ grok_autoV2.js di-inject")
-                return True
-            else:
-                self.log("⚠️ JS inject tapi __grokGenerate tidak tersedia")
-                return False
-        except Exception as e:
-            self.log(f"❌ Gagal inject JS: {e}")
-            return False
-
-    def do_single_generate(self, driver, gen_idx, prompt_text, image_path, output_dir):
-        """Generate a single video. Returns file path, 'RATE_LIMITED', or None."""
-        prefix = f"[#{gen_idx+1}]"
-
-        # Navigate to /imagine
-        self.log(f"{prefix} 🌐 Membuka grok.com/imagine...")
-        driver.get(GROK_URL)
-        time.sleep(5)
-        if self._stop.is_set(): return None
-
-        # Inject JS
-        if not self.inject_js(driver):
-            self.log(f"{prefix} ❌ Gagal inject JS")
-            return None
-        if self._stop.is_set(): return None
-
-        # Prepare image
-        image_b64 = None
-        image_name = "ref.jpg"
-        if image_path and os.path.exists(image_path):
-            self.log(f"{prefix} 📷 Encoding: {os.path.basename(image_path)}")
-            try:
-                image_b64 = image_to_base64(image_path)
-                image_name = os.path.basename(image_path)
-            except Exception as e:
-                self.log(f"{prefix} ⚠️ Gagal encode gambar: {e}")
-                image_b64 = None
-        if self._stop.is_set(): return None
-
-        # Call __grokGenerate
-        self.log(f"{prefix} 🚀 Generate: {prompt_text[:60]}...")
-        try:
-            config_json = json.dumps({
-                "prompt": prompt_text,
-                "mode": "video",
-                "image": image_b64,
-                "imageName": image_name,
-                "timeout": 600000,
-                "upscale": False,
-                "useImageRef": True if image_b64 else False,
-                "genMode": DEFAULT_GEN_MODE,
-                "resolution": DEFAULT_RESOLUTION,
-                "duration": DEFAULT_DURATION,
-                "aspectRatio": DEFAULT_ASPECT_RATIO,
-            })
-            driver.execute_script(f"""
-                (async function() {{
-                    try {{
-                        await window.__grokGenerate({config_json});
-                    }} catch(e) {{
-                        window.__GROK_AUTO.status = 'error';
-                        window.__GROK_AUTO.error = e.message;
-                    }}
-                }})();
-            """)
-        except Exception as e:
-            self.log(f"{prefix} ❌ Gagal __grokGenerate: {e}")
-            return None
-
-        # Poll progress
-        poll_start = time.time()
-        poll_timeout = 660
-        last_pct = -1
-        last_msg = ""
-
-        while time.time() - poll_start < poll_timeout:
-            if self._stop.is_set():
-                try: driver.execute_script("window.__grokCancel();")
-                except: pass
-                return None
-
-            try:
-                state = driver.execute_script("return window.__grokGetState();")
-            except Exception:
-                time.sleep(2)
-                continue
-
-            if not state:
-                time.sleep(1)
-                continue
-
-            status = state.get("status", "idle")
-            pct = state.get("progress", 0)
-            msg = state.get("message", "")
-            error = state.get("error")
-
-            if pct != last_pct:
-                last_pct = pct
-                self.log(f"{prefix} ⏳ {pct}% — {msg[:60]}")
-
-            if status == "done":
-                self.log(f"{prefix} ✅ Generasi selesai!")
-                break
-            elif status == "error":
-                self.log(f"{prefix} ❌ Error: {error or 'Unknown'}")
-                return None
-            elif status == "rate_limited":
-                self.log(f"{prefix} 🚫 RATE LIMIT!")
-                return "RATE_LIMITED"
-            elif status == "cancelled":
-                return None
-
-            time.sleep(2)
-        else:
-            self.log(f"{prefix} ❌ Timeout")
-            return None
-
-        if self._stop.is_set(): return None
-
-        # Download video
-        try:
-            state = driver.execute_script("return window.__grokGetState();")
-            vid_url = state.get("videoUrl") if state else None
-        except:
-            vid_url = None
-
-        if not vid_url or not vid_url.startswith("https://"):
-            try:
-                vid_url = driver.execute_script("""
-                    const sd = document.querySelector('video#sd-video');
-                    if (sd && sd.src && sd.src.startsWith('https://')) return sd.src;
-                    const hd = document.querySelector('video#hd-video');
-                    if (hd && hd.src && hd.src.startsWith('https://')) return hd.src;
-                    for (const v of document.querySelectorAll('video')) {
-                        if (v.src && v.src.startsWith('https://') && v.src.includes('.mp4'))
-                            return v.src;
-                    }
-                    return null;
-                """)
-            except:
-                vid_url = None
-
-        if not vid_url or not vid_url.startswith("https://"):
-            self.log(f"{prefix} ❌ Video URL tidak ditemukan")
-            return None
-
-        filename = self.get_next_filename(output_dir)
-        save_path = os.path.join(output_dir, filename)
-        self.log(f"{prefix} ⬇️ Downloading...")
-
-        try:
-            cookies = {c['name']: c['value'] for c in driver.get_cookies()}
-            headers = {
-                'User-Agent': driver.execute_script("return navigator.userAgent;"),
-                'Referer': 'https://grok.com/',
-            }
-            resp = requests.get(vid_url, headers=headers, cookies=cookies,
-                                stream=True, timeout=120)
-            if resp.status_code == 200:
-                size = 0
-                with open(save_path, 'wb') as f:
-                    for chunk in resp.iter_content(65536):
-                        if chunk:
-                            f.write(chunk)
-                            size += len(chunk)
-                if size > 50000:
-                    self.log(f"{prefix} ✅ {filename} ({size/1024/1024:.1f} MB)")
-                    return save_path
-                else:
-                    try: os.remove(save_path)
-                    except: pass
-        except Exception as e:
-            self.log(f"{prefix} ⚠️ Download error: {e}")
-
-        self.log(f"{prefix} ❌ Download gagal")
-        return None
-
-    def start(self):
-        """Launch Chrome and connect Selenium."""
-        self.open_chrome()
-        if self._stop.is_set(): return False
-        driver = self.connect_selenium()
-        if not driver:
-            return False
-        self.driver = driver
-        return True
-
-    def run_generate(self, tasks):
-        """
-        tasks = list of (gen_num, prompt_text, image_path)
-        Runs on self.driver.
-        """
-        driver = self.driver
-        delay = 5
-
-        for task_idx, (gen_num, prompt_text, image_path) in enumerate(tasks):
-            if self._stop.is_set(): break
-
-            result = self.do_single_generate(driver, gen_num, prompt_text, image_path, self.output_dir)
-
-            if result == "RATE_LIMITED":
-                self.log("🚫 Rate limit! Menunggu 2 menit...")
-                for _ in range(120):
-                    if self._stop.is_set(): break
-                    time.sleep(1)
-                if self._stop.is_set(): break
-                result = self.do_single_generate(driver, gen_num, prompt_text, image_path, self.output_dir)
-                if result == "RATE_LIMITED":
-                    self.log("🚫 Rate limit masih aktif. Stop browser ini.")
-                    break
-
-            if result and result != "RATE_LIMITED":
-                self.generated += 1
-            else:
-                self.failed += 1
-
-            # Delay between videos
-            if task_idx < len(tasks) - 1 and not self._stop.is_set():
-                self.log(f"⏳ Jeda {delay} detik...")
-                for _ in range(delay):
-                    if self._stop.is_set(): break
-                    time.sleep(1)
-
-    def shutdown(self):
-        self.log(f"🏁 B{self.bid+1} total: {self.generated} OK, {self.failed} gagal")
-        try: self.driver.quit()
-        except: pass
-        self.kill_chrome()
-
-
 def generate_stok_multibrowser(ud_num, needed, prompt_text, bahan_folder, log_fn, stop_event,
-                                raw_dir=None, merge_func=None):
+                                raw_dir=None, merge_func=None, browser_states=None):
     """
-    Multi-browser Grok generation using grok_autoV2.js.
+    Multi-browser Grok generation using shared GrokBrowserWorker.
     Launches up to 5 browsers (ports 9220-9224, user-data 1grok-5grok).
     Each browser generates videos in parallel, results go to raw_dir,
     then merge pairs into stok.
     """
-    if not SELENIUM_OK:
-        log_fn("❌ Selenium tidak terinstall!")
-        return 0
 
     if raw_dir is None:
         raw_dir = get_raw_dir(ud_num)
@@ -541,7 +206,13 @@ def generate_stok_multibrowser(ud_num, needed, prompt_text, bahan_folder, log_fn
         ud_dir = GROK_USER_DATA_DIRS[b]
         os.makedirs(ud_dir, exist_ok=True)
 
-        worker = GrokBrowserWorker(b, port, ud_dir, raw_dir, log_fn, stop_event, file_lock)
+        video_cfg = {
+            "gen_mode": DEFAULT_GEN_MODE,
+            "resolution": DEFAULT_RESOLUTION,
+            "duration": DEFAULT_DURATION,
+            "aspect_ratio": DEFAULT_ASPECT_RATIO,
+        }
+        worker = GrokBrowserWorker(b, port, ud_dir, raw_dir, log_fn, stop_event, file_lock, video_cfg, browser_states)
         if worker.start():
             workers.append(worker)
             log_fn(f"✅ Browser {b+1} terhubung (port {port}, ud: {os.path.basename(ud_dir)})")
@@ -578,7 +249,7 @@ def generate_stok_multibrowser(ud_num, needed, prompt_text, bahan_folder, log_fn
     for b, worker in enumerate(active_workers):
         if not browser_tasks[b]:
             continue
-        t = threading.Thread(target=worker.run_generate,
+        t = threading.Thread(target=worker.run_tasks,
                              args=(browser_tasks[b],), daemon=True)
         threads.append(t)
 
@@ -677,13 +348,30 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
                 gen_log_lines.append(f"<code>[{datetime.now().strftime('%H:%M:%S')}]</code> {s}")
                 if len(gen_log_lines) > 20: gen_log_lines.pop(0)
 
+        browser_states = {}
+
         def _gen_updater():
             last_text = ""
+            start_time = time.time()
             while not gen_done.is_set() and not stop_event.is_set():
-                time.sleep(5)
+                time.sleep(3)
+                elapsed_str = format_elapsed(time.time() - start_time)
+                
                 with gen_log_lock:
-                    if not gen_log_lines: continue
-                    text = f"<b>[UD {ud_num}] Generate Progress ({count_stok(ud_num)}/{batch_size})</b>\n" + "\n".join(gen_log_lines)
+                    log_text = "\n".join(gen_log_lines[-8:]) if gen_log_lines else "<i>Menunggu...</i>"
+                
+                b_cfg_str = f"({N_GROK_BROWSERS} browsers) ⏱ {elapsed_str}"
+                
+                text = (
+                    f"<b>[UD {ud_num}] 🚀 Generate Progress ({count_stok(ud_num)}/{batch_size})</b>\n"
+                    f"{b_cfg_str}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                )
+                panel = render_browser_panel(browser_states)
+                if panel:
+                    text += f"🖥 <b>Browser Status:</b>\n{panel}\n━━━━━━━━━━━━━━━━━━\n"
+                text += log_text
+                
                 if text != last_text:
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -699,7 +387,8 @@ def _run_ud_pipeline(ud_num, chat_id, bot, main_loop, stop_event):
             generate_stok_multibrowser(
                 ud_num, needed, prompt_text, cfg["bahan_folder"],
                 log_fn, stop_event,
-                raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair)
+                raw_dir=get_raw_dir(ud_num), merge_func=custom_merge_video_pair,
+                browser_states=browser_states)
         except GrokRateLimitError:
             gen_done.set()
             updater_t.join(timeout=3)
