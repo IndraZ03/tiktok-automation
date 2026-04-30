@@ -19,7 +19,7 @@ except ImportError:
     GDRIVE_OK = False
 
 # ── Import TikTok upload functions ──
-sys.path.insert(0, r"c:\tiktok_automation")
+sys.path.insert(0, r"c:\indra\ternak_dracin")
 from tiktok_gui import (
     open_chrome_debug, connect_selenium,
     do_upload_file, do_post_video
@@ -33,10 +33,10 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
-BOT_TOKEN = "8577651733:AAG69uuoImXQpe5qcEtMdlwgu3_6rQAvaBI"
+BOT_TOKEN = "8479259552:AAGik0jiM2uhW6k_ldqgGagJxVsn3yau5m0"
 ALLOWED_USER_IDS = []
 
-APP_DIR = r"C:\tiktok_automation"
+APP_DIR = r"C:\indra\ternak_dracin"
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 TEMP_DIR = os.path.join(APP_DIR, "yt_temp")
 FINAL_DIR = os.path.join(APP_DIR, "video_yt")
@@ -56,13 +56,16 @@ UD_PORT_MAP = {i: str(9221 + i) for i in range(1, 21)}  # UD 1-20 → port 9222-
 def _find_bin(name):
     found = shutil.which(name)
     if found: return found
+    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
     for c in [os.path.expanduser(rf"~\AppData\Local\Microsoft\WinGet\Links\{name}.exe"),
-              rf"C:\ffmpeg\bin\{name}.exe", os.path.join(APP_DIR, f"{name}.exe")]:
+              rf"C:\ffmpeg\bin\{name}.exe", os.path.join(APP_DIR, f"{name}.exe"),
+              os.path.join(scripts_dir, f"{name}.exe")]:
         if os.path.isfile(c): return c
     return name
 
 FFPROBE_PATH = _find_bin("ffprobe")
 FFMPEG_PATH = _find_bin("ffmpeg")
+YTDLP_PATH = _find_bin("yt-dlp")
 WATERMARK_WIDTH_PCT = 25
 WATERMARK_MARGIN_PCT = 2
 TEXT_FONT_FILE = "C\\:/Windows/Fonts/arial.ttf"  # Use fontfile= to bypass fontconfig on Windows
@@ -357,7 +360,7 @@ def build_progress_message(title, stages):
 async def download_video(url, temp_dir, progress_callback=None):
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-    cmd = ["yt-dlp","--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [YTDLP_PATH,"--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
            "--merge-output-format","mp4","-o",output_template,"--newline","--no-color",
            "--print","after_move:filepath",url]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -392,7 +395,7 @@ def download_video_sync(url, temp_dir, log_fn=None):
     """Synchronous download for use in threads."""
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-    cmd = ["yt-dlp","--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [YTDLP_PATH,"--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
            "--merge-output-format","mp4","-o",output_template,"--newline","--no-color",
            "--print","after_move:filepath",url]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -432,12 +435,12 @@ def _build_ffmpeg_filter(input_file, logo_path, overlay_title, overlay_part, use
     if landscape:
         # Landscape → portrait: scale to fit within 1080x1920, pad with black
         # Scale so the width fits 1080, keep aspect ratio, then pad to 1080x1920
-        scale_part = f"scale={TARGET_W}:-2:force_original_aspect_ratio=decrease"
+        scale_part = f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,setsar=1"
         pad_part = f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:black"
         base_vf = f"{scale_part},{pad_part}"
     else:
         # Portrait: scale to 1080xN, then pad to 1080x1920 if needed
-        scale_part = f"scale={TARGET_W}:-2:force_original_aspect_ratio=decrease"
+        scale_part = f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,setsar=1"
         pad_part = f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:black"
         base_vf = f"{scale_part},{pad_part}"
 
@@ -1014,7 +1017,7 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
     # ── Cek apakah folder sudah ada (hindari download ulang saat restart) ──
     try:
         result = subprocess.run(
-            ["yt-dlp", "--no-playlist", "--print", "title", url],
+            [YTDLP_PATH, "--no-playlist", "--print", "title", url],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -1087,31 +1090,37 @@ def _force_fresh_tab(drv, log_fn, prefix):
     """Tutup semua tab lama, buka tab baru ke TikTok upload page."""
     log_fn(f"{prefix} 🔄 Membuka tab baru (fresh session)...", "info")
     try:
-        # 1. Buka tab baru (blank)
-        drv.execute_script("window.open('about:blank', '_blank');")
+        # 1. Buka tab baru
+        try:
+            drv.switch_to.new_window('tab')
+        except:
+            drv.execute_script("window.open('about:blank', '_blank');")
+            drv.switch_to.window(drv.window_handles[-1])
         time.sleep(1)
+        
+        new_window = drv.current_window_handle
         windows = drv.window_handles
-        new_window = windows[-1]
         # 2. Tutup semua tab lama
-        for w in windows[:-1]:
-            try:
-                drv.switch_to.window(w)
-                drv.close()
-            except:
-                pass
+        for w in windows:
+            if w != new_window:
+                try:
+                    drv.switch_to.window(w)
+                    drv.close()
+                except:
+                    pass
         # 3. Switch ke tab baru
         drv.switch_to.window(new_window)
         time.sleep(1)
         # 4. Navigate ke upload page (fresh load)
         drv.get(TIKTOK_UPLOAD_URL)
         time.sleep(5)
-        # 5. Verify upload page loaded (cek input[type=file])
+        # 5. Verify upload page loaded (cek tombol upload)
         try:
             from selenium.webdriver.support.ui import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
             from selenium.webdriver.common.by import By
             WebDriverWait(drv, 15).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+                EC.presence_of_element_located((By.XPATH, "//button[@data-e2e='select_video_button' or @aria-label='Select video']")))
             log_fn(f"{prefix} ✅ Tab baru siap", "success")
         except:
             drv.refresh()
@@ -1119,6 +1128,9 @@ def _force_fresh_tab(drv, log_fn, prefix):
             log_fn(f"{prefix} ⚠️ Refresh halaman setelah timeout", "warn")
     except Exception as e:
         log_fn(f"{prefix} ⚠️ Error buat tab baru: {str(e)[:60]}", "warn")
+        err_str = str(e).lower()
+        if "invalid session id" in err_str or "disconnected" in err_str or "no such window" in err_str:
+            raise # lempar error agar batch loop tahu browser mati
 
 
 def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
@@ -1225,6 +1237,9 @@ def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
                         log_fn(f"{prefix} ⚠️ HTTP 403 error, retry {attempt_403+1}/{MAX_403_RETRIES}...", "warn")
                         time.sleep(5)
                         continue
+                    if "invalid session id" in err_str or "disconnected" in err_str or "no such window" in err_str:
+                        log_fn(f"{prefix} ❌ Browser crash/nyangkut, stop batch agar retry nanti...", "error")
+                        return uploaded, total # stop batch so new browser launched next
                     log_fn(f"{prefix} ❌ Error: {e}", "error")
                     break
 

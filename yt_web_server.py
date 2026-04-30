@@ -5,10 +5,10 @@ Serves index.html and exposes REST APIs for managing yt_bot_v2.py
 import os, sys, json, re, time, threading, shutil, subprocess, traceback
 from datetime import datetime, timedelta
 from collections import deque
-from flask import Flask, jsonify, request, send_from_directory, Response, render_template_string
+from flask import Flask, jsonify, request, send_from_directory, Response
 
 # ── Reuse configs & helpers from yt_bot_v2 ──
-APP_DIR = r"c:\indra\ternak_dracin"
+APP_DIR = r"C:\indra\ternak_dracin"
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 TEMP_DIR = os.path.join(APP_DIR, "yt_temp")
 FINAL_DIR = os.path.join(APP_DIR, "video_yt")
@@ -32,13 +32,16 @@ TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload"
 def _find_bin(name):
     found = shutil.which(name)
     if found: return found
+    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
     for c in [os.path.expanduser(rf"~\AppData\Local\Microsoft\WinGet\Links\{name}.exe"),
-              rf"C:\ffmpeg\bin\{name}.exe", os.path.join(APP_DIR, f"{name}.exe")]:
+              rf"C:\ffmpeg\bin\{name}.exe", os.path.join(APP_DIR, f"{name}.exe"),
+              os.path.join(scripts_dir, f"{name}.exe")]:
         if os.path.isfile(c): return c
     return name
 
 FFPROBE_PATH = _find_bin("ffprobe")
 FFMPEG_PATH = _find_bin("ffmpeg")
+YTDLP_PATH = _find_bin("yt-dlp")
 
 TARGET_W, TARGET_H = 1080, 1920
 WATERMARK_WIDTH_PCT = 25
@@ -185,7 +188,7 @@ def split_and_process_sync(input_file, output_dir, title, logo_path, log_fn=None
 def download_video_sync(url, temp_dir, log_fn=None):
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-    cmd = ["yt-dlp","--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [YTDLP_PATH,"--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
            "--merge-output-format","mp4","-o",output_template,"--newline","--no-color",
            "--print","after_move:filepath",url]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -207,27 +210,21 @@ def download_video_sync(url, temp_dir, log_fn=None):
     return filepath, title
 
 # ═══════════════════════════════════════════════════════════
-#  LOG SYSTEM — SSE based
+#  LOG SYSTEM — Polling based
 # ═══════════════════════════════════════════════════════════
 MAX_LOG_LINES = 200
 _log_buffer = deque(maxlen=MAX_LOG_LINES)
-_log_subscribers = []  # list of queues
 _log_lock = threading.Lock()
+_log_counter = 0
 
 def _web_log(msg, tag=None):
+    global _log_counter
     ts = datetime.now().strftime("%H:%M:%S")
     icon = {"success":"✅","error":"❌","warn":"⚠️","info":"ℹ️"}.get(tag, "▪️")
-    entry = {"ts": ts, "icon": icon, "msg": msg, "tag": tag or ""}
     with _log_lock:
+        _log_counter += 1
+        entry = {"id": _log_counter, "ts": ts, "icon": icon, "msg": msg, "tag": tag or ""}
         _log_buffer.append(entry)
-        dead = []
-        for q in _log_subscribers:
-            try:
-                q.append(entry)
-            except:
-                dead.append(q)
-        for d in dead:
-            _log_subscribers.remove(d)
 
 # ═══════════════════════════════════════════════════════════
 #  FULL AUTO ENGINE (same logic as yt_bot_v2.py _daemon)
@@ -255,7 +252,7 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
     url = links[0]
     # cek folder sudah ada
     try:
-        result = subprocess.run(["yt-dlp","--no-playlist","--print","title",url],
+        result = subprocess.run([YTDLP_PATH,"--no-playlist","--print","title",url],
             capture_output=True, text=True, timeout=30)
         if result.returncode == 0 and result.stdout.strip():
             pre_title = sanitize_filename(result.stdout.strip())
@@ -431,7 +428,7 @@ def _upload_batch_web(log_fn, stop_evt, ud_num, video_files):
     log_fn(f"🎉 [UD {ud_num}] Batch selesai! {uploaded}/{total}", "success")
     return uploaded, total
 
-def _full_auto_daemon(stop_evt):
+def _full_auto_daemon_logic(stop_evt):
     log = _web_log
     active = load_active_ud()
     log(f"🤖 Full Auto dimulai! Active UD: {', '.join(str(x) for x in active)}", "success")
@@ -473,12 +470,20 @@ def _full_auto_daemon(stop_evt):
             continue
         candidates.sort(key=lambda x: x[0])
         trigger_dt, ud_num, has_pending = candidates[0]
-        log(f"🎯 Terdekat: UD {ud_num} — {trigger_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+        
+        sched_info = "\n".join(
+            f"  {'➡️' if c[1]==ud_num else '  '} UD {c[1]}: "
+            f"{c[0].strftime('%Y-%m-%d %H:%M')}"
+            f"{' (sisa video)' if c[2] else ''}"
+            for c in candidates
+        )
+        log(f"📅 Jadwal UD:\n{sched_info}\n\n🎯 Terdekat: UD {ud_num} — {trigger_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+
         # Tunggu jadwal
         now = datetime.now()
         wait_sec = (trigger_dt - now).total_seconds()
         if wait_sec > 0:
-            log(f"⏳ UD {ud_num}: Menunggu {int(wait_sec//60)} menit...", "info")
+            log(f"⏳ UD {ud_num}: Menunggu jadwal ({int(wait_sec//60)} menit lagi)", "info")
             elapsed = 0
             while elapsed < wait_sec and not stop_evt.is_set():
                 time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
@@ -510,301 +515,25 @@ def _full_auto_daemon(stop_evt):
     log("⏹ Full Auto dihentikan.", "warn")
     _auto_state["running"] = False
 
+def _full_auto_daemon(stop_evt):
+    try:
+        _full_auto_daemon_logic(stop_evt)
+    except Exception as e:
+        import traceback
+        _web_log(f"🔥 FATAL ERROR di daemon: {e}", "error")
+        _web_log(f"Details: {traceback.format_exc()}", "error")
+        print(f"FATAL ERROR di daemon:\n{traceback.format_exc()}")
+    finally:
+        _auto_state["running"] = False
+
 # ═══════════════════════════════════════════════════════════
 #  FLASK APP
 # ═══════════════════════════════════════════════════════════
 app = Flask(__name__, static_folder=os.path.dirname(os.path.abspath(__file__)))
 
-YT_INDEX_HTML = r"""
-<!doctype html>
-<html lang="id">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>YT Bot Dashboard</title>
-  <style>
-    :root{--bg:#0f1117;--panel:#1a1d27;--text:#e2e8f0;--muted:#6b7280;--line:#2d3348;--brand:#6366f1;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--shadow:0 4px 20px rgba(0,0,0,.3)}
-    *{box-sizing:border-box;margin:0}
-    body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text)}
-    header{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
-    h1{font-size:18px;font-weight:700;background:linear-gradient(135deg,#6366f1,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-    .top{display:flex;gap:10px;align-items:center;font-size:13px;color:var(--muted)}
-    main{display:grid;grid-template-columns:260px minmax(0,1fr) 420px;gap:12px;padding:12px;min-height:calc(100vh - 56px)}
-    section{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);overflow:hidden}
-    .section-head{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
-    h2{font-size:14px;font-weight:600}
-    .body{padding:14px}
-    .ud-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
-    .ud-btn{border:1px solid var(--line);background:var(--panel);color:var(--text);height:38px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;transition:.15s}
-    .ud-btn:hover{border-color:var(--brand)}
-    .ud-btn.active{border-color:var(--brand);background:#6366f120;color:#a5b4fc}
-    .ud-btn.enabled{box-shadow:inset 0 -3px 0 var(--ok)}
-    label{display:block;font-size:11px;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.5px}
-    input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit;background:#12141e;color:var(--text)}
-    textarea{min-height:70px;resize:vertical}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    .checks{display:flex;gap:14px;margin:10px 0;align-items:center;flex-wrap:wrap}
-    .check{display:flex;gap:5px;align-items:center;font-size:13px}
-    .check input{width:auto}
-    .actions{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:14px}
-    button{border:none;background:var(--brand);color:#fff;min-height:36px;border-radius:6px;padding:7px 10px;cursor:pointer;font-weight:600;font-size:13px;transition:.15s}
-    button:hover{filter:brightness(1.15)}
-    button.secondary{background:transparent;color:var(--brand);border:1px solid var(--line)}
-    button.warn{background:var(--warn);color:#000}
-    button.danger{background:var(--err)}
-    button:disabled{opacity:.4;cursor:not-allowed}
-    .pill{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:700;background:#1e293b;color:#94a3b8}
-    .pill.run{background:#422006;color:var(--warn)}
-    .pill.ok{background:#052e16;color:var(--ok)}
-    .active-line{display:flex;gap:8px;margin-top:12px}
-    .active-line input{flex:1}
-    .log{height:calc(100vh - 125px);overflow:auto;background:#0a0c12;color:#94a3b8;padding:10px;font:12px Consolas,monospace;border-radius:0 0 10px 10px}
-    .log-line{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);white-space:pre-wrap;overflow-wrap:anywhere}
-    .log-line.success{color:#86efac}
-    .log-line.error{color:#fca5a5}
-    .log-line.warn{color:#fcd34d}
-    .stat{border:1px solid var(--line);border-radius:8px;padding:8px;background:#12141e}
-    .stat small{display:block;color:var(--muted);font-size:11px}
-    .stat strong{font-size:18px}
-    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
-    .folder-list{margin-top:8px;max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:8px;background:#12141e;font-size:12px}
-    .folder-item{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04)}
-    .folder-item:last-child{border:0}
-    .link-list{margin-top:4px;max-height:120px;overflow:auto;font-size:12px;color:var(--muted)}
-    .link-list div{padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    @media(max-width:1100px){main{grid-template-columns:220px minmax(0,1fr)}.right{grid-column:1/-1}.log{height:300px}}
-    @media(max-width:700px){main{grid-template-columns:1fr}.stats,.actions,.row{grid-template-columns:1fr}}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>📺 YT Bot Dashboard</h1>
-    <div class="top">
-      <span id="taskPill" class="pill">idle</span>
-      <label class="check" style="margin:0"><input type="checkbox" id="autoSwitch" onchange="toggleAuto()"> Full Auto</label>
-      <button class="secondary" onclick="refresh()">Refresh</button>
-    </div>
-  </header>
-  <main>
-    <!-- LEFT: UD selector -->
-    <section>
-      <div class="section-head"><h2>User Data</h2><span class="pill" id="selectedPill">UD 1</span></div>
-      <div class="body">
-        <div class="ud-grid" id="udGrid"></div>
-        <div class="active-line">
-          <input id="activeInput" placeholder="1,2,3">
-          <button onclick="saveActiveUd()">Set Active</button>
-        </div>
-        <label>Video Folders (video_yt)</label>
-        <div class="folder-list" id="folderList"></div>
-      </div>
-    </section>
-    <!-- CENTER: Config -->
-    <section>
-      <div class="section-head"><h2 id="configTitle">Konfigurasi UD 1</h2><span class="pill" id="runPill">idle</span></div>
-      <div class="body">
-        <div class="stats">
-          <div class="stat"><small>Stok Link</small><strong id="stokCount">0</strong></div>
-          <div class="stat"><small>Pending Video</small><strong id="pendingCount">0</strong></div>
-          <div class="stat"><small>Current Folder</small><strong id="folderName" style="font-size:13px">-</strong></div>
-        </div>
-        <label>Tambah Link YouTube (satu per baris)</label>
-        <textarea id="newLinks" placeholder="https://youtube.com/watch?v=..."></textarea>
-        <button style="margin-top:6px;width:100%" onclick="addLinks()">Tambah Link</button>
-        <label>Daftar Link</label>
-        <div class="link-list" id="linkList"></div>
-        <div class="row" style="margin-top:10px">
-          <div>
-            <label>Deskripsi</label>
-            <input id="deskripsi">
-          </div>
-          <div>
-            <label>Hashtags (pisah koma)</label>
-            <input id="hashtags">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label>Interval Upload (detik)</label>
-            <input id="interval" type="number" value="60">
-          </div>
-          <div>
-            <label>Schedule</label>
-            <div class="row">
-              <input id="schedTanggal" type="date">
-              <div style="display:flex;gap:4px"><input id="schedJam" type="number" min="0" max="23" placeholder="HH" style="width:50%"><input id="schedMenit" type="number" min="0" max="59" placeholder="MM" style="width:50%"></div>
-            </div>
-          </div>
-        </div>
-        <div class="checks">
-          <label class="check"><input type="checkbox" id="watermark" checked> Watermark</label>
-        </div>
-        <div class="actions">
-          <button onclick="saveSettings()">Simpan Settings</button>
-          <button onclick="saveSchedule()">Set Schedule</button>
-          <button class="secondary" onclick="deleteAllLinks()">Clear Links</button>
-          <button class="danger" onclick="deleteFolder()">Hapus Folder</button>
-          <button class="secondary" onclick="refresh()">Reload</button>
-        </div>
-      </div>
-    </section>
-    <!-- RIGHT: Logs -->
-    <section class="right">
-      <div class="section-head"><h2>Live Log</h2><button class="secondary" onclick="clearLog()">Clear</button></div>
-      <div class="log" id="logArea"></div>
-    </section>
-  </main>
-<script>
-const $ = id => document.getElementById(id);
-let state = null, selectedUd = 1;
-
-async function api(url, body) {
-  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  return r.json();
-}
-
-async function refresh() {
-  try {
-    state = await fetch('/ytbot/api/status').then(r=>r.json());
-    render();
-  } catch(e) { console.error(e); }
-}
-
-function renderUdGrid() {
-  const g = $('udGrid');
-  g.innerHTML = '';
-  for(let i=1;i<=20;i++){
-    const btn = document.createElement('button');
-    btn.className = 'ud-btn' + (i===selectedUd?' active':'') + (state.active_uds.includes(i)?' enabled':'');
-    btn.textContent = i;
-    btn.onclick = () => { selectedUd=i; render(); };
-    g.appendChild(btn);
-  }
-}
-
-function render() {
-  if(!state) return;
-  const d = state.ud_data[String(selectedUd)] || {};
-  renderUdGrid();
-  $('selectedPill').textContent = `UD ${selectedUd}`;
-  $('configTitle').textContent = `Konfigurasi UD ${selectedUd}`;
-  $('stokCount').textContent = d.stok || 0;
-  $('pendingCount').textContent = d.pending_videos || 0;
-  $('folderName').textContent = d.current_folder || '-';
-  $('activeInput').value = state.active_uds.join(',');
-  $('autoSwitch').checked = state.auto_running;
-  $('taskPill').className = state.auto_running ? 'pill run' : 'pill';
-  $('taskPill').textContent = state.auto_running ? 'AUTO' : 'idle';
-  // Links
-  const ll = $('linkList');
-  ll.innerHTML = '';
-  (d.links||[]).forEach((url,i)=>{
-    const div = document.createElement('div');
-    div.innerHTML = `<span style="color:var(--brand);cursor:pointer" onclick="deleteLink(${i})">✕</span> ${escapeHtml(url)}`;
-    ll.appendChild(div);
-  });
-  // Settings
-  const s = state.settings || {};
-  $('deskripsi').value = s.deskripsi || '';
-  $('hashtags').value = (s.hashtags||[]).join(', ');
-  $('interval').value = s.interval || 60;
-  $('watermark').checked = s.watermark !== false;
-  // Schedule
-  const sched = d.schedule || {};
-  $('schedTanggal').value = sched.tanggal || '';
-  $('schedJam').value = sched.jam || '';
-  $('schedMenit').value = sched.menit || '';
-  // Folders
-  const fl = $('folderList');
-  fl.innerHTML = '';
-  (state.folders||[]).forEach(f=>{
-    const div = document.createElement('div');
-    div.className = 'folder-item';
-    div.innerHTML = `<span><b>${escapeHtml(f.name)}</b> (${f.files} files, ${f.size_mb} MB)</span><button class="danger" style="min-height:24px;padding:2px 8px;font-size:11px" onclick="deleteFolderByName('${escapeHtml(f.name)}')">✕</button>`;
-    fl.appendChild(div);
-  });
-}
-
-function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-
-async function saveActiveUd(){
-  const uds = $('activeInput').value.split(',').map(x=>parseInt(x.trim())).filter(x=>x>=1&&x<=20);
-  await api('/ytbot/api/active_ud',{uds});
-  await refresh();
-}
-
-async function addLinks(){
-  const urls = $('newLinks').value.split('\n').map(x=>x.trim()).filter(Boolean);
-  if(!urls.length) return;
-  await api('/ytbot/api/stok',{ud:selectedUd, urls});
-  $('newLinks').value='';
-  await refresh();
-}
-
-async function deleteLink(idx){
-  await api('/ytbot/api/stok/delete',{ud:selectedUd, index:idx});
-  await refresh();
-}
-
-async function deleteAllLinks(){
-  if(!confirm('Hapus semua link UD '+selectedUd+'?')) return;
-  await api('/ytbot/api/stok/delete',{ud:selectedUd, index:'all'});
-  await refresh();
-}
-
-async function saveSettings(){
-  const hashtags = $('hashtags').value.split(',').map(x=>x.trim()).filter(Boolean);
-  await api('/ytbot/api/settings',{deskripsi:$('deskripsi').value, interval:$('interval').value, hashtags, watermark:$('watermark').checked});
-  await refresh();
-}
-
-async function saveSchedule(){
-  await api('/ytbot/api/schedule',{ud:selectedUd, tanggal:$('schedTanggal').value, jam:$('schedJam').value, menit:$('schedMenit').value});
-  await refresh();
-}
-
-async function toggleAuto(){
-  const on = $('autoSwitch').checked;
-  await api(on?'/ytbot/api/auto/start':'/ytbot/api/auto/stop',{});
-  setTimeout(refresh,500);
-}
-
-async function deleteFolderByName(name){
-  if(!confirm('Hapus folder '+name+'?')) return;
-  await api('/ytbot/api/folder/delete',{name});
-  await refresh();
-}
-
-async function deleteFolder(){
-  const d = state && state.ud_data[String(selectedUd)];
-  if(!d||!d.current_folder) return alert('Tidak ada folder aktif');
-  await deleteFolderByName(d.current_folder);
-}
-
-function appendLog(entry){
-  const area = $('logArea');
-  const div = document.createElement('div');
-  div.className = 'log-line ' + (entry.tag||'');
-  div.textContent = `[${entry.time||''}] ${entry.msg||''}`;
-  area.appendChild(div);
-  if(area.children.length>500) area.removeChild(area.firstChild);
-  area.scrollTop = area.scrollHeight;
-}
-
-function clearLog(){ $('logArea').innerHTML=''; }
-
-const es = new EventSource('/ytbot/api/logs');
-es.onmessage = (event) => appendLog(JSON.parse(event.data));
-setInterval(refresh, 5000);
-refresh();
-</script>
-</body>
-</html>
-"""
-
 @app.route("/")
 def index():
-    return render_template_string(YT_INDEX_HTML)
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "index.html")
 
 @app.route("/api/status")
 def api_status():
@@ -930,29 +659,12 @@ def api_auto_stop():
     _auto_state["running"] = False
     return jsonify({"ok": True})
 
-@app.route("/api/logs")
-def api_logs_sse():
-    def generate():
-        q = deque(maxlen=100)
-        with _log_lock:
-            # send existing logs first
-            for entry in _log_buffer:
-                yield f"data: {json.dumps(entry)}\n\n"
-            _log_subscribers.append(q)
-        try:
-            while True:
-                if q:
-                    entry = q.popleft()
-                    yield f"data: {json.dumps(entry)}\n\n"
-                else:
-                    time.sleep(0.5)
-                    yield ": keepalive\n\n"
-        except GeneratorExit:
-            with _log_lock:
-                if q in _log_subscribers:
-                    _log_subscribers.remove(q)
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+@app.route("/api/logs_poll")
+def api_logs_poll():
+    last_id = int(request.args.get("last_id", 0))
+    with _log_lock:
+        new_logs = [e for e in _log_buffer if e.get("id", 0) > last_id]
+        return jsonify(new_logs)
 
 @app.route("/api/folder/delete", methods=["POST"])
 def api_delete_folder():
