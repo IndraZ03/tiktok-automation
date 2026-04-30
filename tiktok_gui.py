@@ -208,6 +208,16 @@ def inject_video_file(driver, file_path):
 
 def do_upload_file(driver, file_path, log):
     log("Mencari elemen upload...")
+    try:
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
+        wait = WebDriverWait(driver, 30)
+        wait.until(EC.presence_of_element_located((By.XPATH, "//button[@data-e2e='select_video_button' or @aria-label='Select video']")))
+        log("✓ Tombol upload siap di web")
+    except Exception as e:
+        log("⚠️ Menunggu tombol upload lama, mungkin belum siap...")
+    
     inject_video_file(driver, file_path)
     log(f"✓ File disuntikkan: {os.path.basename(file_path)}")
     time.sleep(5)

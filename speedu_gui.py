@@ -393,9 +393,27 @@ def connect_selenium(port):
     return webdriver.Chrome(service=svc, options=opts)
 
 def navigate_upload_page(driver, force=False):
-    if force or "tiktok.com/tiktokstudio/upload" not in driver.current_url:
-        driver.get("https://www.tiktok.com/tiktokstudio/content"); time.sleep(3)
-        driver.get("https://www.tiktok.com/tiktokstudio/upload"); time.sleep(5)
+    """Always force a fresh upload page to avoid leftover state from previous uploads."""
+    if force:
+        # Gunakan tab baru untuk menghindari HTTP 403 pada upload kedua dan seterusnya 
+        # karena state tab lama bisa saja stale di mata TikTok.
+        driver.execute_script("window.open('https://www.tiktok.com/tiktokstudio/upload', '_blank');")
+        time.sleep(2)
+        
+        # Tutup semua tab selain tab yang baru saja dibuka
+        windows = driver.window_handles
+        new_window = windows[-1]
+        for w in windows[:-1]:
+            driver.switch_to.window(w)
+            driver.close()
+            
+        # Pindah fokus ke tab yang baru
+        driver.switch_to.window(new_window)
+        time.sleep(3)
+    elif "tiktok.com/tiktokstudio/upload" not in driver.current_url:
+        driver.get("https://www.tiktok.com/tiktokstudio/upload")
+        time.sleep(3)
+
     try:
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
     except:
