@@ -154,13 +154,26 @@ def connect_selenium(port):
 
 def navigate_upload_page(driver, force=False):
     """Always force a fresh upload page to avoid leftover state from previous uploads."""
-    if force or "tiktok.com/tiktokstudio/upload" not in driver.current_url:
-        # Navigate away first to ensure a clean state
-        driver.get("https://www.tiktok.com/tiktokstudio/content")
+    if force:
+        # Gunakan tab baru untuk menghindari HTTP 403 pada upload kedua dan seterusnya 
+        # karena state tab lama bisa saja stale di mata TikTok.
+        driver.execute_script("window.open('https://www.tiktok.com/tiktokstudio/upload', '_blank');")
+        time.sleep(2)
+        
+        # Tutup semua tab selain tab yang baru saja dibuka
+        windows = driver.window_handles
+        new_window = windows[-1]
+        for w in windows[:-1]:
+            driver.switch_to.window(w)
+            driver.close()
+            
+        # Pindah fokus ke tab yang baru
+        driver.switch_to.window(new_window)
         time.sleep(3)
-        # Now navigate to upload page (guaranteed fresh)
+    elif "tiktok.com/tiktokstudio/upload" not in driver.current_url:
         driver.get("https://www.tiktok.com/tiktokstudio/upload")
-        time.sleep(5)
+        time.sleep(3)
+
     # Verify we see the upload input (page fully loaded)
     try:
         WebDriverWait(driver, 10).until(

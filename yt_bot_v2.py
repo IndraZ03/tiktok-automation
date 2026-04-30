@@ -21,9 +21,11 @@ except ImportError:
 # ── Import TikTok upload functions ──
 sys.path.insert(0, r"c:\tiktok_automation")
 from tiktok_gui import (
-    open_chrome_debug, connect_selenium, navigate_upload_page,
+    open_chrome_debug, connect_selenium,
     do_upload_file, do_post_video
 )
+
+TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,11 +65,15 @@ FFPROBE_PATH = _find_bin("ffprobe")
 FFMPEG_PATH = _find_bin("ffmpeg")
 WATERMARK_WIDTH_PCT = 25
 WATERMARK_MARGIN_PCT = 2
-TEXT_FONT = "Arial"
+TEXT_FONT_FILE = "C\\:/Windows/Fonts/arial.ttf"  # Use fontfile= to bypass fontconfig on Windows
 TEXT_SIZE_PCT = 2.5
 TEXT_COLOR = "white"
 TEXT_BORDER_COLOR = "black"
 TEXT_BORDER_W = 4
+
+# TikTok HD portrait target
+TARGET_W = 1080
+TARGET_H = 1920
 
 # ═══════════════════════════════════════════════════════════════
 #  SCHEDULE STATE
@@ -193,6 +199,7 @@ DEFAULTS = {
     "interval": "60",
     "user_data_dir": os.path.join(APP_DIR, "user_data", "1"),
     "debug_port": "9222",
+    "watermark": True,
 }
 
 user_locks = {}
@@ -308,6 +315,11 @@ def get_video_info(fp):
         w,h = r.stdout.strip().split("x"); return int(w),int(h)
     except: return 1080,1920
 
+def is_landscape(fp):
+    """Check if video is landscape (width > height)."""
+    w, h = get_video_info(fp)
+    return w > h
+
 def sanitize_filename(title):
     title = re.sub(r'[<>:"/\\|?*!,;\[\]{}()\']', '', title)
     title = re.sub(r'\s+', ' ', title).strip('. ')
@@ -404,51 +416,116 @@ def download_video_sync(url, temp_dir, log_fn=None):
 # ═══════════════════════════════════════════════════════════════
 #  CORE: SPLIT
 # ═══════════════════════════════════════════════════════════════
-def split_and_process_sync(input_file, output_dir, title, logo_path, log_fn=None):
+def _build_ffmpeg_filter(input_file, logo_path, overlay_title, overlay_part, use_watermark=True):
+    """
+    Build FFmpeg filter_complex string that handles:
+    - Landscape → portrait conversion (pad to 1080x1920 with black bars)
+    - Portrait videos (keep original or scale to 1080x1920)
+    - Optional watermark overlay
+    - Title + part text overlay
+    Returns: (filter_string, use_filter_complex: bool, needs_logo_input: bool)
+    """
+    vid_w, vid_h = get_video_info(input_file)
+    landscape = vid_w > vid_h
+
+    # ── Step 1: Build the base video transform ──
+    if landscape:
+        # Landscape → portrait: scale to fit within 1080x1920, pad with black
+        # Scale so the width fits 1080, keep aspect ratio, then pad to 1080x1920
+        scale_part = f"scale={TARGET_W}:-2:force_original_aspect_ratio=decrease"
+        pad_part = f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:black"
+        base_vf = f"{scale_part},{pad_part}"
+    else:
+        # Portrait: scale to 1080xN, then pad to 1080x1920 if needed
+        scale_part = f"scale={TARGET_W}:-2:force_original_aspect_ratio=decrease"
+        pad_part = f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:black"
+        base_vf = f"{scale_part},{pad_part}"
+
+    # ── Step 2: Drawtext for title and part (relative to final 1080x1920) ──
+    dt_title = (
+        f"drawtext=text='{overlay_title}':fontfile='{TEXT_FONT_FILE}':"
+        f"fontsize=h*{TEXT_SIZE_PCT}/100:"
+        f"fontcolor={TEXT_COLOR}:borderw={TEXT_BORDER_W}:bordercolor={TEXT_BORDER_COLOR}:"
+        f"x=(w-text_w)/2:y=h-text_h*2.5-h*{WATERMARK_MARGIN_PCT*2}/100"
+    )
+    dt_part = (
+        f"drawtext=text='{overlay_part}':fontfile='{TEXT_FONT_FILE}':"
+        f"fontsize=h*{TEXT_SIZE_PCT}/100:"
+        f"fontcolor={TEXT_COLOR}:borderw={TEXT_BORDER_W}:bordercolor={TEXT_BORDER_COLOR}:"
+        f"x=(w-text_w)/2:y=h-text_h-h*{WATERMARK_MARGIN_PCT*2}/100"
+    )
+
+    # ── Step 3: Combine filters ──
+    if use_watermark and logo_path and os.path.exists(logo_path):
+        # With watermark: use filter_complex
+        wm_w = max(32, int(TARGET_W * WATERMARK_WIDTH_PCT / 100))
+        mx = max(4, int(TARGET_W * WATERMARK_MARGIN_PCT / 100))
+        fc = (
+            f"[0:v]{base_vf}[base];"
+            f"[1:v]scale={wm_w}:-1[wm];"
+            f"[base][wm]overlay={mx}:{mx}[vid];"
+            f"[vid]{dt_title}[vid2];"
+            f"[vid2]{dt_part}[out]"
+        )
+        return fc, True, True  # filter_complex, needs logo input
+    else:
+        # Without watermark: use -vf (simpler pipeline)
+        vf = f"{base_vf},{dt_title},{dt_part}"
+        return vf, False, False  # -vf, no logo input
+
+
+def split_and_process_sync(input_file, output_dir, title, logo_path, log_fn=None, use_watermark=True):
     os.makedirs(output_dir, exist_ok=True)
     duration = get_video_duration(input_file)
     if duration <= 0: raise Exception("Tidak bisa baca durasi video")
     total_parts = max(1, int(duration // SEGMENT_DURATION))
     safe_title = sanitize_filename(title)
     display_title = truncate_title(title)
-    vid_w, _ = get_video_info(input_file)
+    vid_w, vid_h = get_video_info(input_file)
+    landscape = vid_w > vid_h
+
+    if log_fn:
+        orientation = "landscape" if landscape else "portrait"
+        log_fn(f"📐 Video: {vid_w}x{vid_h} ({orientation})", "info")
+        if landscape:
+            log_fn(f"🔄 Akan dikonversi ke portrait {TARGET_W}x{TARGET_H}", "info")
+        log_fn(f"🖼 Watermark: {'ON' if use_watermark else 'OFF'}", "info")
+
     output_files = []
     for part in range(1, total_parts + 1):
         start_sec = (part-1)*SEGMENT_DURATION
         output_file = os.path.join(output_dir, f"{safe_title}_Part{part}.mp4")
         if log_fn: log_fn(f"Split Part {part}/{total_parts}...", "info")
-        overlay_title = display_title.replace("'","'\\\\'").replace(":","\\\\:").replace("%","%%")
+        overlay_title = display_title.replace("'","'\\\\\''").replace(":","\\\\\\:").replace("%","%%")
         overlay_part = f"Part {part}/{total_parts}"
-        if logo_path and os.path.exists(logo_path):
-            wm_w = max(32, int(vid_w*WATERMARK_WIDTH_PCT/100))
-            mx = max(4, int(vid_w*WATERMARK_MARGIN_PCT/100))
-            fc = (f"[1:v]scale={wm_w}:-1[wm];[0:v][wm]overlay={mx}:{mx}[vid];"
-                  f"[vid]drawtext=text='{overlay_title}':font='{TEXT_FONT}':fontsize=h*{TEXT_SIZE_PCT}/100:"
-                  f"fontcolor={TEXT_COLOR}:borderw={TEXT_BORDER_W}:bordercolor={TEXT_BORDER_COLOR}:"
-                  f"x=(w-text_w)/2:y=h-text_h*2.5-h*{WATERMARK_MARGIN_PCT*2}/100[vid2];"
-                  f"[vid2]drawtext=text='{overlay_part}':font='{TEXT_FONT}':fontsize=h*{TEXT_SIZE_PCT}/100:"
-                  f"fontcolor={TEXT_COLOR}:borderw={TEXT_BORDER_W}:bordercolor={TEXT_BORDER_COLOR}:"
-                  f"x=(w-text_w)/2:y=h-text_h-h*{WATERMARK_MARGIN_PCT*2}/100[out]")
-            cmd = [FFMPEG_PATH,"-y","-ss",str(start_sec),"-t",str(SEGMENT_DURATION),
-                   "-i",input_file,"-i",logo_path,"-filter_complex",fc,"-map","[out]","-map","0:a?",
-                   "-c:v","libx264","-preset","fast","-crf","23","-c:a","aac","-b:a","128k",
-                   "-shortest","-movflags","+faststart",output_file]
+
+        filter_str, is_complex, needs_logo = _build_ffmpeg_filter(
+            input_file, logo_path, overlay_title, overlay_part, use_watermark
+        )
+
+        if is_complex:
+            cmd = [FFMPEG_PATH, "-y", "-ss", str(start_sec), "-t", str(SEGMENT_DURATION),
+                   "-i", input_file, "-i", logo_path,
+                   "-filter_complex", filter_str,
+                   "-map", "[out]", "-map", "0:a?",
+                   "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                   "-c:a", "aac", "-b:a", "128k",
+                   "-movflags", "+faststart", output_file]
         else:
-            fs = (f"drawtext=text='{overlay_title}':font='{TEXT_FONT}':fontsize=h*{TEXT_SIZE_PCT}/100:"
-                  f"fontcolor={TEXT_COLOR}:borderw={TEXT_BORDER_W}:bordercolor={TEXT_BORDER_COLOR}:"
-                  f"x=(w-text_w)/2:y=h-text_h*2.5-h*{WATERMARK_MARGIN_PCT*2}/100,"
-                  f"drawtext=text='{overlay_part}':font='{TEXT_FONT}':fontsize=h*{TEXT_SIZE_PCT}/100:"
-                  f"fontcolor={TEXT_COLOR}:borderw={TEXT_BORDER_W}:bordercolor={TEXT_BORDER_COLOR}:"
-                  f"x=(w-text_w)/2:y=h-text_h-h*{WATERMARK_MARGIN_PCT*2}/100")
-            cmd = [FFMPEG_PATH,"-y","-ss",str(start_sec),"-t",str(SEGMENT_DURATION),
-                   "-i",input_file,"-vf",fs,"-c:v","libx264","-preset","fast","-crf","23",
-                   "-c:a","aac","-b:a","128k","-movflags","+faststart",output_file]
+            cmd = [FFMPEG_PATH, "-y", "-ss", str(start_sec), "-t", str(SEGMENT_DURATION),
+                   "-i", input_file,
+                   "-vf", filter_str,
+                   "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                   "-c:a", "aac", "-b:a", "128k",
+                   "-movflags", "+faststart", output_file]
+
         r = subprocess.run(cmd, capture_output=True)
         if r.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 10240:
             output_files.append(output_file)
             if log_fn: log_fn(f"  ✓ Part {part} selesai", "success")
         else:
-            if log_fn: log_fn(f"  ❌ Part {part} gagal", "error")
+            stderr_msg = r.stderr.decode('utf-8', errors='replace')[-200:] if r.stderr else 'unknown'
+            if log_fn: log_fn(f"  ❌ Part {part} gagal: {stderr_msg}", "error")
     return output_files
 
 # ═══════════════════════════════════════════════════════════════
@@ -518,13 +595,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 #  SETTINGS (inline buttons + ForceReply, works in groups)
 # ═══════════════════════════════════════════════════════════════
-def _settings_kb():
+def _settings_kb(uid=None):
     """Build inline keyboard for settings menu."""
+    cfg = get_cfg(uid) if uid else DEFAULTS
+    wm_on = cfg.get("watermark", True)
+    wm_label = "🖼 Watermark: ON ✅" if wm_on else "🖼 Watermark: OFF ❌"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Deskripsi", callback_data="set_desc"),
          InlineKeyboardButton("⏱ Interval", callback_data="set_interval")],
         [InlineKeyboardButton("📱 Active UD", callback_data="set_active_ud"),
          InlineKeyboardButton("🏷 Hashtags", callback_data="set_hashtags")],
+        [InlineKeyboardButton(wm_label, callback_data="set_toggle_watermark")],
         [InlineKeyboardButton("➕ Tambah Stok", callback_data="set_stok_pick"),
          InlineKeyboardButton("📋 Lihat Stok", callback_data="set_view_pick")],
         [InlineKeyboardButton("📅 Edit Schedule", callback_data="set_sched_pick"),
@@ -550,18 +631,20 @@ def _settings_text(uid):
     active = load_active_ud()
     hashtags_list = cfg.get('hashtags', [])
     hashtags_display = ', '.join(f'#{h}' for h in hashtags_list[:5]) if hashtags_list else '(kosong)'
+    wm_status = '✅ ON' if cfg.get('watermark', True) else '❌ OFF'
     return ("⚙️ <b>Settings</b>\n\n"
             f"📝 Deskripsi: <code>{escape_html(cfg['deskripsi'][:60]) or '(kosong)'}</code>\n"
             f"⏱ Interval: <code>{cfg['interval']} menit</code>\n"
             f"📱 Active UD: <b>{', '.join(str(x) for x in active)}</b>\n"
-            f"🏷 Hashtags: <code>{escape_html(hashtags_display)}</code>\n\n"
+            f"🏷 Hashtags: <code>{escape_html(hashtags_display)}</code>\n"
+            f"🖼 Watermark: <b>{wm_status}</b>\n\n"
             "Pilih tombol di bawah untuk mengubah:")
 
 async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
     uid = update.effective_user.id
     text = _settings_text(uid)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb(uid))
 
 async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /set command for all settings input (works in groups)."""
@@ -578,6 +661,7 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set interval 60</code>\n"
             "<code>/set ud 2,5,6</code>\n"
             "<code>/set hashtags fyp, viral</code>\n"
+            "<code>/set watermark on/off</code>\n"
             "<code>/set stok 2 https://youtube.com/...</code>\n"
             "<code>/set sched 2 2026-03-02 14:30</code>\n"
             "<code>/set del 2 all</code>",
@@ -621,6 +705,25 @@ async def cmd_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_cfg()
         display = ', '.join(f'#{t}' for t in tags)
         await update.message.reply_text(f"✅ Hashtags: <code>{escape_html(display)}</code>", parse_mode=ParseMode.HTML)
+
+    elif sub == "watermark":
+        if not val:
+            wm_status = '✅ ON' if cfg.get('watermark', True) else '❌ OFF'
+            await update.message.reply_text(
+                f"🖼 Watermark: <b>{wm_status}</b>\n\n"
+                "Kirim:\n<code>/set watermark on</code> atau <code>/set watermark off</code>",
+                parse_mode=ParseMode.HTML)
+            return
+        if val.lower() in ("on", "true", "1", "ya", "yes"):
+            cfg["watermark"] = True
+        elif val.lower() in ("off", "false", "0", "tidak", "no"):
+            cfg["watermark"] = False
+        else:
+            await update.message.reply_text("❌ Gunakan: <code>/set watermark on</code> atau <code>/set watermark off</code>", parse_mode=ParseMode.HTML)
+            return
+        save_cfg()
+        wm_status = '✅ ON' if cfg['watermark'] else '❌ OFF'
+        await update.message.reply_text(f"🖼 Watermark: <b>{wm_status}</b>", parse_mode=ParseMode.HTML)
 
     elif sub == "stok":
         stok_parts = val.split(None, 1)
@@ -746,7 +849,7 @@ async def _process_settings_text(update, ctx, field):
                 else: await update.message.reply_text("❌ Nomor tidak valid."); return
             except: await update.message.reply_text("❌ Kirim nomor atau 'all'."); return
     ctx.user_data["setting_field"] = None
-    await update.message.reply_text("✅ Tersimpan!", reply_markup=_settings_kb())
+    await update.message.reply_text("✅ Tersimpan!", reply_markup=_settings_kb(uid))
 
 async def _handle_settings_callback(q, ctx, data, bot):
     """Handle settings-related callback queries."""
@@ -762,7 +865,7 @@ async def _handle_settings_callback(q, ctx, data, bot):
 
     if data == "set_back":
         text = _settings_text(uid)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb())
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb(uid))
         return True
 
     # Settings that need text → show /set command example
@@ -792,6 +895,16 @@ async def _handle_settings_callback(q, ctx, data, bot):
             f"🏷 Hashtags: <code>{escape_html(disp)}</code>\n\n"
             "Kirim:\n<code>/set hashtags fyp, viral, tiktok</code>",
             parse_mode=ParseMode.HTML)
+        return True
+
+    # Toggle watermark
+    if data == "set_toggle_watermark":
+        cfg["watermark"] = not cfg.get("watermark", True)
+        save_cfg()
+        wm_status = '✅ ON' if cfg['watermark'] else '❌ OFF'
+        await bot.send_message(chat_id, f"🖼 Watermark: <b>{wm_status}</b>", parse_mode=ParseMode.HTML)
+        text = _settings_text(uid)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_settings_kb(uid))
         return True
 
     # UD pickers
@@ -933,7 +1046,7 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
         os.makedirs(video_folder, exist_ok=True)
 
         logo = LOGO_PATH if os.path.exists(LOGO_PATH) else None
-        output_files = split_and_process_sync(filepath, video_folder, title, logo, log_fn)
+        output_files = split_and_process_sync(filepath, video_folder, title, logo, log_fn, use_watermark=True)
 
         if not output_files:
             log_fn(f"❌ [UD {ud_num}] Split gagal, tidak ada part!", "error")
@@ -952,10 +1065,67 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
             if os.path.exists(job_temp): shutil.rmtree(job_temp)
         except: pass
 
+def _is_403_page(drv):
+    """Deteksi apakah halaman saat ini terkena HTTP 403."""
+    try:
+        page_src = (drv.page_source or "").lower()
+        cur_url = (drv.current_url or "").lower()
+        if "403" in drv.title or "forbidden" in drv.title.lower():
+            return True
+        if "403 forbidden" in page_src or "http error 403" in page_src:
+            return True
+        if "access denied" in page_src and "tiktok" in cur_url:
+            return True
+        if "error" in cur_url and "403" in page_src:
+            return True
+    except:
+        pass
+    return False
+
+
+def _force_fresh_tab(drv, log_fn, prefix):
+    """Tutup semua tab lama, buka tab baru ke TikTok upload page."""
+    log_fn(f"{prefix} 🔄 Membuka tab baru (fresh session)...", "info")
+    try:
+        # 1. Buka tab baru (blank)
+        drv.execute_script("window.open('about:blank', '_blank');")
+        time.sleep(1)
+        windows = drv.window_handles
+        new_window = windows[-1]
+        # 2. Tutup semua tab lama
+        for w in windows[:-1]:
+            try:
+                drv.switch_to.window(w)
+                drv.close()
+            except:
+                pass
+        # 3. Switch ke tab baru
+        drv.switch_to.window(new_window)
+        time.sleep(1)
+        # 4. Navigate ke upload page (fresh load)
+        drv.get(TIKTOK_UPLOAD_URL)
+        time.sleep(5)
+        # 5. Verify upload page loaded (cek input[type=file])
+        try:
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.by import By
+            WebDriverWait(drv, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
+            log_fn(f"{prefix} ✅ Tab baru siap", "success")
+        except:
+            drv.refresh()
+            time.sleep(5)
+            log_fn(f"{prefix} ⚠️ Refresh halaman setelah timeout", "warn")
+    except Exception as e:
+        log_fn(f"{prefix} ⚠️ Error buat tab baru: {str(e)[:60]}", "warn")
+
+
 def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
     """
     Upload up to UPLOAD_BATCH_SIZE videos from video_files list.
     Videos are deleted *after* each successful upload.
+    Uses fresh-tab approach: setiap upload buka tab baru, tutup tab lama.
     Returns: (uploaded_count, schedules_used)
     """
     if not video_files:
@@ -995,6 +1165,7 @@ def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
 
     batch = video_files[:UPLOAD_BATCH_SIZE]
     total = len(batch)
+    MAX_403_RETRIES = 2
 
     log_fn(f"📅 [UD {ud_num}] Schedule mulai: {start_dt.strftime('%Y-%m-%d %H:%M')}", "info")
     log_fn(f"🎬 [UD {ud_num}] Akan upload {total} video (dari {len(video_files)} sisa)...", "info")
@@ -1014,25 +1185,58 @@ def _upload_batch(cfg, log_fn, stop_evt, ud_num, video_files):
                 log_fn(f"  ⚠️ File tidak ada, skip: {os.path.basename(out_path)}", "warn")
                 continue
             sched_dt = start_dt + timedelta(minutes=interval * idx)
-            log_fn(f"[UD {ud_num}] [{idx+1}/{total}] Upload: {os.path.basename(out_path)}", "info")
-            log_fn(f"  Schedule: {sched_dt.strftime('%Y-%m-%d %H:%M')}", "info")
-            try:
-                navigate_upload_page(driver, force=(idx > 0))
-                time.sleep(3)
-                do_upload_file(driver, os.path.normpath(out_path), log_fn)
-                time.sleep(5)
-                do_post_video(driver, deskripsi, "", "", log_fn, sched_dt, stop_evt,
-                              add_sound=False, add_product=False, skip_switches=True,
-                              hashtags=hashtags if hashtags else None)
+            prefix = f"[UD {ud_num}] [{idx+1}/{total}]"
+            log_fn(f"{prefix} Upload: {os.path.basename(out_path)}", "info")
+            log_fn(f"{prefix} Schedule: {sched_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+
+            post_ok = False
+            for attempt_403 in range(MAX_403_RETRIES + 1):
+                try:
+                    # 1. Selalu buka tab baru (fresh session)
+                    _force_fresh_tab(driver, log_fn, prefix)
+                    time.sleep(2)
+
+                    # Cek apakah terkena 403
+                    if _is_403_page(driver):
+                        log_fn(f"{prefix} ⚠️ HTTP 403 terdeteksi! Retry {attempt_403+1}/{MAX_403_RETRIES}...", "warn")
+                        time.sleep(5)
+                        continue
+
+                    # 2. Upload file
+                    do_upload_file(driver, os.path.normpath(out_path), log_fn)
+                    time.sleep(5)
+
+                    # Cek lagi 403 setelah upload file
+                    if _is_403_page(driver):
+                        log_fn(f"{prefix} ⚠️ HTTP 403 setelah upload file! Retry {attempt_403+1}/{MAX_403_RETRIES}...", "warn")
+                        time.sleep(5)
+                        continue
+
+                    # 3. Post video
+                    do_post_video(driver, deskripsi, "", "", log_fn, sched_dt, stop_evt,
+                                  add_sound=False, add_product=False, skip_switches=True,
+                                  hashtags=hashtags if hashtags else None)
+                    post_ok = True
+                    break  # Keluar dari 403 retry loop
+
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if ("403" in err_str or "forbidden" in err_str) and attempt_403 < MAX_403_RETRIES:
+                        log_fn(f"{prefix} ⚠️ HTTP 403 error, retry {attempt_403+1}/{MAX_403_RETRIES}...", "warn")
+                        time.sleep(5)
+                        continue
+                    log_fn(f"{prefix} ❌ Error: {e}", "error")
+                    break
+
+            if post_ok:
                 # ✅ Hapus file setelah berhasil upload
                 try: os.remove(out_path)
                 except: pass
                 uploaded += 1
-                log_fn(f"  ✅ [{idx+1}/{total}] Upload sukses, file dihapus.", "success")
-            except Exception as e:
-                log_fn(f"  ❌ Error upload [{idx+1}]: {e}", "error")
+                log_fn(f"{prefix} ✅ Upload sukses, file dihapus.", "success")
+
             if idx < total - 1 and not stop_evt.is_set():
-                log_fn("  ⏳ Menunggu 10 detik...", "info"); time.sleep(10)
+                log_fn(f"{prefix} ⏳ Menunggu 10 detik...", "info"); time.sleep(10)
     finally:
         try: driver.quit()
         except: pass
@@ -1424,7 +1628,8 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         stages[1]["status"]="running"; stages[1]["detail"]=f"0/{total_parts} parts"
         await safe_edit(build_progress_message(title, stages))
         logo=LOGO_PATH if use_logo else None
-        output_files = split_and_process_sync(filepath, job_out, title, logo)
+        wm = get_cfg(uid).get("watermark", True)
+        output_files = split_and_process_sync(filepath, job_out, title, logo, use_watermark=wm)
         stages[1]["status"]="done"; stages[1]["detail"]=f"{len(output_files)} parts"
         await safe_edit(build_progress_message(title, stages))
         # Save locally
@@ -1466,6 +1671,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/set interval 60</code>\n"
             "<code>/set ud 2,5,6</code>\n"
             "<code>/set hashtags fyp, viral</code>\n"
+            "<code>/set watermark on/off</code>\n"
             "<code>/set stok 2 https://youtube.com/...</code>\n"
             "<code>/set sched 2 2026-03-02 14:30</code>\n"
             "<code>/set del 2 all</code>\n\n"
