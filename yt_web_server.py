@@ -657,6 +657,26 @@ YT_INDEX_HTML = r"""
 <script>
 const $ = id => document.getElementById(id);
 let state = null, selectedUd = 1;
+const _dirtyFields = {};
+let _activeLoaded = false;
+
+function markDirty(id) { _dirtyFields[id] = true; }
+function clearDirty(id) { delete _dirtyFields[id]; }
+function clearAllDirty() { Object.keys(_dirtyFields).forEach(k => delete _dirtyFields[k]); }
+function isDirty(id) { return !!_dirtyFields[id]; }
+function safeSet(id, val) { if (!isDirty(id) && document.activeElement !== $(id)) { $(id).value = val; } }
+function safeCheck(id, val) { if (!isDirty(id) && document.activeElement !== $(id)) { $(id).checked = val; } }
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['deskripsi','hashtags','interval','schedTanggal','schedJam','schedMenit','newLinks'].forEach(id => {
+    const el = $(id);
+    if (el) { el.addEventListener('input', () => markDirty(id)); el.addEventListener('focus', () => markDirty(id)); }
+  });
+  ['autoSwitch','watermark'].forEach(id => {
+    const el = $(id);
+    if (el) { el.addEventListener('change', () => markDirty(id)); }
+  });
+});
 
 async function api(url, body) {
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
@@ -691,8 +711,8 @@ function render() {
   $('stokCount').textContent = d.stok || 0;
   $('pendingCount').textContent = d.pending_videos || 0;
   $('folderName').textContent = d.current_folder || '-';
-  $('activeInput').value = state.active_uds.join(',');
-  $('autoSwitch').checked = state.auto_running;
+  if (!_activeLoaded) { $('activeInput').value = state.active_uds.join(','); _activeLoaded = true; }
+  safeCheck('autoSwitch', state.auto_running);
   $('taskPill').className = state.auto_running ? 'pill run' : 'pill';
   $('taskPill').textContent = state.auto_running ? 'AUTO' : 'idle';
   // Links
@@ -705,15 +725,15 @@ function render() {
   });
   // Settings
   const s = state.settings || {};
-  $('deskripsi').value = s.deskripsi || '';
-  $('hashtags').value = (s.hashtags||[]).join(', ');
-  $('interval').value = s.interval || 60;
-  $('watermark').checked = s.watermark !== false;
+  safeSet('deskripsi', s.deskripsi || '');
+  safeSet('hashtags', (s.hashtags||[]).join(', '));
+  safeSet('interval', s.interval || 60);
+  safeCheck('watermark', s.watermark !== false);
   // Schedule
   const sched = d.schedule || {};
-  $('schedTanggal').value = sched.tanggal || '';
-  $('schedJam').value = sched.jam || '';
-  $('schedMenit').value = sched.menit || '';
+  safeSet('schedTanggal', sched.tanggal || '');
+  safeSet('schedJam', sched.jam || '');
+  safeSet('schedMenit', sched.menit || '');
   // Folders
   const fl = $('folderList');
   fl.innerHTML = '';
@@ -730,6 +750,7 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':
 async function saveActiveUd(){
   const uds = $('activeInput').value.split(',').map(x=>parseInt(x.trim())).filter(x=>x>=1&&x<=20);
   await api('/ytbot/api/active_ud',{uds});
+  _activeLoaded = false;
   await refresh();
 }
 
@@ -738,6 +759,7 @@ async function addLinks(){
   if(!urls.length) return;
   await api('/ytbot/api/stok',{ud:selectedUd, urls});
   $('newLinks').value='';
+  clearDirty('newLinks');
   await refresh();
 }
 
@@ -755,11 +777,13 @@ async function deleteAllLinks(){
 async function saveSettings(){
   const hashtags = $('hashtags').value.split(',').map(x=>x.trim()).filter(Boolean);
   await api('/ytbot/api/settings',{deskripsi:$('deskripsi').value, interval:$('interval').value, hashtags, watermark:$('watermark').checked});
+  clearAllDirty();
   await refresh();
 }
 
 async function saveSchedule(){
   await api('/ytbot/api/schedule',{ud:selectedUd, tanggal:$('schedTanggal').value, jam:$('schedJam').value, menit:$('schedMenit').value});
+  clearAllDirty();
   await refresh();
 }
 
@@ -804,7 +828,7 @@ refresh();
 
 @app.route("/")
 def index():
-    return render_template_string(YT_INDEX_HTML)
+    return Response(YT_INDEX_HTML, mimetype='text/html')
 
 @app.route("/api/status")
 def api_status():

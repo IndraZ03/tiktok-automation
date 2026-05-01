@@ -634,6 +634,16 @@ active_gen_tasks = {}   # uid -> {"stop": Event, "thread": Thread}
 def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_name, stop_event):
     """Multi-browser generation loop using grok_autoV2.js."""
 
+    log_lines = []
+    log_lock = threading.Lock()
+    
+    def log_fn(msg):
+        with log_lock:
+            log_lines.append(msg)
+            if len(log_lines) > 20:
+                log_lines.pop(0)
+        logger.info(f"[{uid}] {msg}")
+
     def send(text):
         asyncio.run_coroutine_threadsafe(
             bot.send_message(chat_id, text, parse_mode=ParseMode.HTML), main_loop)
@@ -718,8 +728,6 @@ def _generation_loop(uid, chat_id, bot, main_loop, folder_name, count, prompt_na
     )
 
     # ── Live log message ──
-    log_lines = []
-    log_lock = threading.Lock()
     log_done = threading.Event()
     generated_total = [0]
     failed_total = [0]

@@ -1880,6 +1880,7 @@ let state = null;
 let selectedUd = 1;
 let imagineFiles = [];
 const $ = (id) => document.getElementById(id);
+let _activeLoaded = false;
 
 function tagText(tag) {
   return tag === 'success' ? 'OK' : tag === 'error' ? 'ERR' : tag === 'warn' ? 'WARN' : 'INFO';
@@ -2064,8 +2065,11 @@ function render() {
   const running = d.running.generate || d.running.upload || d.running.pipeline;
   $('runPill').className = running ? 'pill run' : 'pill';
   $('runPill').textContent = running ? 'running' : 'idle';
-  $('activeInput').value = state.active_uds.join(',');
-  if ($('autoSwitch').checked !== state.auto_running) {
+  if (!_activeLoaded) {
+    $('activeInput').value = state.active_uds.join(',');
+    _activeLoaded = true;
+  }
+  if (!document.activeElement || document.activeElement.id !== 'autoSwitch') {
     $('autoSwitch').checked = state.auto_running;
   }
   if (window.lastRenderedUd !== selectedUd) {
@@ -2112,13 +2116,16 @@ function renderImagineState() {
   $('imagineDownloaded').textContent = `${im.files_downloaded || 0}/${im.files_total || 0}`;
   $('imagineRunPill').className = im.running ? 'pill run' : 'pill';
   $('imagineRunPill').textContent = im.running ? 'running' : 'idle';
-  optionList($('imagineFolder'), state.bahan_folders || [], im.folder || '', 'Pilih bahan');
-  optionList($('imaginePrompt'), state.prompts || [], im.prompt || '', 'Pilih prompt');
-  $('imagineMode').value = settings.gen_mode || 'Video';
-  $('imagineResolution').value = settings.resolution || '720p';
-  $('imagineDuration').value = settings.duration || '10s';
-  $('imagineAspect').value = settings.aspect_ratio || '9:16';
-  $('imagineMerge').value = String(settings.merge_duration || 20);
+  if (!window.imagineRendered) {
+    optionList($('imagineFolder'), state.bahan_folders || [], im.folder || '', 'Pilih bahan');
+    optionList($('imaginePrompt'), state.prompts || [], im.prompt || '', 'Pilih prompt');
+    $('imagineMode').value = settings.gen_mode || 'Video';
+    $('imagineResolution').value = settings.resolution || '720p';
+    $('imagineDuration').value = settings.duration || '10s';
+    $('imagineAspect').value = settings.aspect_ratio || '9:16';
+    $('imagineMerge').value = String(settings.merge_duration || 20);
+    window.imagineRendered = true;
+  }
   const bs = im.browser_states || {};
   const keys = Object.keys(bs).sort((a,b)=>Number(a)-Number(b));
   $('imagineBrowsers').innerHTML = keys.length ? keys.map(k => {
@@ -2174,6 +2181,7 @@ async function saveConfig() {
 
 async function saveActive() {
   await api('/api/active_ud', {uds: $('activeInput').value});
+  _activeLoaded = false;
   await refresh();
 }
 
@@ -2353,13 +2361,15 @@ if __name__ == "__main__":
     print(f"Grok TikTok Web Dashboard running on http://localhost:{PORT}")
     try:
         from werkzeug.middleware.dispatcher import DispatcherMiddleware
+        from werkzeug.middleware.proxy_fix import ProxyFix
         from werkzeug.serving import run_simple
         from yt_web_server import app as yt_app, TEMP_DIR, FINAL_DIR
         os.makedirs(TEMP_DIR, exist_ok=True)
         os.makedirs(FINAL_DIR, exist_ok=True)
         application = DispatcherMiddleware(app, {'/ytbot': yt_app})
-        print(f"✅ YT Bot berhasil dipasang di http://localhost:{PORT}/ytbot")
+        application = ProxyFix(application, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+        print(f"[OK] YT Bot berhasil dipasang di http://localhost:{PORT}/ytbot")
         run_simple(HOST, PORT, application, use_reloader=False, threaded=True)
     except Exception as e:
-        print(f"⚠️ Peringatan: Tidak dapat memuat yt_web_server: {e}. Menjalankan GTT secara standalone.")
+        print(f"[WARN] Peringatan: Tidak dapat memuat yt_web_server: {e}. Menjalankan GTT secara standalone.")
         app.run(host=HOST, port=PORT, debug=False, threaded=True)
