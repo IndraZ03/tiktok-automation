@@ -5,10 +5,10 @@ Serves index.html and exposes REST APIs for managing yt_bot_v2.py
 import os, sys, json, re, time, threading, shutil, subprocess, traceback
 from datetime import datetime, timedelta
 from collections import deque
-from flask import Flask, jsonify, request, send_from_directory, Response, render_template_string
+from flask import Flask, jsonify, request, send_from_directory, Response
 
 # ── Reuse configs & helpers from yt_bot_v2 ──
-APP_DIR = r"c:\indra\ternak_dracin"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 TEMP_DIR = os.path.join(APP_DIR, "yt_temp")
 FINAL_DIR = os.path.join(APP_DIR, "video_yt")
@@ -32,13 +32,16 @@ TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload"
 def _find_bin(name):
     found = shutil.which(name)
     if found: return found
+    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
     for c in [os.path.expanduser(rf"~\AppData\Local\Microsoft\WinGet\Links\{name}.exe"),
-              rf"C:\ffmpeg\bin\{name}.exe", os.path.join(APP_DIR, f"{name}.exe")]:
+              rf"C:\ffmpeg\bin\{name}.exe", os.path.join(APP_DIR, f"{name}.exe"),
+              os.path.join(scripts_dir, f"{name}.exe")]:
         if os.path.isfile(c): return c
     return name
 
 FFPROBE_PATH = _find_bin("ffprobe")
 FFMPEG_PATH = _find_bin("ffmpeg")
+YTDLP_PATH = _find_bin("yt-dlp")
 
 TARGET_W, TARGET_H = 1080, 1920
 WATERMARK_WIDTH_PCT = 25
@@ -185,7 +188,7 @@ def split_and_process_sync(input_file, output_dir, title, logo_path, log_fn=None
 def download_video_sync(url, temp_dir, log_fn=None):
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-    cmd = ["yt-dlp","--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [YTDLP_PATH,"--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
            "--merge-output-format","mp4","-o",output_template,"--newline","--no-color",
            "--print","after_move:filepath",url]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -207,27 +210,21 @@ def download_video_sync(url, temp_dir, log_fn=None):
     return filepath, title
 
 # ═══════════════════════════════════════════════════════════
-#  LOG SYSTEM — SSE based
+#  LOG SYSTEM — Polling based
 # ═══════════════════════════════════════════════════════════
 MAX_LOG_LINES = 200
 _log_buffer = deque(maxlen=MAX_LOG_LINES)
-_log_subscribers = []  # list of queues
 _log_lock = threading.Lock()
+_log_counter = 0
 
 def _web_log(msg, tag=None):
+    global _log_counter
     ts = datetime.now().strftime("%H:%M:%S")
     icon = {"success":"✅","error":"❌","warn":"⚠️","info":"ℹ️"}.get(tag, "▪️")
-    entry = {"ts": ts, "icon": icon, "msg": msg, "tag": tag or ""}
     with _log_lock:
+        _log_counter += 1
+        entry = {"id": _log_counter, "ts": ts, "icon": icon, "msg": msg, "tag": tag or ""}
         _log_buffer.append(entry)
-        dead = []
-        for q in _log_subscribers:
-            try:
-                q.append(entry)
-            except:
-                dead.append(q)
-        for d in dead:
-            _log_subscribers.remove(d)
 
 # ═══════════════════════════════════════════════════════════
 #  FULL AUTO ENGINE (same logic as yt_bot_v2.py _daemon)
@@ -255,7 +252,7 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
     url = links[0]
     # cek folder sudah ada
     try:
-        result = subprocess.run(["yt-dlp","--no-playlist","--print","title",url],
+        result = subprocess.run([YTDLP_PATH,"--no-playlist","--print","title",url],
             capture_output=True, text=True, timeout=30)
         if result.returncode == 0 and result.stdout.strip():
             pre_title = sanitize_filename(result.stdout.strip())
@@ -431,7 +428,7 @@ def _upload_batch_web(log_fn, stop_evt, ud_num, video_files):
     log_fn(f"🎉 [UD {ud_num}] Batch selesai! {uploaded}/{total}", "success")
     return uploaded, total
 
-def _full_auto_daemon(stop_evt):
+def _full_auto_daemon_logic(stop_evt):
     log = _web_log
     active = load_active_ud()
     log(f"🤖 Full Auto dimulai! Active UD: {', '.join(str(x) for x in active)}", "success")
@@ -473,12 +470,20 @@ def _full_auto_daemon(stop_evt):
             continue
         candidates.sort(key=lambda x: x[0])
         trigger_dt, ud_num, has_pending = candidates[0]
-        log(f"🎯 Terdekat: UD {ud_num} — {trigger_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+        
+        sched_info = "\n".join(
+            f"  {'➡️' if c[1]==ud_num else '  '} UD {c[1]}: "
+            f"{c[0].strftime('%Y-%m-%d %H:%M')}"
+            f"{' (sisa video)' if c[2] else ''}"
+            for c in candidates
+        )
+        log(f"📅 Jadwal UD:\n{sched_info}\n\n🎯 Terdekat: UD {ud_num} — {trigger_dt.strftime('%Y-%m-%d %H:%M')}", "info")
+
         # Tunggu jadwal
         now = datetime.now()
         wait_sec = (trigger_dt - now).total_seconds()
         if wait_sec > 0:
-            log(f"⏳ UD {ud_num}: Menunggu {int(wait_sec//60)} menit...", "info")
+            log(f"⏳ UD {ud_num}: Menunggu jadwal ({int(wait_sec//60)} menit lagi)", "info")
             elapsed = 0
             while elapsed < wait_sec and not stop_evt.is_set():
                 time.sleep(min(30, wait_sec - elapsed)); elapsed += 30
@@ -509,6 +514,17 @@ def _full_auto_daemon(stop_evt):
             time.sleep(10)
     log("⏹ Full Auto dihentikan.", "warn")
     _auto_state["running"] = False
+
+def _full_auto_daemon(stop_evt):
+    try:
+        _full_auto_daemon_logic(stop_evt)
+    except Exception as e:
+        import traceback
+        _web_log(f"🔥 FATAL ERROR di daemon: {e}", "error")
+        _web_log(f"Details: {traceback.format_exc()}", "error")
+        print(f"FATAL ERROR di daemon:\n{traceback.format_exc()}")
+    finally:
+        _auto_state["running"] = False
 
 # ═══════════════════════════════════════════════════════════
 #  FLASK APP
@@ -954,29 +970,12 @@ def api_auto_stop():
     _auto_state["running"] = False
     return jsonify({"ok": True})
 
-@app.route("/api/logs")
-def api_logs_sse():
-    def generate():
-        q = deque(maxlen=100)
-        with _log_lock:
-            # send existing logs first
-            for entry in _log_buffer:
-                yield f"data: {json.dumps(entry)}\n\n"
-            _log_subscribers.append(q)
-        try:
-            while True:
-                if q:
-                    entry = q.popleft()
-                    yield f"data: {json.dumps(entry)}\n\n"
-                else:
-                    time.sleep(0.5)
-                    yield ": keepalive\n\n"
-        except GeneratorExit:
-            with _log_lock:
-                if q in _log_subscribers:
-                    _log_subscribers.remove(q)
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+@app.route("/api/logs_poll")
+def api_logs_poll():
+    last_id = int(request.args.get("last_id", 0))
+    with _log_lock:
+        new_logs = [e for e in _log_buffer if e.get("id", 0) > last_id]
+        return jsonify(new_logs)
 
 @app.route("/api/folder/delete", methods=["POST"])
 def api_delete_folder():
