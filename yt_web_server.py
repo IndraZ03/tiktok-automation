@@ -8,7 +8,7 @@ from collections import deque
 from flask import Flask, jsonify, request, send_from_directory, Response
 
 # ── Reuse configs & helpers from yt_bot_v2 ──
-APP_DIR = r"C:\indra\ternak_dracin"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 TEMP_DIR = os.path.join(APP_DIR, "yt_temp")
 FINAL_DIR = os.path.join(APP_DIR, "video_yt")

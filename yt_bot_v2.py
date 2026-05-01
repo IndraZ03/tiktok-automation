@@ -19,7 +19,7 @@ except ImportError:
     GDRIVE_OK = False
 
 # ── Import TikTok upload functions ──
-sys.path.insert(0, r"c:\indra\ternak_dracin")
+sys.path.insert(0, r"c:\tiktok_automation")
 from tiktok_gui import (
     open_chrome_debug, connect_selenium,
     do_upload_file, do_post_video
@@ -253,10 +253,14 @@ MAX_LOG_LINES = 25
 
 def make_log_fn(uid):
     if uid not in log_buffers: log_buffers[uid] = []
-    def log_fn(msg, tag=None):
+    def log_fn(msg, tag=None, replace_last=False):
         ts = datetime.now().strftime("%H:%M:%S")
-        icon = {"success":"✅","error":"❌","warn":"⚠️","info":"ℹ️"}.get(tag, "▪️")
-        log_buffers[uid].append(f"<code>[{ts}]</code> {icon} {msg}")
+        icon = {"success":"✅","error":"❌","warn":"⚠️","info":"ℹ️","progress":"🔄"}.get(tag, "▪️")
+        line = f"<code>[{ts}]</code> {icon} {msg}"
+        if replace_last and log_buffers[uid] and tag == "progress" and "🔄" in log_buffers[uid][-1]:
+            log_buffers[uid][-1] = line
+        else:
+            log_buffers[uid].append(line)
         if len(log_buffers[uid]) > MAX_LOG_LINES:
             log_buffers[uid] = log_buffers[uid][-MAX_LOG_LINES:]
     return log_fn
@@ -360,7 +364,7 @@ def build_progress_message(title, stages):
 async def download_video(url, temp_dir, progress_callback=None):
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-    cmd = [YTDLP_PATH,"--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [YTDLP_PATH,"--extractor-args","youtube:player_client=android","--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
            "--merge-output-format","mp4","-o",output_template,"--newline","--no-color",
            "--print","after_move:filepath",url]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -395,16 +399,21 @@ def download_video_sync(url, temp_dir, log_fn=None):
     """Synchronous download for use in threads."""
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-    cmd = [YTDLP_PATH,"--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [YTDLP_PATH,"--extractor-args","youtube:player_client=android","--no-playlist","-f","bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
            "--merge-output-format","mp4","-o",output_template,"--newline","--no-color",
            "--print","after_move:filepath",url]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     filepath = None
+    last_progress = -10
     for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace").strip()
         pct_match = re.search(r'\[download\]\s+([\d.]+)%', line)
         if pct_match and log_fn:
-            log_fn(f"Download: {float(pct_match.group(1)):.0f}%", "info")
+            pct = float(pct_match.group(1))
+            if pct - last_progress >= 5 or pct >= 100:
+                bar = progress_bar(pct, width=12)
+                log_fn(f"Download: {bar} {pct:.0f}%", "progress", replace_last=True)
+                last_progress = pct
         if line and not line.startswith("[") and not line.startswith("Deleting") and os.path.isfile(line):
             filepath = line
     proc.wait()
@@ -1017,7 +1026,7 @@ def _download_and_split_to_final(ud_num, log_fn, stop_evt):
     # ── Cek apakah folder sudah ada (hindari download ulang saat restart) ──
     try:
         result = subprocess.run(
-            [YTDLP_PATH, "--no-playlist", "--print", "title", url],
+            [YTDLP_PATH, "--extractor-args", "youtube:player_client=android", "--no-playlist", "--print", "title", url],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0 and result.stdout.strip():
